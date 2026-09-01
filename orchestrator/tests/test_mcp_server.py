@@ -433,14 +433,18 @@ class TestBuildResumeCommand:
         assert cmd is None
 
     def test_type_aware_validation_blocks_approve_on_ask_human(self):
-        """approve sent to ask_human interrupt should be remapped to safe default.
+        """approve sent to ask_human interrupt must be rejected, not remapped.
 
         This is the core escape: when block_actions sends approve to an
         ask_human interrupt, route_after_human defaults to increment_attempt,
         causing silent re-execution.  The fix validates action against the
-        interrupt's supported_actions and remaps to a safe default.
+        interrupt's supported_actions and rejects an unsupported one -- a
+        remap to supported_actions[0] could invert the caller's intent.
         """
-        from orchestrator.mcp_server import _build_resume_command
+        from orchestrator.mcp_server import (
+            UnsupportedResumeAction,
+            _build_resume_command,
+        )
 
         snapshot = _mock_state_snapshot([
             ("int-1", {
@@ -450,14 +454,40 @@ class TestBuildResumeCommand:
             }),
         ])
         block_actions = json.dumps({"scrambler": "approve"})
-        cmd = _build_resume_command(snapshot, {}, "approve", "", "", block_actions)
+        with pytest.raises(UnsupportedResumeAction) as excinfo:
+            _build_resume_command(snapshot, {}, "approve", "", "", block_actions)
 
-        # After the fix: approve should be remapped, not sent to ask_human
-        # Single interrupt with block_actions: resume is a flat dict with "action" key
-        action_sent = cmd.resume.get("action", "")
-        assert action_sent != "approve", (
-            "approve must not be sent to a human_intervention_needed interrupt"
+        assert excinfo.value.block_name == "scrambler"
+        assert "retry" in excinfo.value.supported
+
+    def test_unsupported_global_action_not_remapped_for_other_interrupt(self):
+        """A heterogeneous parked set must not silently rewrite one block.
+
+        Block A supports skip/abort, block B does not support skip: the
+        global 'skip' used to become B's supported_actions[0] ('approve').
+        """
+        from orchestrator.mcp_server import (
+            UnsupportedResumeAction,
+            _build_resume_command,
         )
+
+        snapshot = _mock_state_snapshot([
+            ("int-1", {
+                "type": "human_intervention_needed",
+                "block_name": "scrambler",
+                "supported_actions": ["retry", "skip", "abort"],
+            }),
+            ("int-2", {
+                "type": "uarch_integration_review",
+                "block_name": "encoder",
+                "supported_actions": ["approve", "revise", "abort"],
+            }),
+        ])
+        with pytest.raises(UnsupportedResumeAction) as excinfo:
+            _build_resume_command(snapshot, {}, "skip", "", "", "")
+
+        assert excinfo.value.block_name == "encoder"
+        assert excinfo.value.action == "skip"
 
     def test_type_aware_validation_allows_valid_action(self):
         """skip is valid for both uarch_spec_review and ask_human."""
@@ -1641,3 +1671,128 @@ class TestMergeBlockIntoPipelineCheckpoint:
         ok = await mcp._merge_block_into_pipeline_checkpoint({"success": True})
         assert ok is False
         mcp._pipeline.graph.aupdate_state.assert_not_called()
+
+
+@pytest.mark.mcp
+class TestMergeBlockIntoBackendCheckpoint:
+    """The backend completed_blocks channel is operator.add too, so the merge
+    must APPEND one result -- writing the whole list back duplicated every
+    entry and left a stale result winning last-wins dedup."""
+
+    @pytest.mark.asyncio
+    async def test_appends_single_authoritative_result(self, reset_mcp_state):
+        import orchestrator.mcp_server as mcp
+
+        mcp._backend.thread_id = "test-backend-merge"
+        snapshot = MagicMock()
+        snapshot.values = {"completed_blocks": [
+            {"name": "A", "success": True},
+            {"name": "B", "success": False},
+            {"name": "A", "success": False},
+        ]}
+        mcp._backend.graph = MagicMock()
+        mcp._backend.graph.aget_state = AsyncMock(return_value=snapshot)
+        captured = {}
+
+        async def _aupdate(config, values, **kw):
+            captured["values"] = values
+            captured["kw"] = kw
+        mcp._backend.graph.aupdate_state = AsyncMock(side_effect=_aupdate)
+
+        new_result = {"name": "A", "success": True, "pnr_done": True}
+        ok = await mcp._merge_block_into_backend_checkpoint(new_result)
+
+        assert ok is True
+        assert captured["values"]["completed_blocks"] == [new_result]
+        assert captured["kw"]["as_node"] == "advance_block"
+
+
+@pytest.mark.mcp
+class TestMergeStepResultIntoPipelineCheckpoint:
+    """run_step verifies ONE step, so it must not assert whole-block success."""
+
+    def _wire(self, mcp, completed):
+        snapshot = MagicMock()
+        snapshot.values = {"completed_blocks": completed}
+        mcp._pipeline.thread_id = "test-step-merge"
+        mcp._pipeline.graph = MagicMock()
+        mcp._pipeline.graph.aget_state = AsyncMock(return_value=snapshot)
+        captured = {}
+
+        async def _aupdate(config, values, **kw):
+            captured["values"] = values
+        mcp._pipeline.graph.aupdate_state = AsyncMock(side_effect=_aupdate)
+        return captured
+
+    @pytest.mark.asyncio
+    async def test_clean_lint_does_not_pass_a_sim_failed_block(self, reset_mcp_state):
+        import orchestrator.mcp_server as mcp
+
+        captured = self._wire(mcp, [
+            {"name": "scrambler", "success": False,
+             "sim_passed": False, "synth_success": False},
+        ])
+        ok = await mcp._merge_step_result_into_pipeline_checkpoint(
+            "scrambler", {"lint_clean": True},
+        )
+        assert ok is True
+        entry = captured["values"]["completed_blocks"][0]
+        assert entry["lint_clean"] is True
+        assert entry["success"] is False
+
+    @pytest.mark.asyncio
+    async def test_synth_step_does_not_fabricate_sim_passed(self, reset_mcp_state):
+        import orchestrator.mcp_server as mcp
+
+        captured = self._wire(mcp, [
+            {"name": "scrambler", "success": False,
+             "sim_passed": False, "synth_success": False},
+        ])
+        await mcp._merge_step_result_into_pipeline_checkpoint(
+            "scrambler", {"synth_success": True, "gate_count": 42},
+        )
+        entry = captured["values"]["completed_blocks"][0]
+        assert entry.get("sim_passed") is False
+        assert entry["success"] is False
+
+    @pytest.mark.asyncio
+    async def test_prior_pass_is_never_downgraded(self, reset_mcp_state):
+        import orchestrator.mcp_server as mcp
+
+        captured = self._wire(mcp, [
+            {"name": "scrambler", "success": True, "synth_success": True},
+        ])
+        await mcp._merge_step_result_into_pipeline_checkpoint(
+            "scrambler", {"lint_clean": True},
+        )
+        entry = captured["values"]["completed_blocks"][0]
+        assert entry["success"] is True
+
+
+@pytest.mark.mcp
+class TestMarkBlockPassed:
+    """as_node must name a PARENT-graph node -- 'block_done' lives only in the
+    block subgraph and LangGraph rejects it with InvalidUpdateError."""
+
+    @pytest.mark.asyncio
+    async def test_updates_state_as_process_block(self, reset_mcp_state):
+        import orchestrator.mcp_server as mcp
+
+        mcp._pipeline.thread_id = "test-mark"
+        snapshot = MagicMock()
+        snapshot.values = {"completed_blocks": []}
+        mcp._pipeline.graph = MagicMock()
+        mcp._pipeline.graph.aget_state = AsyncMock(return_value=snapshot)
+        captured = {}
+
+        async def _aupdate(config, values, **kw):
+            captured["values"] = values
+            captured["kw"] = kw
+        mcp._pipeline.graph.aupdate_state = AsyncMock(side_effect=_aupdate)
+
+        with patch.object(mcp._pipeline, "ensure_graph", new_callable=AsyncMock):
+            result = json.loads(await mcp.mark_block_passed("scrambler"))
+
+        assert result["status"] == "ok"
+        assert captured["kw"]["as_node"] == "process_block"
+        assert captured["values"]["completed_blocks"][0]["success"] is True

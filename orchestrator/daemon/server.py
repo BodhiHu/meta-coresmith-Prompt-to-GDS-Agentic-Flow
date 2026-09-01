@@ -45,6 +45,11 @@ _PROJECT_ROOT = os.environ.get(
 )
 os.environ["CORESMITH_PROJECT_ROOT"] = _PROJECT_ROOT
 
+# The blocks override that was in the daemon's environment at startup. A
+# /run/start with blocks_file sets CORESMITH_BLOCKS_FILE process-wide; a later
+# run without blocks_file must fall back to this, not inherit the stale one.
+_ENV_BLOCKS_FILE = os.environ.get("CORESMITH_BLOCKS_FILE")
+
 # A-Fix 1: seed profile flag defaults BEFORE importing graph code -- the
 # pipeline builder reads gate-enable helpers (e.g. block_goldens_enabled) at
 # build time, so the profile must be applied first.
@@ -1233,6 +1238,10 @@ def _load_block_queue(blocks_file: str) -> list[dict]:
         if not bf_path.exists():
             raise HTTPException(400, f"blocks_file not found: {bf_path}")
         os.environ["CORESMITH_BLOCKS_FILE"] = str(bf_path)
+    elif _ENV_BLOCKS_FILE:
+        os.environ["CORESMITH_BLOCKS_FILE"] = _ENV_BLOCKS_FILE
+    else:
+        os.environ.pop("CORESMITH_BLOCKS_FILE", None)
 
     block_queue: list[dict] = []
     specs_path = Path(_PROJECT_ROOT) / ".coresmith" / "block_specs.json"
