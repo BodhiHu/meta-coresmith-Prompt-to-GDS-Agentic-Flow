@@ -79,22 +79,21 @@ _UNITS: dict[str, tuple[str, float]] = {
     "secs": ("time", 1e9),
     "second": ("time", 1e9),
     "seconds": ("time", 1e9),
-    # data rate (bit-based only -- byte-based rates are ambiguous below)
+    # data rate (unambiguously bit-based spellings only -- "MB/s" and friends
+    # are matched case-insensitively and read as bytes at least as often as
+    # bits, so they are ambiguous below)
     "bps": ("data_rate", 1.0),
     "bit/s": ("data_rate", 1.0),
     "bits/s": ("data_rate", 1.0),
     "kbps": ("data_rate", 1e3),
     "kbit/s": ("data_rate", 1e3),
     "kbits/s": ("data_rate", 1e3),
-    "kb/s": ("data_rate", 1e3),
     "mbps": ("data_rate", 1e6),
     "mbit/s": ("data_rate", 1e6),
     "mbits/s": ("data_rate", 1e6),
-    "mb/s": ("data_rate", 1e6),
     "gbps": ("data_rate", 1e9),
     "gbit/s": ("data_rate", 1e9),
     "gbits/s": ("data_rate", 1e9),
-    "gb/s": ("data_rate", 1e9),
     # data size (binary prefixes only -- KB/MB/GB are ambiguous below)
     "bit": ("data_size", 1.0),
     "bits": ("data_size", 1.0),
@@ -114,7 +113,8 @@ _UNITS: dict[str, tuple[str, float]] = {
 _AMBIGUOUS_UNITS = frozenset({
     "kb", "mb", "gb", "tb",
     "kbyte", "kbytes", "mbyte", "mbytes", "gbyte", "gbytes",
-    "b/s", "kb/sec", "mb/sec", "byte/s", "bytes/s",
+    "b/s", "kb/s", "mb/s", "gb/s",
+    "kb/sec", "mb/sec", "gb/sec", "byte/s", "bytes/s",
 })
 
 # Longest-first alternation so "mbit/s" wins over "mbit", "khz" over "hz".

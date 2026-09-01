@@ -230,7 +230,20 @@ def external_input_tokens(project_root: str) -> set[str] | None:
         if not isinstance(b, dict):
             continue
         bname = b.get("name")
-        for iname, spec in (b.get("interfaces") or {}).items():
+        ifaces = b.get("interfaces")
+        # Schema variants: a {port: spec} map or a list of {name, ...} entries.
+        if isinstance(ifaces, dict):
+            iface_items = list(ifaces.items())
+        elif isinstance(ifaces, list):
+            iface_items = [
+                (it.get("name", ""), it) if isinstance(it, dict) else (it, None)
+                for it in ifaces
+            ]
+        else:
+            iface_items = []
+        for iname, spec in iface_items:
+            if not iname:
+                continue
             if _iface_is_input(iname, spec) is not True:
                 continue
             found_any = True
@@ -333,7 +346,12 @@ def run_stimulus_contract_guard(project_root: str) -> list[dict]:
     # ---- Check 2: STIMULUS-FIELD COVERAGE ---------------------------------
     config_fields = _stimulus_config_fields(stimulus)
     if config_fields:
-        signal_tokens = external_input_tokens(project_root)
+        try:
+            signal_tokens = external_input_tokens(project_root)
+        except Exception:  # noqa: BLE001
+            # Unrecognised block-diagram shape -> skip check 2 rather than lose
+            # the (possibly error-severity) check-1 violations collected above.
+            signal_tokens = None
         if signal_tokens is not None:
             for field in config_fields:
                 if not _field_covered(field, signal_tokens):

@@ -157,12 +157,26 @@ def _count_block_io_pads(block_diagram: dict) -> tuple[int, list[dict]]:
     details: list[dict] = []
 
     for block in blocks:
+        if not isinstance(block, dict):
+            continue
         name = block.get("name", "unknown")
         interfaces = block.get("interfaces", {})
         block_pads = 0
 
-        for port_name, port_info in interfaces.items():
-            if port_name in ("clk", "rst", "rst_n"):
+        # The block-diagram generator emits `interfaces` either as a
+        # {port_name: info} map or as a list of {name, width} entries.
+        if isinstance(interfaces, dict):
+            iface_items = list(interfaces.items())
+        elif isinstance(interfaces, list):
+            iface_items = [
+                (it.get("name", ""), it) if isinstance(it, dict) else (it, 1)
+                for it in interfaces
+            ]
+        else:
+            iface_items = []
+
+        for port_name, port_info in iface_items:
+            if not port_name or port_name in ("clk", "rst", "rst_n"):
                 continue
             if (name, port_name) in connected_ports:
                 continue
@@ -1519,11 +1533,16 @@ async def check_constraints(
 
     with tracer.start_as_current_span("check_constraints") as span:
         shuttle_enabled = _shuttle_constraints_enabled(requirements, ers_spec)
-        shuttle_violations = (
-            _check_shuttle_constraints(block_diagram, ers_spec)
-            if shuttle_enabled
-            else []
-        )
+        # Fail-open like the other deterministic checks below: a shape the
+        # block diagram happens to emit must never break the whole pass.
+        try:
+            shuttle_violations = (
+                _check_shuttle_constraints(block_diagram, ers_spec)
+                if shuttle_enabled
+                else []
+            )
+        except Exception:  # noqa: BLE001
+            shuttle_violations = []
 
         # Tier-2 arch-time die-area rollup (deterministic; env-gated default ON;
         # no-ops without a resolvable die cap). Fail-open so a rollup error

@@ -289,6 +289,10 @@ def write_derate_ledger(
                 }
             )
         # replace any prior entry for the same block (idempotent re-runs)
+        prior = next(
+            (e for e in entries if isinstance(e, dict) and e.get("block") == block),
+            None,
+        )
         entries = [e for e in entries if isinstance(e, dict) and e.get("block") != block]
         entries.append(entry)
         doc["entries"] = entries
@@ -298,6 +302,12 @@ def write_derate_ledger(
         doc["integrated_escalate"] = bool(
             (not byte_exact) and fid is not None and fid.get("escalate")
         )
+        # A chip-lead sign-off approves ONE specific measured derate. Once a
+        # re-run records a different measurement the approval no longer covers
+        # it, so drop the flag and let read_derate_escalation park the
+        # interrupt again (an unchanged re-run stays suppressed).
+        if prior != entry:
+            doc.pop("integrated_signed_off", None)
         p.write_text(json.dumps(doc, indent=2, default=str), encoding="utf-8")
     except Exception as exc:  # noqa: BLE001
         logger.warning("fidelity gate: could not write derate ledger: %s", exc)

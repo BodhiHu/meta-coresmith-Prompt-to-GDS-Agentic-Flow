@@ -883,9 +883,14 @@ def _localize_affected_blocks(
     # any passing field exercised: a passing field's sub-chain is proven good,
     # so the diverging field's EXCLUSIVE tail is what is left to re-spec.
     exclusive = div_blocks - pass_blocks
-    affected = exclusive if exclusive else (div_blocks - (pass_blocks - div_blocks))
+    if not exclusive:
+        # Every block feeding the diverging field also fed a passing one, so by
+        # the rule above they are ALL proven-good -- the culprit is the
+        # composition glue, not any one block. Broadcast (honest, never
+        # false-precise) instead of re-spec'ing correct blocks.
+        return []
     # Keep deterministic block-diagram order (``order`` computed at function top).
-    return [n for n in order if n in affected]
+    return [n for n in order if n in exclusive]
 
 
 def _split_observed(observed: Any) -> tuple[Any, int | None]:
