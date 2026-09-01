@@ -1348,3 +1348,73 @@ class TestMaxAttemptsInSchema:
 
         assert not _at_retry_limit({"attempt": 5, "max_attempts": 8})
         assert _at_retry_limit({"attempt": 8, "max_attempts": 8})
+
+
+# ---------------------------------------------------------------------------
+# Regressions: block-diagram discovery, interface strictness, op scan, retry.
+# ---------------------------------------------------------------------------
+
+def test_discover_blocks_from_coresmith_block_diagram(tmp_path):
+    # the architecture graph writes the JSON to .coresmith/, not arch/.
+    cs = tmp_path / ".coresmith"
+    cs.mkdir()
+    (cs / "block_diagram.json").write_text(
+        '{"blocks": [{"name": "alpha", "interfaces": {"s_axis_in": {}}}]}'
+    )
+    assert mx.discover_blocks(str(tmp_path)) == ["alpha"]
+    bd = mx._read_block_diagram(str(tmp_path))
+    assert mx._expected_ports_for_block(bd, "alpha") == ["s_axis_in"]
+
+
+def test_discover_blocks_parses_generated_md_table(tmp_path):
+    arch = tmp_path / "arch"
+    arch.mkdir()
+    (arch / "block_diagram.md").write_text(
+        "# Block Diagram\n\n## Blocks\n\n"
+        "| Block | Description | Tier | Est. Gates |\n|---|---|---|---|\n"
+        "| alpha | a | 1 | 10 |\n| beta | b | 2 | 20 |\n\n"
+        "## Connections\n\n| From | To | Interface | Data Width |\n"
+        "|---|---|---|---|\n| alpha | beta | axis | 32 |\n"
+    )
+    # the document's own headings ("Block Diagram", "Connections") are not blocks.
+    assert mx.discover_blocks(str(tmp_path)) == ["alpha", "beta"]
+
+
+def test_interface_constraint_rejects_generic_prefix_param():
+    # a generic `s_axis` debug param must NOT satisfy the dropped interface.
+    missing = mx.check_interface_constraint(
+        ["clk", "rst", "s_axis"], ["s_axis_host_in"])
+    assert missing == ["s_axis_host_in"]
+    # nor may an unrelated param that merely starts with the port name.
+    assert mx.check_interface_constraint(["outer_ctl"], ["out"]) == ["out"]
+
+
+def test_arith_op_chains_skips_statement_operator_and_reads_continuations():
+    src = textwrap.dedent(
+        """
+        from amaranth import Module, Signal
+
+        def build(a, b, o, c):
+            m = Module()
+            m.d.comb += c.eq(a)
+            m.d.sync += [
+                o.eq(a * b),
+            ]
+            return m
+        """
+    )
+    chains = mx._arith_op_chains(src)
+    # the `+=` of the statement operator is not an adder; the mul on the
+    # continuation line (no `=` on it) IS collected.
+    assert chains == [["mul"]]
+
+
+def test_ask_human_retry_routes_back_to_build_models():
+    from langgraph.graph import END
+
+    edges = {(e.source, e.target)
+             for e in mx.build_microarch_graph().get_graph().edges}
+    assert ("ask_human", "build_models") in edges
+    assert mx.route_after_ask_human(
+        {"debug_action": "rebuild", "status": "running"}) == "build_models"
+    assert mx.route_after_ask_human({"status": "failed"}) is END

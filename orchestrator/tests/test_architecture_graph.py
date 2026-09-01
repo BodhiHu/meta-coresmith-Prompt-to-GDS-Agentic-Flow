@@ -263,6 +263,16 @@ class TestRouteAfterPRD:
         state = {}
         assert route_after_prd(state) == "Escalate PRD"
 
+    def test_questions_phase_wins_over_stale_prd_spec(self):
+        # REVISE_PRD re-entry: the PRD from the earlier pass is still in state,
+        # but this pass returned questions -- they MUST still be escalated.
+        state = {
+            "prd_phase": "questions",
+            "prd_spec": {"title": "stale PRD"},
+            "prd_questions": [{"id": "q1"}],
+        }
+        assert route_after_prd(state) == "Escalate PRD"
+
 
 class TestRouteAfterPRDEscalation:
     def test_continue_goes_to_gather_requirements(self):

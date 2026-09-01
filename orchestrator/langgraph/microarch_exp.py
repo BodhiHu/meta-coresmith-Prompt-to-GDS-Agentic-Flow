@@ -54,7 +54,8 @@ threads a PER-BLOCK codex session for resume across retries):
                                               .coresmith/microarch/<b>/constraints.json
                                               (disk-first memory) and routes:
                                               rebuild -> build_models,
-                                              ask_human -> ask_human (interrupt).
+                                              ask_human -> ask_human (interrupt;
+                                              a resumed `retry` -> build_models).
 
     Bounded retries (default max 4).
 
@@ -206,6 +207,42 @@ def _uarch_specs_dir(project_root: str) -> Path:
     return _arch_dir(project_root) / UARCH_SPECS_DIRNAME
 
 
+def _block_diagram_json_paths(project_root: str) -> list[Path]:
+    """Candidate structured block-diagram files, most authoritative first.
+
+    The architecture graph writes the JSON to ``.coresmith/block_diagram.json``
+    (arch/ gets only the Markdown rendering), so probing arch/ alone silently
+    disables clustering and the interface anti-cheat on every real run.
+    """
+    return [
+        _arch_dir(project_root) / "block_diagram.json",
+        Path(project_root) / ".coresmith" / "block_diagram.json",
+    ]
+
+
+def _parse_block_table(text: str) -> list[str]:
+    """Return block names from the ``## Blocks`` Markdown table (may be empty).
+
+    Matches the table _persist_block_diagram writes:
+    ``| Block | Description | Tier | Est. Gates |``.
+    """
+    names: list[str] = []
+    in_blocks = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            in_blocks = re.match(r"^#{1,4}\s+Blocks\s*$", stripped) is not None
+            continue
+        if not in_blocks or not stripped.startswith("|"):
+            continue
+        cell = stripped.strip("|").split("|")[0].strip().strip("`")
+        if cell.lower() == "block" or set(cell) <= {"-", ":", " "}:
+            continue  # header / separator row
+        if re.fullmatch(r"[A-Za-z_]\w*", cell):
+            names.append(cell)
+    return names
+
+
 # ---------------------------------------------------------------------------
 # Disk-first per-block constraint loop (mirrors the frontend
 # ``.coresmith/blocks/<b>/constraints.json`` accumulation, under microarch/).
@@ -336,7 +373,8 @@ def _read_target_clock_mhz(project_root: str) -> float:
 
 
 def discover_blocks(project_root: str) -> list[str]:
-    """Read the block list from arch/block_diagram.json | .md, else uArch specs.
+    """Read the block list from block_diagram.json | arch/block_diagram.md,
+    else uArch specs.
 
     Returns block names in declaration order. Never raises: an empty list means
     the graph will report ``status=error`` from build_models.
@@ -344,8 +382,9 @@ def discover_blocks(project_root: str) -> list[str]:
     arch = _arch_dir(project_root)
 
     # 1. block_diagram.json -- authoritative.
-    bd_json = arch / "block_diagram.json"
-    if bd_json.exists():
+    for bd_json in _block_diagram_json_paths(project_root):
+        if not bd_json.exists():
+            continue
         try:
             doc = json.loads(bd_json.read_text(encoding="utf-8"))
             blocks = doc.get("blocks") if isinstance(doc, dict) else None
@@ -360,12 +399,19 @@ def discover_blocks(project_root: str) -> list[str]:
         except (ValueError, OSError):
             pass
 
-    # 2. block_diagram.md -- parse block headings / a bullet list of names.
+    # 2. block_diagram.md -- parse the Blocks table, else per-block headings.
+    #    A heading only counts when it is a bare identifier, so the generated
+    #    document's own structure ("# Block Diagram", "## Connections") is not
+    #    mistaken for a block list.
     bd_md = arch / "block_diagram.md"
     if bd_md.exists():
         try:
             text = bd_md.read_text(encoding="utf-8")
-            names = re.findall(r"^#{1,4}\s+`?([a-zA-Z_][\w]*)`?", text, re.MULTILINE)
+            names = _parse_block_table(text)
+            if not names:
+                names = re.findall(
+                    r"^#{1,4}\s+`?([a-zA-Z_][\w]*)`?\s*$", text, re.MULTILINE
+                )
             if names:
                 # de-dup preserving order
                 seen: set[str] = set()
@@ -401,15 +447,17 @@ def _read_uarch_specs(project_root: str, blocks: list[str]) -> dict[str, str]:
 
 
 def _read_block_diagram(project_root: str) -> dict:
-    """Load arch/block_diagram.json as a dict (empty on any failure)."""
-    p = _arch_dir(project_root) / "block_diagram.json"
-    if not p.exists():
-        return {}
-    try:
-        doc = json.loads(p.read_text(encoding="utf-8"))
-        return doc if isinstance(doc, dict) else {}
-    except (ValueError, OSError):
-        return {}
+    """Load the structured block diagram as a dict (empty on any failure)."""
+    for p in _block_diagram_json_paths(project_root):
+        if not p.exists():
+            continue
+        try:
+            doc = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(doc, dict):
+                return doc
+        except (ValueError, OSError):
+            continue
+    return {}
 
 
 def _expected_ports_for_block(block_diagram: dict, block: str) -> list[str]:
@@ -752,7 +800,7 @@ def check_interface_constraint(
     """Deterministic anti-cheat: which expected interfaces has the model dropped?
 
     Compares a model's ``@block`` factory signature (its port/param names) to the
-    expected interfaces from ``arch/block_diagram.json``. An expected interface
+    expected interfaces from the block diagram. An expected interface
     is considered PRESENT when some factory param equals it or carries it as a
     prefix (``s_axis_in`` matched by ``s_axis_in_tdata``). Returns the list of
     MISSING expected interface names (empty == interface honoured). Clock/reset
@@ -765,12 +813,11 @@ def check_interface_constraint(
         pl = str(port).lower()
         if pl in _CLOCK_RESET_NAMES:
             continue
-        # present if an exact match OR a param starts with "<port>_" / contains it
-        hit = any(
-            p == pl or p.startswith(pl + "_") or p.startswith(pl)
-            or pl.startswith(p) and len(p) >= 3
-            for p in params
-        )
+        # present only on an exact match or a "<port>_" prefix -- a looser rule
+        # (bare startswith / reverse prefix) lets one generic param such as
+        # ``s_axis`` satisfy every ``s_axis_*`` interface at once, defeating the
+        # anti-cheat this check exists for.
+        hit = any(p == pl or p.startswith(pl + "_") for p in params)
         if not hit:
             missing.append(str(port))
     return missing
@@ -2296,6 +2343,74 @@ def _register_count(text: str, width: int) -> int:
     return len(targets) * max(1, width)
 
 
+def _arith_op_chains(text: str) -> list[list[str]]:
+    """Arithmetic op chains (one per hardware assignment) for the sizing DFG.
+
+    AST-based: hardware arithmetic lives in Amaranth ``<sig>.eq(<expr>)`` calls
+    and MyHDL ``<sig>.next = <expr>`` assignments. A raw line scan instead both
+    phantom-counts the ``+`` of every ``m.d.comb +=`` statement (pricing pure
+    wiring as datapath) and misses the continuation lines of the multi-line
+    ``m.d.sync += [ ... ]`` style (they carry no ``=``), so real mul/add chains
+    were never scheduled. Falls back to the token scan on a parse failure.
+    """
+    import ast as _ast
+
+    binops = {
+        _ast.Mult: "mul", _ast.Add: "add", _ast.Sub: "sub",
+        _ast.LShift: "shift", _ast.RShift: "shift",
+    }
+
+    def _regex_fallback() -> list[list[str]]:
+        out: list[list[str]] = []
+        for raw in (text or "").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            # strip the Amaranth statement operator so `m.d.comb +=` is not an add
+            line = re.sub(r"^m\.d\.\w+\s*\+=", "", line)
+            line_ops: list[str] = []
+            for pat, op in _ARITH_TOKENS:
+                line_ops.extend([op] * len(pat.findall(line)))
+            if line_ops:
+                out.append(line_ops)
+        return out
+
+    try:
+        tree = _ast.parse(text or "")
+    except SyntaxError:
+        return _regex_fallback()
+
+    def _ops(expr) -> list[str]:
+        out: list[str] = []
+        for n in _ast.walk(expr):
+            if isinstance(n, _ast.BinOp):
+                op = binops.get(type(n.op))
+                # a fully constant operand pair is Python-level folding, not a cell
+                if op and not (isinstance(n.left, _ast.Constant)
+                               and isinstance(n.right, _ast.Constant)):
+                    out.append(op)
+            elif isinstance(n, _ast.Compare):
+                out.extend(["cmp"] * len(n.ops))
+        return out
+
+    chains: list[list[str]] = []
+    for n in _ast.walk(tree):
+        if (isinstance(n, _ast.Call) and isinstance(n.func, _ast.Attribute)
+                and n.func.attr == "eq"):
+            chain: list[str] = []
+            for a in list(n.args) + [kw.value for kw in n.keywords]:
+                chain.extend(_ops(a))
+        elif (isinstance(n, _ast.Assign) and len(n.targets) == 1
+              and isinstance(n.targets[0], _ast.Attribute)
+              and n.targets[0].attr == "next"):
+            chain = _ops(n.value)
+        else:
+            continue
+        if chain:
+            chains.append(chain)
+    return chains
+
+
 def _size_one_model(
     model_path: str, block_name: str, target_mhz: float, spec_text: str = "",
 ) -> dict:
@@ -2338,22 +2453,9 @@ def _size_one_model(
     width = max(widths) if widths else 16
 
     # ---- DATAPATH DFG: collect ALL arithmetic ops (not just the worst line) ----
-    ops: list[str] = []
-    per_line_chains: list[list[str]] = []
-    for raw in text.splitlines():
-        line = raw.strip()
-        if line.startswith("#") or not line:
-            continue
-        if "=" not in line and "return" not in line:
-            continue
-        line_ops: list[str] = []
-        for pat, op in _ARITH_TOKENS:
-            line_ops.extend([op] * len(pat.findall(line)))
-        if line_ops:
-            per_line_chains.append(line_ops)
-            ops.extend(line_ops)
+    per_line_chains: list[list[str]] = _arith_op_chains(text)
 
-    # Build a DFG where each source-line's ops form a data-dependent chain (a
+    # Build a DFG where each assignment's ops form a data-dependent chain (a
     # realistic combinational cluster), all chains sharing the block's datapath.
     order = {"mul": 0, "add": 1, "sub": 2, "shift": 3, "cmp": 4}
     nodes: list[Node] = []
@@ -2617,6 +2719,18 @@ def route_after_diagnose(state: dict) -> str:
     return "build_models"
 
 
+def route_after_ask_human(state: dict) -> str:
+    """Resumed escalation: ``retry`` -> rebuild, anything else terminates.
+
+    Without this edge the advertised ``retry`` action was identical to
+    ``abort``: ask_human went straight to END and the runner normalised the
+    still-``running`` status to ``failed``.
+    """
+    if state.get("debug_action") == "rebuild" and state.get("status") == "running":
+        return "build_models"
+    return END
+
+
 # ---------------------------------------------------------------------------
 # ask_human: human-in-the-loop escalation (LangGraph interrupt)
 # ---------------------------------------------------------------------------
@@ -2661,8 +2775,13 @@ def ask_human_node(state: dict) -> dict:
         response, dict) else "abort"
 
     if action == "retry":
+        # Grant one more attempt: escalation usually happens with the budget
+        # already spent, and without it the resumed rebuild would be bounced
+        # straight back to END by the first gate's retry-limit check.
         return {"human_response": response, "status": "running",
-                "debug_action": "rebuild"}
+                "debug_action": "rebuild",
+                "max_attempts": int(
+                    state.get("max_attempts", DEFAULT_MAX_ATTEMPTS)) + 1}
     # relax_requirement / abort both terminate this experiment run
     return {"human_response": response, "status": "failed"}
 
@@ -2691,7 +2810,8 @@ def build_microarch_graph(checkpointer=None):
     Nodes: build_models -> lint_models -> verify_models -> size -> ppa_judge.
     ppa_judge: pass -> END, fail -> diagnose, escalate -> ask_human. Every gate
     short-circuits to diagnose; diagnose routes via route_after_diagnose
-    (rebuild -> build_models, ask_human -> ask_human).
+    (rebuild -> build_models, ask_human -> ask_human). ask_human resumed with
+    ``retry`` routes back to build_models, otherwise END.
     """
     graph = StateGraph(MicroarchState)
 
@@ -2729,8 +2849,11 @@ def build_microarch_graph(checkpointer=None):
         "diagnose", route_after_diagnose,
         {"build_models": "build_models", "ask_human": "ask_human"},
     )
-    # ask_human terminates the experiment (or the outer agent resumes with retry).
-    graph.add_edge("ask_human", END)
+    # ask_human: a resumed `retry` rebuilds, relax_requirement/abort end the run.
+    graph.add_conditional_edges(
+        "ask_human", route_after_ask_human,
+        {"build_models": "build_models", END: END},
+    )
 
     return graph.compile(checkpointer=checkpointer)
 
@@ -2792,7 +2915,10 @@ async def run_microarch_exp(
     for b in blocks:
         _reset_block_constraints(project_root, b)
 
-    graph = build_microarch_graph()
+    # A checkpointer is REQUIRED for ask_human's interrupt() to park (and be
+    # resumable) instead of erroring out of the run.
+    from langgraph.checkpoint.memory import MemorySaver
+    graph = build_microarch_graph(checkpointer=MemorySaver())
     init: MicroarchState = {
         "project_root": project_root,
         "blocks": blocks,
@@ -2811,7 +2937,10 @@ async def run_microarch_exp(
         "status": "running",
     }
     # Allow more supersteps than attempts (6 nodes/attempt + slack).
-    config = {"recursion_limit": max(30, max_attempts * 9)}
+    config = {
+        "recursion_limit": max(30, max_attempts * 9),
+        "configurable": {"thread_id": f"microarch-exp-{os.getpid()}"},
+    }
     final = await graph.ainvoke(init, config=config)
 
     # Final status normalisation: passed only when every gate AND the PPA judge

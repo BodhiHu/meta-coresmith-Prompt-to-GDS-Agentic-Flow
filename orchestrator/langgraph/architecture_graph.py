@@ -142,6 +142,7 @@ class ArchGraphState(TypedDict):
     # PRD (Product Requirements Document) -- "What functionality is needed?"
     prd_spec: dict | None       # Full PRD document (Phase 2 output)
     prd_questions: list | None  # Sizing questions (Phase 1 output)
+    prd_phase: str              # Phase of the LAST gather_prd call (routing)
     prd_answers: dict | None    # Architect answers used to draft the PRD
 
     # SAD (System Architecture Document) -- "How do we get there and why?"
@@ -814,6 +815,13 @@ def _persist_intermediate_state(state: dict, updates: dict) -> None:
 # Specialist nodes
 # ---------------------------------------------------------------------------
 
+# Marker for the PRD summary appended to `requirements`. A REVISE_PRD cycle
+# re-enters Gather Requirements with the previous summary still attached, so
+# the old section is stripped before the fresh one is appended (otherwise the
+# stale, superseded summaries keep feeding every downstream prompt).
+_PRD_SUMMARY_MARKER = "--- PRD SUMMARY ---"
+
+
 async def gather_requirements_node(state: ArchGraphState) -> dict:
     """Gather requirements via the PRD specialist.
 
@@ -883,17 +891,23 @@ async def gather_requirements_node(state: ArchGraphState) -> dict:
         phase = result.get("phase", "questions")
         span.set_attribute("prd_phase", phase)
 
-        update: dict = {"phase": "prd"}
+        # Surface the phase the specialist just returned so route_after_prd
+        # does not have to infer it from a stale prd_spec left by an earlier
+        # pass (REVISE_PRD re-entry).
+        update: dict = {"phase": "prd", "prd_phase": phase}
 
         if phase == "prd_complete":
             prd_doc = result.get("prd", {})
             span.set_attribute("prd_sections", len(prd_doc))
 
-            enriched_requirements = state["requirements"]
+            base_requirements = state["requirements"].split(
+                _PRD_SUMMARY_MARKER
+            )[0].rstrip()
+            enriched_requirements = base_requirements
             if prd_doc.get("summary"):
                 enriched_requirements = (
-                    f"{state['requirements']}\n\n"
-                    f"--- PRD SUMMARY ---\n{prd_doc['summary']}"
+                    f"{base_requirements}\n\n"
+                    f"{_PRD_SUMMARY_MARKER}\n{prd_doc['summary']}"
                 )
 
             update["prd_spec"] = result
@@ -1652,7 +1666,10 @@ async def doc_fix_node(state: ArchGraphState) -> dict:
             feedback = _feedback_for(by_doc["frd"])
             result = await generate_frd(
                 prd_spec=state.get("prd_spec", {}) or {},
-                sad_spec=state.get("sad_spec", {}) or {},
+                # Prefer the SAD this pass just regenerated -- deriving the FRD
+                # from the pre-repair SAD re-embeds the claim the SAD fix
+                # removed.
+                sad_spec=update.get("sad_spec") or state.get("sad_spec", {}) or {},
                 requirements=state["requirements"],
                 project_root=project_root,
                 constraint_feedback=feedback,
@@ -2500,8 +2517,11 @@ async def escalate_exhausted_node(state: ArchGraphState) -> dict:
 
 def route_after_prd(state: ArchGraphState) -> str:
     """Route after Gather Requirements: need user answers or PRD is complete."""
-    prd = state.get("prd_spec")
-    phase = "prd_complete" if prd else "questions"
+    phase = state.get("prd_phase")
+    if phase not in ("prd_complete", "questions"):
+        # Resumed/legacy state without an explicit phase: fall back to the
+        # presence of a PRD.
+        phase = "prd_complete" if state.get("prd_spec") else "questions"
 
     if phase == "prd_complete":
         target = "System Architecture"
