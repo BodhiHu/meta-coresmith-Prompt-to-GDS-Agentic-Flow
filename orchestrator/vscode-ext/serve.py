@@ -1478,7 +1478,7 @@ def _build_backend_blocks_from_events() -> list[dict]:
             if block not in blocks:
                 blocks[block] = {"name": block, "success": False}
             node = ev.get("node", "")
-            if node == "Run PnR" and ev.get("type") == "graph_node_exit":
+            if node == "Run PnR" and ev.get("event") == "graph_node_exit":
                 blocks[block].update({
                     "success": ev.get("success", False),
                     "design_area_um2": ev.get("design_area_um2", 0),
@@ -1487,7 +1487,7 @@ def _build_backend_blocks_from_events() -> list[dict]:
                     "tns_ns": ev.get("tns_ns", 0),
                     "total_power_mw": ev.get("total_power_mw", 0),
                 })
-            if node == "Advance Block" and ev.get("type") == "graph_node_exit":
+            if node == "Advance Block" and ev.get("event") == "graph_node_exit":
                 blocks[block]["success"] = ev.get("success", False)
     except OSError:
         pass
@@ -1557,7 +1557,13 @@ def get_pending_interrupts() -> dict:
         for line in events_file.read_text().splitlines():
             if not line.strip():
                 continue
-            e = json.loads(line)
+            try:
+                e = json.loads(line)
+            except json.JSONDecodeError:
+                # The daemon appends to this file concurrently: a torn last line
+                # must not blank every interrupt parsed before it (a parked HITL
+                # block would vanish from the UI). Same skip as the other parsers.
+                continue
             node = e.get("node")
             event_type = e.get("event", "")
             block = e.get("block", "")
@@ -1963,12 +1969,28 @@ class WebviewHandler(SimpleHTTPRequestHandler):
 
         self.send_error(404)
 
+    def _send_cors_header(self):
+        """Echo the request Origin only when it is THIS server's own origin.
+
+        A wildcard here let JavaScript on any page the developer happens to
+        visit read /api/artifacts (project RTL/specs) and /api/node_trajectory
+        (full LLM prompts + responses) off the loopback server -- binding to
+        127.0.0.1 does not help when the browser is the confused deputy. The
+        Surfer / fliplot iframes are served by this same server, so same-origin
+        is all they ever need.
+        """
+        origin = self.headers.get("Origin")
+        host = self.headers.get("Host") or ""
+        if origin and host and origin in (f"http://{host}", f"https://{host}"):
+            self.send_header("Access-Control-Allow-Origin", origin)
+        self.send_header("Vary", "Origin")
+
     def _json_response(self, data, status=200):
         body = json.dumps(data).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self._send_cors_header()
         self.end_headers()
         self.wfile.write(body)
 
@@ -2001,9 +2023,7 @@ class WebviewHandler(SimpleHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", mime)
         self.send_header("Content-Length", str(len(data)))
-        # Allow cross-origin fetches (Surfer / fliplot iframes need this to
-        # pull VCDs from /api/artifacts/).
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self._send_cors_header()
         self.end_headers()
         self.wfile.write(data)
 

@@ -676,6 +676,17 @@ def verify_chip(
     """
     t0 = time.monotonic()
     root = Path(pr)
+    if stimulus:
+        # The chip TB is fixed by integration_result.json; there is no stimulus
+        # selection on this path. Say so instead of running a DIFFERENT stimulus
+        # than the caller asked for and reporting the result as theirs.
+        return VerifyResult(
+            False, skipped=True,
+            verdict="--stimulus is not supported for chip DV "
+                    "(the testbench comes from integration_result.json; "
+                    "use --tb to point at a different one)",
+            duration_s=time.monotonic() - t0,
+        )
     ir_path = root / ".coresmith" / "integration_result.json"
     if not ir_path.exists():
         return VerifyResult(
@@ -722,14 +733,27 @@ def verify_chip(
     lock_dir = root / "sim_build" / sim_scope
     lock_dir.mkdir(parents=True, exist_ok=True)
     lock_path = lock_dir / ".lock"
+    # Pin the seed for the sim (run_integration_simulation inherits os.environ),
+    # else --seed only decorated the scoreboard row while the TB drew its own
+    # seed and the reported failure did not reproduce. Unlike the block path
+    # there is no mint point here, so set the minted var too, not just the pin.
+    prev_seed_pin = os.environ.get("CORESMITH_DV_SEED_PIN")
+    prev_seed = os.environ.get("CORESMITH_DV_SEED")
+    if seed is not None:
+        os.environ["CORESMITH_DV_SEED_PIN"] = str(seed)
+        os.environ["CORESMITH_DV_SEED"] = str(seed)
     with open(lock_path, "w") as lockf:
         try:
             fcntl.flock(lockf, fcntl.LOCK_EX)
         except OSError:
             pass
-        res = run_integration_simulation(
-            design, top_rtl, block_rtls, tbp, attempt or 1, sim_scope=sim_scope
-        )
+        try:
+            res = run_integration_simulation(
+                design, top_rtl, block_rtls, tbp, attempt or 1, sim_scope=sim_scope
+            )
+        finally:
+            _restore_env("CORESMITH_DV_SEED_PIN", prev_seed_pin)
+            _restore_env("CORESMITH_DV_SEED", prev_seed)
 
     passed = bool(res.get("passed"))
     if scoreboard is not None:

@@ -188,6 +188,12 @@ def annotate(sim_dir: str | Path, *, timeout_s: int = 120) -> Path | None:
         return None
     out_dir = Path(sim_dir) / "coverage_annotated"
     try:
+        # Clear any PREVIOUS attempt's tree first: the sim dir is reused across
+        # attempts and clear_build_products never removes coverage_annotated, so
+        # a failed run below would otherwise leave the old TB's annotated files
+        # in place and the coverage floor would score THIS testbench against the
+        # PREVIOUS one's coverage points.
+        shutil.rmtree(out_dir, ignore_errors=True)
         out_dir.mkdir(parents=True, exist_ok=True)
         # Run FROM sim_dir so the RELATIVE source paths recorded in coverage.dat
         # (e.g. ``adder.v``) resolve -- verilator_coverage --annotate reads each
@@ -197,12 +203,15 @@ def annotate(sim_dir: str | Path, *, timeout_s: int = 120) -> Path | None:
         # coverage gate silently no-ops (verdict None) even though a real
         # coverage.dat exists. dat/out_dir are absolute so cwd only affects the
         # source lookup.
-        subprocess.run(
+        proc = subprocess.run(
             [vcov, "--annotate", str(out_dir), str(dat)],
             capture_output=True, text=True, timeout=timeout_s,
             cwd=str(Path(sim_dir)),
         )
     except Exception:  # noqa: BLE001
+        return None
+    if proc.returncode != 0:
+        # A corrupt/unreadable coverage.dat is NOT APPLICABLE, never a verdict.
         return None
     return out_dir if any(out_dir.iterdir()) else None
 

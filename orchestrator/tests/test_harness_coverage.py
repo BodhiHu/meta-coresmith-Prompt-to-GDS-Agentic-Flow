@@ -55,6 +55,34 @@ class TestFindCoverageDat:
         assert cov.find_coverage_dat(tmp_path) is None
 
 
+class TestAnnotate:
+    """A failed verilator_coverage run must never yield a STALE annotated dir."""
+
+    def _stub(self, monkeypatch, returncode: int):
+        import subprocess as _sp
+        monkeypatch.setattr(cov.shutil, "which", lambda name: "/usr/bin/" + name)
+        monkeypatch.setattr(
+            cov.subprocess, "run",
+            lambda *a, **k: _sp.CompletedProcess(a[0], returncode, "", ""),
+        )
+
+    def test_failed_run_returns_none_and_clears_stale_tree(
+        self, tmp_path, monkeypatch
+    ):
+        (tmp_path / "coverage.dat").write_text("x")
+        stale = tmp_path / "coverage_annotated"
+        stale.mkdir()
+        (stale / "old_tb.v").write_text(" 000100  assign x = 1;\n")
+        self._stub(monkeypatch, 1)
+        assert cov.annotate(tmp_path) is None
+        assert not (stale / "old_tb.v").exists()
+
+    def test_empty_output_returns_none(self, tmp_path, monkeypatch):
+        (tmp_path / "coverage.dat").write_text("x")
+        self._stub(monkeypatch, 0)
+        assert cov.annotate(tmp_path) is None
+
+
 def _annotated_tree(tmp_path: Path, hit: int, uncov: int) -> Path:
     """Fabricate a verilator_coverage --annotate output tree."""
     ann = tmp_path / "coverage_annotated"
