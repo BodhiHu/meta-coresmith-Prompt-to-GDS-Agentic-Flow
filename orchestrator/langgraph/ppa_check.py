@@ -25,6 +25,7 @@ default-off preserves current behavior.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
 import os
@@ -1602,13 +1603,21 @@ _STA_CELL_RE = re.compile(r'cell\s*\(\s*"([^"]+)"\s*\)\s*\{')
 def _sta_dontuse_liberty(src_lib: str) -> str:
     """Return a Liberty with the lpflow/probe (dont_use) cells stripped.
 
-    Cached in $TMPDIR; regenerated only when missing or older than the source.
-    Falls back to the full library on any I/O error (never blocks measurement).
+    Cached in $TMPDIR under a name derived from the SOURCE library (resolved
+    path + mtime + size), so a different corner/PDK never picks up another
+    library's stripped cache out of a shared $TMPDIR. Regenerated when missing
+    or older than the source. Falls back to the full library on any I/O error
+    (never blocks measurement).
     """
     try:
         src = Path(src_lib)
-        cache = Path(tempfile.gettempdir()) / "coresmith_sta_dontuse_sky130_hd.lib"
-        if cache.exists() and cache.stat().st_mtime >= src.stat().st_mtime:
+        st = src.stat()
+        key = hashlib.sha1(
+            f"{src.resolve()}|{int(st.st_mtime)}|{st.st_size}".encode(
+                "utf-8", "replace")
+        ).hexdigest()[:12]
+        cache = Path(tempfile.gettempdir()) / f"coresmith_sta_dontuse_{key}.lib"
+        if cache.exists() and cache.stat().st_mtime >= st.st_mtime:
             return str(cache)
         txt = src.read_text()
         n = len(txt)

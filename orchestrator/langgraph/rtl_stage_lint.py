@@ -772,24 +772,43 @@ def _blank_span(chars: list[str], start: int, end: int) -> None:
             chars[i] = " "
 
 
+# `always`/`initial` plus the SystemVerilog always variants. A bare
+# `\b(always|initial)\b` cannot match before the underscore in always_comb /
+# always_ff / always_latch, so those blocks would be neither extracted per-block
+# nor blanked out of the <continuous> pseudo-block -- mutually independent SV
+# blocks would then SUM against the PER-BLOCK multiplier cap.
+_ALWAYS_KW_RE = re.compile(r"\b(always(?:_comb|_ff|_latch)?|initial)\b")
+
+
+def _skip_sensitivity(text: str, i: int) -> int:
+    """From just past an always/initial keyword, skip whitespace and an optional
+    ``@(...)`` / ``@*`` sensitivity list; return the block-body start index."""
+    n = len(text)
+    while i < n and text[i].isspace():
+        i += 1
+    if i < n and text[i] == "@":
+        i += 1
+        while i < n and text[i].isspace():
+            i += 1
+        if i < n and text[i] == "(":
+            i = _find_matching(text, i, "(", ")")
+        elif i < n and text[i] == "*":
+            i += 1
+        while i < n and text[i].isspace():
+            i += 1
+    return i
+
+
 def _iter_always_blocks(text: str):
     """Yield (label, body) for each ``always``/``initial`` block in ``text``
     (which has task/function defs already blanked out)."""
-    for m in re.finditer(r"\b(always|initial)\b", text):
-        i, n = m.end(), len(text)
-        # optional @(...) / @* sensitivity
-        while i < n and text[i].isspace():
-            i += 1
-        if i < n and text[i] == "@":
-            i += 1
-            while i < n and text[i].isspace():
-                i += 1
-            if i < n and text[i] == "(":
-                i = _find_matching(text, i, "(", ")")
-            elif i < n and text[i] == "*":
-                i += 1
-            while i < n and text[i].isspace():
-                i += 1
+    for ordinal, m in enumerate(_ALWAYS_KW_RE.finditer(text)):
+        n = len(text)
+        i = _skip_sensitivity(text, m.end())
+        # Unlabeled blocks are named by ORDINAL, never by byte offset: an edit
+        # earlier in the file (a renamed state, a comment) must not rewrite every
+        # block name and defeat the identical-resubmission signature.
+        anon = f"{m.group(1)}#{ordinal}"
         if text[i:i + 5] == "begin" and (
             i + 5 >= n or not (text[i + 5].isalnum() or text[i + 5] == "_")
         ):
@@ -798,10 +817,10 @@ def _iter_always_blocks(text: str):
             lm = re.match(r"\s*:\s*([A-Za-z_]\w*)", text[i + 5:])
             if lm:
                 label = lm.group(1)
-            yield (label or f"always@{m.start()}"), text[inner_start:inner_end]
+            yield (label or anon), text[inner_start:inner_end]
         else:
             semi = _stmt_end(text, i)
-            yield f"always@{m.start()}", text[i:semi]
+            yield anon, text[i:semi]
 
 
 _KW_NOT_TYPE = {
@@ -1050,21 +1069,10 @@ def census_rtl(verilog_src: str, *,
     # (continuous assigns + their function-call chains). Catches a cloud hidden in
     # assign expressions rather than an always block.
     cont_chars = list(no_defs)
-    for label_m in re.finditer(r"\b(always|initial)\b", no_defs):
-        # blank each always block span
-        i, n = label_m.end(), len(no_defs)
-        while i < n and no_defs[i].isspace():
-            i += 1
-        if i < n and no_defs[i] == "@":
-            i += 1
-            while i < n and no_defs[i].isspace():
-                i += 1
-            if i < n and no_defs[i] == "(":
-                i = _find_matching(no_defs, i, "(", ")")
-            elif i < n and no_defs[i] == "*":
-                i += 1
-            while i < n and no_defs[i].isspace():
-                i += 1
+    for label_m in _ALWAYS_KW_RE.finditer(no_defs):
+        # blank each always block span (same scanner the extractor uses, so the
+        # two can never disagree about what an always block is)
+        i = _skip_sensitivity(no_defs, label_m.end())
         if no_defs[i:i + 5] == "begin":
             _s, _e, after = _match_begin_end(no_defs, i)
             _blank_span(cont_chars, label_m.start(), after)
@@ -1330,9 +1338,14 @@ def census_signature(report: StageLintReport) -> str:
     Two rejections with the same signature = the regen did not move the
     arithmetic (drives the identical-resubmission escalation, Deliverable 3)."""
     import hashlib
+    # NAME-INDEPENDENT by construction: the signature is the sorted multiset of
+    # per-block (kind, eff_mul, eff_ops). Block names carry the source label (or
+    # an ordinal), so hashing them would let a cosmetic edit -- renaming a state,
+    # renaming a labelled block -- change the signature while the arithmetic is
+    # bit-identical, defeating the very resubmission this escalation catches.
     payload = "|".join(
-        f"{b.name}:{b.eff_mul}:{b.eff_ops}"
-        for b in sorted(report.blocks, key=lambda x: x.name)
+        f"{b.kind}:{b.eff_mul}:{b.eff_ops}"
+        for b in sorted(report.blocks, key=lambda x: (x.kind, x.eff_mul, x.eff_ops))
     )
     return hashlib.sha1(payload.encode("utf-8", "replace")).hexdigest()[:16]
 

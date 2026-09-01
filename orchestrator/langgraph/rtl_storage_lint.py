@@ -171,15 +171,19 @@ def find_flat_packed_dynamic_storage(verilog_src: str,
     part-select or index. Each such reg is a synth blow-up risk that should be
     a ``cs_sram``/``cs_fpmem`` addressed memory or a per-element array instead.
     """
+    # Scan the COMMENT/STRING-BLANKED source: a `top_recon_q[base_idx +: 8]`
+    # inside a `// legacy: ...` comment is not hardware, and this gate skips
+    # synth entirely on a finding.
+    src = _blank_comments_strings(verilog_src)
     # collect wide packed regs
     wide: dict[str, int] = {}
-    for m in _REG_DECL_RE.finditer(verilog_src):
+    for m in _REG_DECL_RE.finditer(src):
         width = int(m.group(1)) + 1
         name = m.group(2)
         if width >= min_bits:
             wide[name] = max(width, wide.get(name, 0))
 
-    slicers = _dynamic_slicer_functions(verilog_src)
+    slicers = _dynamic_slicer_functions(src)
 
     findings: list[StorageFinding] = []
     for name, width in wide.items():
@@ -187,7 +191,7 @@ def find_flat_packed_dynamic_storage(verilog_src: str,
         sample = ""
         via = ""
         # (A) DIRECT: name[<runtime index>]
-        for am in _access_re(name).finditer(verilog_src):
+        for am in _access_re(name).finditer(src):
             idx = am.group(1)
             if _is_dynamic_index(idx):
                 n_dyn += 1
@@ -196,7 +200,7 @@ def find_flat_packed_dynamic_storage(verilog_src: str,
         # (B) INDIRECT: name passed as an arg into a function that dynamically
         # slices its input (e.g. get_byte2048(top_y_line_q, idx)).
         for fname, slice_expr in slicers.items():
-            for cm in _call_re(fname).finditer(verilog_src):
+            for cm in _call_re(fname).finditer(src):
                 if re.search(r"\b" + re.escape(name) + r"\b", cm.group(1)):
                     n_dyn += 1
                     if not via:
@@ -349,6 +353,10 @@ def find_oversized_memory_arrays(
         max_words = storage_lint_max_words()
     if max_bits is None:
         max_bits = storage_lint_max_bits()
+    # Structure is scanned COMMENT/STRING-BLANKED (a `// old impl: reg [7:0] mem
+    # [0:1023];` must not fail the block pre-synth); the reviewed-flop marker
+    # below is deliberately read from the RAW source -- it IS a comment.
+    src = _blank_comments_strings(verilog_src)
     # PR#12 finding #3 (reviewed-flop exception): a design under an explicit
     # no-macro mandate (a frozen PRD/ERS that forbids SRAM macros for these
     # buffers) may legitimately keep a >=threshold memory in flops. A reviewed
@@ -371,7 +379,7 @@ def find_oversized_memory_arrays(
         width = max(1, int(width))
         depth = max(1, int(depth))
         total = width * depth
-        if _mem_is_sram_backed(name, verilog_src):
+        if _mem_is_sram_backed(name, src):
             return
         over_size = depth >= max_words or total >= max_bits
         # A reviewed flop exception waives ONLY the size threshold, never the
@@ -396,17 +404,17 @@ def find_oversized_memory_arrays(
             flat_read_ns=round(flat_ns, 3), period_ns=float(period_ns or 0.0),
         ))
 
-    for m in _MEM_ARRAY_RE.finditer(verilog_src):
+    for m in _MEM_ARRAY_RE.finditer(src):
         wbits = (int(m.group(1)) + 1) if m.group(1) else 1
         name = m.group(2)
         hi, lo = int(m.group(3)), int(m.group(4))
         depth = abs(hi - lo) + 1
         _consider(name, wbits, depth, "behavioral_array")
 
-    for m in _CS_FPMEM_START_RE.finditer(verilog_src):
+    for m in _CS_FPMEM_START_RE.finditer(src):
         # Scan params from a window bounded by the instantiation's `;` so nested
         # `.WIDTH(8)` parens are handled (a `(.*?)` capture can't balance them).
-        window = verilog_src[m.end():]
+        window = src[m.end():]
         semi = window.find(";")
         if semi != -1:
             window = window[:semi]
@@ -556,7 +564,10 @@ _DIRECTIVE_LINE_RE = re.compile(r"^[ \t]*`(ifdef|ifndef|elsif|else|endif)\b[ \t]
 _MODTOK_RE = re.compile(r"\bmodule\s+(\w+)\b|\bendmodule\b")
 # Functional-construct signals.
 _ASSIGN_KW_RE = re.compile(r"\bassign\b")
-_ALWAYS_INITIAL_RE = re.compile(r"\b(always|initial)\b")
+# SystemVerilog always_comb/always_ff/always_latch must be listed explicitly:
+# `\b(always|initial)\b` cannot match before the underscore, so a split-brain
+# region written in SV always variants would slip through the lint entirely.
+_ALWAYS_INITIAL_RE = re.compile(r"\b(always(?:_comb|_ff|_latch)?|initial)\b")
 # A parametrized instantiation `TypeName #( ... )` -- high precision (a bare
 # module *header* `module foo #(` is stripped before this runs, so this only
 # hits real instances).

@@ -264,3 +264,38 @@ class TestMemoryTierFinder:
         # way it must never raise.
         v = sl.flat_read_mux_ns(1024, 8)
         assert v >= 0.0
+
+
+class TestCommentAwareness:
+    """Comments are not hardware: the pre-synth gate skips yosys and fails the
+    block on a finding, so a commented-out access must never trip it."""
+
+    def test_dynamic_slice_in_a_comment_is_not_a_finding(self):
+        src = """
+        module m(input clk);
+          reg [1023:0] top_recon_q;
+          // legacy: o = top_recon_q[base_idx +: 8];
+          assign o = top_recon_q[7:0];
+        endmodule
+        """
+        assert sl.find_flat_packed_dynamic_storage(src).ok
+
+    def test_memory_array_in_a_comment_is_not_a_finding(self):
+        src = """
+        module m;
+          /* old impl: reg [7:0] mem [0:1023]; */
+          reg [7:0] small [0:15];
+        endmodule
+        """
+        assert sl.find_oversized_memory_arrays(src).ok
+
+    def test_reviewed_flop_exception_comment_still_honored(self):
+        # the waiver marker IS a comment -- it must keep being read from the raw
+        # source even though structure is scanned comment-blanked.
+        src = """
+        module m;
+          // coresmith: reviewed-flop-exception
+          reg [7:0] mem [0:1023];
+        endmodule
+        """
+        assert sl.find_oversized_memory_arrays(src).ok

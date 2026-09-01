@@ -638,3 +638,42 @@ class TestPromptPinning:
 
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+class TestSystemVerilogAlwaysVariants:
+    """always_comb/always_ff/always_latch are per-block, not one <continuous>
+    lump: independent blocks must not SUM against the PER-BLOCK cap."""
+
+    @staticmethod
+    def _ten_blocks(kw: str) -> str:
+        body = []
+        for k in range(10):
+            stmts = "".join(f"    r{k}_{j} <= a * b;\n" for j in range(10))
+            body.append(f"  {kw} begin\n{stmts}  end\n")
+        return "module m(input clk);\n" + "".join(body) + "endmodule\n"
+
+    @pytest.mark.parametrize("kw", ["always @*", "always_comb",
+                                    "always_ff @(posedge clk)", "always_latch"])
+    def test_each_block_censused_separately(self, kw):
+        rep = census_rtl(self._ten_blocks(kw), mul_cap=64)
+        assert len(rep.blocks) == 10, [b.name for b in rep.blocks]
+        assert all(b.kind == "always" and b.eff_mul == 10 for b in rep.blocks)
+        assert rep.ok
+
+    def test_signature_survives_a_cosmetic_rename(self):
+        src = """
+        module m(input clk);
+          localparam S_IDLE = 0;
+          always @(posedge clk) begin
+            if (st == S_IDLE) acc <= a * b;
+          end
+          always_comb q = acc + 1;
+        endmodule
+        """
+        renamed = src.replace("S_IDLE", "S_WAITING_FOR_INPUT")
+        assert census_signature(census_rtl(src)) == \
+            census_signature(census_rtl(renamed))
+        # still sensitive to the arithmetic actually changing
+        more = src.replace("a * b", "a * b * c * d")
+        assert census_signature(census_rtl(src)) != \
+            census_signature(census_rtl(more))

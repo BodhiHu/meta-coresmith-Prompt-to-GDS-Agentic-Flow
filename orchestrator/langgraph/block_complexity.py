@@ -39,6 +39,7 @@ from __future__ import annotations
 import ast
 import re
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -85,7 +86,7 @@ _ALGO_SIGNATURES: dict[str, tuple[str, ...]] = {
                 "lambda", "ssd", "sad"),
     "entropy": ("entropy", "sym_token", "_put_sym_token", "_write_level",
               "_level_to_code", "total_zeros", "run_before", "nc", "_nc"),
-    "ue_coder": ("build_header_a", "build_header_b", "ue", "se", "ue_coder", "ue_coder"),
+    "ue_coder": ("build_header_a", "build_header_b", "ue", "se", "ue_coder"),
     "bitpack": ("frame_pack", "unit_pack", "byte_align", "emulation",
              "frame_marker", "getbytes"),
     "chroma": ("chroma", "decide_chroma_mode", "_commit_chroma", "qpc"),
@@ -288,6 +289,19 @@ def _subscript_base(node: ast.Subscript) -> str | None:
     return None
 
 
+@lru_cache(maxsize=None)
+def _sig_pattern(sig: str) -> re.Pattern:
+    """A signature matcher anchored on IDENTIFIER-PART boundaries.
+
+    Bare substring matching inflates the count on everyday code: every method
+    signature carries ``self`` (-> ``se``), ``value``/``queue`` (-> ``ue``) and
+    any ``encode`` (-> ``nc``). Underscores and identifier edges count as
+    boundaries (so ``fdct`` still matches ``fdct_quant``) but letters/digits do
+    not (so ``ue`` no longer matches ``queue``)."""
+    return re.compile(r"(?<![A-Za-z0-9])" + re.escape(sig.strip("_").lower())
+                      + r"(?![A-Za-z0-9])")
+
+
 def _detect_algorithms(fs: FuncStat) -> set[str]:
     """Which distinct-algorithm classes a function touches (by name signature)."""
     hay = " ".join([fs.name, *fs.calls, *fs.array_reads, *fs.array_writes,
@@ -295,7 +309,7 @@ def _detect_algorithms(fs: FuncStat) -> set[str]:
     found: set[str] = set()
     for algo, sigs in _ALGO_SIGNATURES.items():
         for s in sigs:
-            if s.lower() in hay:
+            if _sig_pattern(s).search(hay):
                 found.add(algo)
                 break
     return found
