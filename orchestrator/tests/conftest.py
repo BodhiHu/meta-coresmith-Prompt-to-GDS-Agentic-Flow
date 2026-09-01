@@ -46,25 +46,6 @@ from orchestrator.tests.fft16_fixtures import (
     FFT16_SAD_MARKDOWN,
 )
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Fix import-time side effect in constraints module
-# ═══════════════════════════════════════════════════════════════════════════
-# orchestrator/architecture/constraints.py reads a prompt file at import time
-# using a path that resolves incorrectly (parents[2] misses 'orchestrator/').
-# Create the expected file so the import doesn't fail during tests.
-
-def _ensure_constraint_prompt():
-    """Create the constraint_check.md symlink/copy if missing."""
-    from pathlib import Path
-    src = Path(__file__).resolve().parents[1] / "langchain" / "prompts" / "constraint_check.md"
-    target_dir = Path(__file__).resolve().parents[2] / "langchain" / "prompts"
-    target = target_dir / "constraint_check.md"
-    if not target.exists() and src.exists():
-        target_dir.mkdir(parents=True, exist_ok=True)
-        target.write_text(src.read_text())
-
-_ensure_constraint_prompt()
-
 
 @pytest.fixture(autouse=True)
 def _reset_profile_state():

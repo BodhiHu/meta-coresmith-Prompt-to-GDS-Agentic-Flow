@@ -9,8 +9,12 @@ Tier 4: Consumer migration verification. This test greps the production
 code to ensure the monolithic architecture_state.json has been fully
 replaced by per-document files (prd_spec.json, block_diagram.json, etc.).
 
-This test should FAIL until the migration is complete, then PASS once
-all references to architecture_state.json are removed from production code.
+The migration is still in flight, so each guard asserts the post-migration
+condition and carries ``xfail(strict=True)``: it is expected-fail today, and
+the moment the last reference goes away the XPASS turns the suite red so the
+marker gets dropped and the guard starts enforcing for real. Reporting the
+violation with an imperative ``pytest.xfail()`` instead would have made the
+guard unfailable in both directions.
 """
 
 from __future__ import annotations
@@ -19,6 +23,10 @@ import subprocess
 from pathlib import Path
 
 import pytest
+
+# Drop the xfail markers below (one at a time) as each consumer is migrated --
+# strict=True makes the suite tell you when one is ready to be dropped.
+_PENDING = "architecture_state.json migration is not complete yet"
 
 
 @pytest.mark.doc_persistence
@@ -29,6 +37,7 @@ class TestNoArchStateJsonReferences:
         """Find the project root (directory containing orchestrator/)."""
         return Path(__file__).resolve().parents[2]
 
+    @pytest.mark.xfail(strict=True, reason=_PENDING)
     def test_no_references_in_production_code(self):
         """Grep production code for architecture_state.json references.
 
@@ -78,12 +87,11 @@ class TestNoArchStateJsonReferences:
             pytest.skip("Search tool returned error")
 
         matches = result.stdout.strip()
-        if matches:
-            pytest.xfail(
-                f"architecture_state.json references remain in production code "
-                f"(expected until migration is complete):\n{matches}"
-            )
+        assert not matches, (
+            f"architecture_state.json references remain in production code:\n{matches}"
+        )
 
+    @pytest.mark.xfail(strict=True, reason=_PENDING)
     def test_no_load_state_save_state_in_architecture_graph(self):
         """After migration, architecture_graph.py should not import load_state/save_state.
 
@@ -96,12 +104,13 @@ class TestNoArchStateJsonReferences:
             pytest.skip("architecture_graph.py not found")
 
         content = arch_graph.read_text()
-        if "from orchestrator.architecture.state import" in content and "save_state" in content:
-            pytest.xfail(
-                "save_state still imported in architecture_graph.py "
-                "(expected until migration is complete)"
-            )
+        imports_state = "from orchestrator.architecture.state import" in content
+        assert not (imports_state and "save_state" in content), (
+            "save_state still imported in architecture_graph.py -- the graph "
+            "should use the per-document persist helpers instead"
+        )
 
+    @pytest.mark.xfail(strict=True, reason=_PENDING)
     def test_state_py_does_not_write_monolithic_file(self):
         """state.py should not contain save_state() that writes architecture_state.json.
 
@@ -117,8 +126,6 @@ class TestNoArchStateJsonReferences:
 
         content = state_py.read_text()
 
-        if "def save_state" in content and "architecture_state.json" in content:
-            pytest.xfail(
-                "state.py still has save_state() writing architecture_state.json "
-                "(expected until migration is complete)"
-            )
+        assert not ("def save_state" in content and "architecture_state.json" in content), (
+            "state.py still has save_state() writing architecture_state.json"
+        )
