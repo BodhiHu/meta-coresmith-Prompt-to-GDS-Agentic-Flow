@@ -181,16 +181,17 @@ def check_oracle_manifest(project_root: str | Path) -> dict[str, Any]:
     Returns a dict::
 
         {"ok": bool, "checked": bool, "changed": [...], "missing": [...],
-         "violation": {...} | None}
+         "added": [...], "violation": {...} | None}
 
     ``ok`` is True (non-blocking) when there is no manifest to check (nothing
     was snapshotted) or every recorded file still hashes identically. ``ok`` is
-    False ONLY when a recorded oracle file changed or vanished -- an
-    ``ORACLE_TAMPER`` violation the caller must treat as a gate FAIL.
+    False ONLY when a recorded oracle file changed or vanished, or a NEW
+    immutable-oracle file appeared (a shadowing golden) -- an ``ORACLE_TAMPER``
+    violation the caller must treat as a gate FAIL.
     """
     result: dict[str, Any] = {
         "ok": True, "checked": False, "changed": [], "missing": [],
-        "violation": None,
+        "added": [], "violation": None,
     }
     path = _manifest_path(project_root)
     if not path.exists():
@@ -212,8 +213,17 @@ def check_oracle_manifest(project_root: str | Path) -> dict[str, Any]:
             missing.append(rel)
         elif have != want:
             changed.append(rel)
+    # An oracle file that APPEARED under inputs/ after run start is tamper too:
+    # dropping a doctored ``inputs/golden.py`` into a run whose golden resolved
+    # elsewhere SHADOWS the real oracle (resolve_golden_path prefers it) while
+    # every recorded hash still matches. Scoped to inputs/ deliberately -- the
+    # arch specs AND a golden resolved outside the run dir are both written /
+    # re-resolved legitimately after /run/start (the PRD naming the reference
+    # is itself an architecture-stage output).
+    added = sorted(rel for rel in now
+                   if rel not in recorded and rel.startswith("inputs/"))
 
-    if changed or missing:
+    if changed or missing or added:
         # PR#12 finding #9: partition drift into AMENDABLE architecture specs
         # (arch/{ers,frd,prd}_spec.md -- a legitimate pre-RTL feasibility
         # revise edits these) vs IMMUTABLE oracle (the golden + inputs/
@@ -226,7 +236,7 @@ def check_oracle_manifest(project_root: str | Path) -> dict[str, Any]:
         # rebaseline_oracle_specs intent) and recorded as an advisory, not a
         # fail. Set CORESMITH_STRICT_ORACLE_MANIFEST=1 to keep any drift a
         # hard fail.
-        drift = set(changed) | set(missing)
+        drift = set(changed) | set(missing) | set(added)
         immutable_drift = sorted(d for d in drift
                                  if d not in _SPEC_REBASELINE_ALLOWED)
         spec_drift = sorted(d for d in drift if d in _SPEC_REBASELINE_ALLOWED)
@@ -235,15 +245,17 @@ def check_oracle_manifest(project_root: str | Path) -> dict[str, Any]:
                 "1", "true", "yes", "on"}
         result["changed"] = sorted(changed)
         result["missing"] = sorted(missing)
+        result["added"] = added
 
         if immutable_drift or _strict or missing:
             # A real oracle changed/vanished (or strict mode) -> TAMPER.
             result["ok"] = False
             detail = (
                 "oracle artifacts changed since run start "
-                f"(modified={sorted(changed)}, missing={sorted(missing)}). The "
-                "golden reference / stimulus that underwrites the gate MUST "
-                "NOT be edited to make RTL match -- restore them and re-run."
+                f"(modified={sorted(changed)}, missing={sorted(missing)}, "
+                f"added={added}). The golden reference / stimulus that "
+                "underwrites the gate MUST NOT be edited -- or SHADOWED by a "
+                "new file -- to make RTL match: restore them and re-run."
             )
             result["violation"] = {
                 "criterion": "oracle_integrity",
@@ -253,10 +265,12 @@ def check_oracle_manifest(project_root: str | Path) -> dict[str, Any]:
                 "detail": detail,
                 "changed": sorted(changed),
                 "missing": sorted(missing),
+                "added": added,
                 "immutable_drift": immutable_drift,
                 "suggested_fix": (
                     "NOT a pass -- an IMMUTABLE oracle (golden/stimulus/"
-                    "requirements) was changed or is missing. Restore the "
+                    "requirements) was changed, is missing, or was shadowed "
+                    "by a file added after run start. Restore the "
                     "original files, then resume. (Architecture SPEC edits "
                     "are re-baselineable; immutable oracle edits are not.)"
                 ),
