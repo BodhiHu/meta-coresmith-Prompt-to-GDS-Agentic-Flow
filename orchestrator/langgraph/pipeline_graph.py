@@ -1390,10 +1390,14 @@ async def generate_uarch_spec_node(state: BlockState) -> dict:
             chars = len(result.get("spec_text", ""))
             log(f"  [UARCH] Generated spec ({chars} chars)", GREEN)
             span.set_attribute("chars", chars)
-            # Gate/uarch-patch feedback is a one-shot prescription for THIS
-            # re-spec: once a spec regenerated with it, drop the file so a
-            # stale prescription cannot steer later tiers or runs.
-            if gate_feedback:
+            # Consume ONE-SHOT prescriptions (the uarch_patch MICROARCH
+            # REVISION channel has no other deleter) so they cannot steer
+            # later tiers or runs. init_tier's OWN gate feedback must SURVIVE
+            # this node: its presence is the 'gate implicated this block'
+            # signal that gate_scoped_reuse_reason / review_uarch_spec_node
+            # key on during a revise iteration, and init_tier clears it
+            # itself on the next tier pass.
+            if gate_feedback and not _is_own_gate_feedback(gate_fb_path):
                 gate_fb_path.unlink(missing_ok=True)
 
     write_graph_event(_pr(state), "Generate Uarch Spec", "graph_node_exit", {
