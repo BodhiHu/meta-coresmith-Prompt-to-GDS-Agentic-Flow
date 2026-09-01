@@ -392,7 +392,10 @@ def _gather_frontend_context(project_root: str) -> str:
         if etype == "graph_node_exit":
             blocks[block]["phase"] = node
 
-            if node == "Advance Block":
+            # The frontend graph's terminal per-block event is "Block Done";
+            # "Advance Block" is the backend graph's, and those events are
+            # filtered out above.
+            if node in ("Block Done", "block_done"):
                 if e.get("success"):
                     blocks[block]["status"] = "done"
                 else:

@@ -529,8 +529,13 @@ def _slice_python_source(file_text: str, names: list[str]) -> str:
         return file_text  # named nothing resolvable -> whole file (safe)
 
     def _seg(node) -> str:
+        # A decorated def/class has .lineno on the ``def``/``class`` line, so
+        # slicing from it would drop @dataclass / @lru_cache and silently
+        # change the semantics of the emitted golden.
+        start = min([node.lineno]
+                    + [d.lineno for d in getattr(node, "decorator_list", [])])
         end = getattr(node, "end_lineno", node.lineno) or node.lineno
-        return "".join(lines[node.lineno - 1:end])
+        return "".join(lines[start - 1:end])
 
     # Emit imports, consts, then the reached top-level defs + whole classes in
     # source order (de-dup a class that was BOTH named directly and reached).
@@ -1181,7 +1186,11 @@ def refresh_current_sidecars(project_root, block_names,
                     from orchestrator.langchain.agents.contract_lookup import (
                         load_block_contracts,
                     )
-                    edges = load_block_contracts(str(project_root), name) or []
+                    view = load_block_contracts(str(project_root), name) or {}
+                    # load_block_contracts returns {"defaults":..., "edges":[...]};
+                    # iterating the view itself yields its KEYS, never edge ids.
+                    edges = (view.get("edges") if isinstance(view, dict)
+                             else view) or []
                     eids = [e.get("edge_id", "") if isinstance(e, dict) else str(e)
                             for e in edges]
                     if any(any(s in eid for s in changed) for eid in eids):
@@ -2224,9 +2233,34 @@ def run_wavekit_vcd_audit(vcd_path: Path, audit_path: Path, clock_hint: str = "c
             "vcd_path": str(vcd_path),
         }
     else:
-        result = json.loads(proc.stdout)
+        # The script prints exactly one JSON line, but wavekit is unpinned and
+        # a release that chatters on import would prepend noise to stdout.  A
+        # JSONDecodeError here would escape run_simulation (which only catches
+        # TimeoutExpired/FileNotFoundError) and crash an otherwise-passing DV
+        # run, so fall back to the last non-empty line, then to a warning.
+        result = _parse_audit_stdout(proc.stdout, vcd_path)
     audit_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
     return result
+
+
+def _parse_audit_stdout(stdout: str, vcd_path: Path) -> dict:
+    """Parse the WaveKit audit subprocess stdout into a report dict.
+
+    Never raises: an unparseable payload degrades to an ``ok=False`` warning
+    (the audit is supplementary to the cocotb verdict)."""
+    for candidate in (stdout, *reversed([ln for ln in (stdout or "").splitlines()
+                                         if ln.strip()])):
+        try:
+            parsed = json.loads(candidate)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return {
+        "ok": False,
+        "error": "unparseable WaveKit audit output: " + (stdout or "")[-1000:],
+        "vcd_path": str(vcd_path),
+    }
 
 
 def _build_products_present(sim_dir: Path) -> bool:
@@ -2869,18 +2903,25 @@ EXTRA_ARGS += --build-jobs {_build_jobs}
 # SDC Generation
 # ---------------------------------------------------------------------------
 
-def _detect_clock_port(rtl_source: str) -> str:
-    """Regex-based clock port detection from Verilog source.
+# Input port declaration: skips the net/type keywords (wire/reg/logic/bit,
+# signed/unsigned) and an optional vector range so `input logic clk_i` yields
+# "clk_i" rather than the type keyword "logic".
+_INPUT_PORT_RE = re.compile(
+    r"\binput\s+(?:(?:wire|reg|logic|bit|signed|unsigned)\s+)*"
+    r"(?:\[[^\]]*\]\s*)?(\w+)",
+    re.MULTILINE,
+)
 
-    Scans the module port declarations for common clock port names.
-    Returns the detected clock port name, or 'clk' as fallback.
+
+def _detect_clock_port_or_empty(rtl_source: str) -> str:
+    """Clock port detection that returns ``""`` when the module has none.
+
+    ``_detect_clock_port`` keeps the historical ``"clk"`` fallback for callers
+    that need *some* port name; the SDC generator needs the honest empty
+    answer so a pure combinational block gets a virtual clock instead of a
+    ``create_clock ... [get_ports clk]`` on a port that does not exist.
     """
-    import re
-
-    port_pattern = re.compile(
-        r'\binput\s+(?:wire\s+)?(\w+)', re.MULTILINE
-    )
-    ports = port_pattern.findall(rtl_source)
+    ports = _INPUT_PORT_RE.findall(rtl_source)
 
     for name in ("clk", "clk_in", "clock", "CLK", "CLOCK"):
         if name in ports:
@@ -2890,7 +2931,16 @@ def _detect_clock_port(rtl_source: str) -> str:
         if "clk" in p.lower() or "clock" in p.lower():
             return p
 
-    return "clk"
+    return ""
+
+
+def _detect_clock_port(rtl_source: str) -> str:
+    """Regex-based clock port detection from Verilog source.
+
+    Scans the module port declarations for common clock port names.
+    Returns the detected clock port name, or 'clk' as fallback.
+    """
+    return _detect_clock_port_or_empty(rtl_source) or "clk"
 
 
 # Word-boundary reset token: matches rst / rst_n / reset / arst_n / aresetn /
@@ -2907,8 +2957,7 @@ def _detect_reset_port(rtl_source: str) -> str:
     ``[get_ports -quiet ...]`` existence guard, so a fallback that is not an
     actual port simply no-ops -- the reset false-path is reset-name-agnostic.
     """
-    port_pattern = re.compile(r"\binput\s+(?:wire\s+)?(\w+)", re.MULTILINE)
-    ports = port_pattern.findall(rtl_source)
+    ports = _INPUT_PORT_RE.findall(rtl_source)
 
     for name in ("rst_n", "resetn", "reset_n", "rstn", "arst_n", "aresetn",
                  "rst", "reset", "arst", "areset"):
@@ -2947,7 +2996,8 @@ def _build_sdc_content(rtl_source: str, target_clock_mhz: float) -> str:
     unbuffered pre-layout reset net can't masquerade as the block WNS.
     """
     period_ns = 1000.0 / target_clock_mhz
-    clock_port = _detect_clock_port(rtl_source)
+    # Empty (no clock port at all) selects the virtual-clock branch below.
+    clock_port = _detect_clock_port_or_empty(rtl_source)
 
     if clock_port:
         sdc_content = (
@@ -3002,6 +3052,11 @@ def synthesize_block(
 ) -> dict:
     """Run Yosys synthesis targeting Sky130."""
     block_name = block["name"]
+    # The yosys top is the module the RTL actually DECLARES, which is not
+    # always the block name (externally-mandated tops carry theirs in
+    # rtl_target) -- the same resolution lint, the RTL postcondition and
+    # cocotb's TOPLEVEL already use.
+    top_module = rtl_module_name(rtl_path, block_name)
     output_dir = PROJECT_ROOT / "syn" / "output" / block_name
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -3069,11 +3124,11 @@ def synthesize_block(
         # is real, finite, loop-free logic.
         script = f"""# Auto-generated GENERIC synthesis script for {block_name}
 read_verilog -sv {rtl_path}
-{_wrapper_read}hierarchy -top {block_name}
+{_wrapper_read}hierarchy -top {top_module}
 proc
 flatten
 opt
-synth -top {block_name}
+synth -top {top_module}
 memory_map
 opt -full
 techmap
@@ -3085,7 +3140,7 @@ write_verilog -noattr {netlist_path}
     else:
         script = f"""# Auto-generated synthesis script for {block_name}
 read_verilog {rtl_path}
-{_wrapper_read}hierarchy -top {block_name}
+{_wrapper_read}hierarchy -top {top_module}
 proc
 flatten
 opt
