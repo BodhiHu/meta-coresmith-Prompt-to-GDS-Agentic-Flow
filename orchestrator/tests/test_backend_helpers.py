@@ -953,3 +953,45 @@ class TestSynthAttemptHistory:
              "source": "unrecorded", "timestamp": "t", "unrecorded": True},
         ])
         assert "attempt 1" in txt and "attempt 2 [NOT RETAINED]" in txt
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Netgen LVS Verdict  (an ABORTED comparison must never read as a match)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestNetgenLvsVerdict:
+    def _run(self, monkeypatch, tmp_path, stdout, returncode=0):
+        import subprocess as _sp
+
+        from orchestrator.langgraph import backend_helpers as bh
+
+        monkeypatch.setattr(bh, "_write_step_log", lambda *a, **k: "")
+        monkeypatch.setattr(
+            bh.subprocess, "run",
+            lambda cmd, **kw: _sp.CompletedProcess(cmd, returncode, stdout, ""),
+        )
+        return bh.run_netgen_lvs(
+            str(tmp_path / "top.spice"), str(tmp_path / "top.v"), "top",
+            report_path=str(tmp_path / "lvs.rpt"),
+        )
+
+    def test_match_uniquely(self, monkeypatch, tmp_path):
+        out = self._run(monkeypatch, tmp_path,
+                        "Final result: Circuits match uniquely.\n")
+        assert out["match"] is True
+
+    def test_aborted_run_full_of_mismatch_text_is_not_a_match(
+        self, monkeypatch, tmp_path,
+    ):
+        # netgen killed before its "Final result" line: 'mismatch' contains
+        # the substring 'match' -- fail closed.
+        out = self._run(monkeypatch, tmp_path,
+                        "Net count *** MISMATCH ***\nunmatched nets: 12\n",
+                        returncode=-11)
+        assert out["match"] is False
+
+    def test_nonzero_exit_is_not_a_match(self, monkeypatch, tmp_path):
+        out = self._run(monkeypatch, tmp_path,
+                        "Final result: Circuits match uniquely.\n",
+                        returncode=1)
+        assert out["match"] is False

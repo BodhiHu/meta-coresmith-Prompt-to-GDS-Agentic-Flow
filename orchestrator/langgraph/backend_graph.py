@@ -1714,10 +1714,16 @@ async def drc_node(state: BackendState) -> dict:
             spice_path = str(_conv_spice)
 
     out: dict = {"drc_result": {"clean": drc_clean, "violation_count": drc_count}, "phase": "drc"}
-    if drc_clean:
+    # Publish the artifact paths whenever Magic actually produced them, not
+    # only on a clean verdict: the operator DRC-waiver path (action='accept')
+    # routes straight on to lvs -> wrapper -> mpw_precheck, all of which need
+    # the GDS/SPICE that were written regardless of the violation count. The
+    # clean flag stays the gate; these are only artifact locations.
+    if drc_clean or (gds_path and Path(gds_path).exists()):
         out["gds_path"] = gds_path
+    if drc_clean or (spice_path and Path(spice_path).exists()):
         out["spice_path"] = spice_path
-    else:
+    if not drc_clean:
         out["previous_error"] = result.get("error", f"DRC: {drc_count} violations")
     return out
 
@@ -2349,14 +2355,16 @@ async def decide_node(state: BackendState) -> dict:
     with _tracer.start_as_current_span(f"Backend Decision [{block_name}]") as span:
         span.set_attribute("block_name", block_name)
         span.set_attribute("attempt", attempt)
+        span.set_attribute("max_attempts", max_attempts)
 
-        if debug_result.get("escalate") and attempt < max_attempts:
-            action = "ask_human"
-        elif debug_result.get("escalate") or attempt >= max_attempts:
-            action = "escalate"
-        elif debug_result.get("needs_human"):
+        if debug_result.get("escalate") or debug_result.get("needs_human"):
             action = "ask_human"
         else:
+            # Attempt exhaustion is deliberately NOT decided here: the retry
+            # goes through increment_attempt, whose router PARKS on the human
+            # interrupt once the budget is spent (and a retry there reopens
+            # the block with a fresh budget -- see increment_attempt_node)
+            # instead of silently advancing to complete with success=false.
             pnr_ok = (state.get("route_result") or {}).get("success", False)
             drc_clean = (state.get("drc_result") or {}).get("clean", False)
             lvs_match = (state.get("lvs_result") or {}).get("match", False)
