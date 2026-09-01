@@ -83,6 +83,13 @@ class VerilogModule:
         }
 
 
+# Net/type keywords that may sit between a direction keyword and the port
+# identifiers it declares.
+_TYPE_KEYWORDS = {"wire", "reg", "logic", "signed", "unsigned", "bit",
+                  "tri", "var", "integer", "real", "byte", "shortint",
+                  "int", "longint", "supply0", "supply1"}
+
+
 def parse_verilog_ports(rtl_path: str, module: str | None = None) -> VerilogModule:
     """Parse a Verilog file and extract the module name, ports, and parameters.
 
@@ -146,37 +153,40 @@ def parse_verilog_ports(rtl_path: str, module: str | None = None) -> VerilogModu
 
     ports: list[VerilogPort] = []
 
-    # Try ANSI-style ports (direction in header)
-    ansi_port_re = re.compile(
-        r'(input|output|inout)\s+'
-        r'(?:(reg|wire)\s+)?'
-        r'(?:(signed)\s+)?'
-        r'(?:\[\s*(\d+)\s*:\s*(\d+)\s*\]\s*)?'
-        r'(\w+)',
-        re.MULTILINE
-    )
+    # Try ANSI-style ports (direction in header). Split the header on the
+    # direction keywords and take EVERY identifier in each segment, the way
+    # contract_conformance.declared_ports does: a grouped declaration
+    # (`input [7:0] a, b`) shares one direction/width across all its names, and
+    # capturing only the first dropped the rest from the port map -- the
+    # assembled top then left them dangling.
+    dir_matches = list(re.finditer(r'\b(input|output|inout)\b', port_text))
 
-    ansi_ports = list(ansi_port_re.finditer(port_text))
-
-    if ansi_ports:
-        for m in ansi_ports:
+    if dir_matches:
+        for i, m in enumerate(dir_matches):
+            seg_end = (dir_matches[i + 1].start()
+                       if i + 1 < len(dir_matches) else len(port_text))
+            seg = port_text[m.end():seg_end]
             direction = m.group(1)
-            is_reg = m.group(2) == "reg"
-            is_signed = m.group(3) == "signed"
-            msb = int(m.group(4)) if m.group(4) else 0
-            lsb = int(m.group(5)) if m.group(5) else 0
-            name = m.group(6)
-            width = abs(msb - lsb) + 1 if m.group(4) else 1
+            is_reg = re.search(r'\breg\b', seg) is not None
+            is_signed = re.search(r'\bsigned\b', seg) is not None
+            rng = re.search(r'\[\s*(\d+)\s*:\s*(\d+)\s*\]', seg)
+            msb = int(rng.group(1)) if rng else 0
+            lsb = int(rng.group(2)) if rng else 0
+            width = abs(msb - lsb) + 1 if rng else 1
 
-            ports.append(VerilogPort(
-                name=name,
-                direction=direction,
-                width=width,
-                msb=msb,
-                lsb=lsb,
-                is_reg=is_reg,
-                is_signed=is_signed,
-            ))
+            for name in re.findall(r'[A-Za-z_]\w*',
+                                   re.sub(r'\[[^\]]*\]', ' ', seg)):
+                if name in _TYPE_KEYWORDS:
+                    continue
+                ports.append(VerilogPort(
+                    name=name,
+                    direction=direction,
+                    width=width,
+                    msb=msb,
+                    lsb=lsb,
+                    is_reg=is_reg,
+                    is_signed=is_signed,
+                ))
     else:
         # Non-ANSI: port names in header, declarations in body
         port_names = [n.strip() for n in port_text.split(',') if n.strip()]
@@ -710,6 +720,22 @@ def generate_top_level_rtl(
             ("wire", wire_name)
         )
 
+    # Fan-out: a source port feeding several consumers gets one wire per
+    # connection, but the instantiation below binds only the FIRST -- the other
+    # consumers' wires would be undriven. Drive the extras from the bound one
+    # (generate_caravel_wrapper_top merges them via union-find instead).
+    fanout: list[str] = []
+    for key, conns in wire_connections.items():
+        if len(conns) < 2:
+            continue
+        block_name, _, port_name = key.partition(".")
+        src_mod = modules.get(block_name)
+        port = src_mod.port_by_name(port_name) if src_mod else None
+        if not port or port.direction != "output":
+            continue
+        driven = conns[0][1]
+        fanout.extend(f"  assign {w} = {driven};" for _kind, w in conns[1:])
+
     # Collect top-level I/O ports (ports not connected to other blocks)
     top_inputs: list[str] = []
     top_outputs: list[str] = []
@@ -761,6 +787,12 @@ def generate_top_level_rtl(
     if wires:
         lines.append(f"  // Internal wires ({len(wires)} connections)")
         lines.extend(wires)
+        lines.append("")
+
+    # Fan-out assigns
+    if fanout:
+        lines.append(f"  // Fan-out ({len(fanout)} extra consumer(s))")
+        lines.extend(fanout)
         lines.append("")
 
     # Block instantiations

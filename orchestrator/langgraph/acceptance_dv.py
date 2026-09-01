@@ -308,8 +308,8 @@ int main(int argc, char **argv) {
         // instead of a single byte -- the run-through's other limitation.
         size_t n = (W_IN > 0) ? (px.size() / (size_t)W_IN) : px.size();
         size_t idx = 0;
-        bool s_done = (n == 0), r_done = false;
-        uint64_t start_c = UINT64_MAX, end_c = UINT64_MAX, wd = 0;
+        bool s_done = (n == 0), r_done = false, s_pend = false;
+        uint64_t start_c = UINT64_MAX, end_c = UINT64_MAX, wd = 0, m_idle = 0;
         std::vector<uint8_t> out;
 
         auto load = [&](size_t i) {
@@ -329,20 +329,24 @@ int main(int argc, char **argv) {
             // Input: hold the current word until accepted; insert ~15% gaps
             // (in_valid low) without advancing -- AXI-Stream master behaviour.
             if (!s_done) {
-                if (BP && (xrng() % 100) < 15) top->{S_TVALID} = 0;
-                else load(idx);
+                // Gap only BETWEEN transfers: once a beat is presented TVALID
+                // must stay high until TREADY (AXI-Stream valid stability).
+                if (!s_pend && BP && (xrng() % 100) < 15) top->{S_TVALID} = 0;
+                else { load(idx); s_pend = true; }
             }
             posedge(top); wd++;
             if (!s_done && top->{S_TVALID} && top->{S_TREADY}) {
                 if (start_c == UINT64_MAX) start_c = g_cycle;
-                idx++;
+                idx++; s_pend = false;
                 if (idx >= n) { s_done = true; top->{S_TVALID} = 0; }
             }
             if (!r_done && top->{M_TVALID} && top->{M_TREADY}) {
                 uint64_t d = (uint64_t)top->{M_TDATA};
                 for (int b = 0; b < W_OUT; b++) out.push_back((uint8_t)((d >> (8 * b)) & 0xff));
+                m_idle = 0;
 {M_TLAST_CHECK}
             }
+{M_IDLE_CHECK}
             negedge(top);
         }
         uint32_t status = (start_c == UINT64_MAX || end_c == UINT64_MAX) ? 1u : 0u;
@@ -375,9 +379,15 @@ def generate_harness(contract: dict, top_module: str, sb_order: list[str]) -> st
     m_tlast = (
         f"                if (top->{mp}_tlast) {{ end_c = g_cycle; r_done = true; }}"
         if m["has_tlast"] else
-        # no egress tlast: consider done when sender done and output idle 64 cyc
-        "                end_c = g_cycle; /* no tlast: track last beat */\n"
-        "                if (s_done && wd > 64) { r_done = true; }"
+        "                end_c = g_cycle; /* no tlast: track last beat */"
+    )
+    # no egress tlast: done when the sender is done and the output has been
+    # quiet for 64 cycles SINCE THE LAST ACCEPTED BEAT (m_idle resets on every
+    # beat) -- counting wd here ended capture on the first post-drain beat.
+    m_idle_check = (
+        "            (void)m_idle;" if m["has_tlast"] else
+        "            else if (s_done && end_c != UINT64_MAX && ++m_idle > 64)\n"
+        "                r_done = true;"
     )
     return (
         _HARNESS_TEMPLATE
@@ -395,6 +405,7 @@ def generate_harness(contract: dict, top_module: str, sb_order: list[str]) -> st
         .replace("{S_TUSER_SET}", tuser)
         .replace("{S_TLAST_SET}", tlast)
         .replace("{M_TLAST_CHECK}", m_tlast)
+        .replace("{M_IDLE_CHECK}", m_idle_check)
         .replace("{SB_SET}", sb_set)
         .replace("{SB_ZERO}", sb_zero)
         .replace("{MAX_CYCLES}", os.environ.get(
@@ -459,6 +470,27 @@ def _read_results(path: Path, n: int) -> list[dict]:
             data = f.read(outlen)
             out.append({"status": status, "cycles": cycles, "bytes": data})
     return out
+
+
+def _golden_bytes(expected: Any) -> bytes | None:
+    """Coerce a golden return value to comparable bytes, using the SAME
+    conventions map_stimulus uses on the input side (numpy arrays -- the
+    natural return type for the image IPs this tier targets -- ravel to
+    masked bytes). None when the shape is not byte-comparable, which is an
+    honest skip at the call site, never a divergence against 0 bytes."""
+    if isinstance(expected, (bytes, bytearray)):
+        return bytes(expected)
+    try:
+        import numpy as _np
+
+        return bytes(int(v) & 0xFF
+                     for v in _np.asarray(expected).ravel().tolist())
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        return bytes(int(v) & 0xFF for v in expected)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _first_diff(a: bytes, b: bytes) -> int:
@@ -629,10 +661,7 @@ def run_acceptance_dv(project_root: str, top_rtl: str,
             rows.append({"name": name, "ok": None,
                          "note": f"reference not invokable: {exc}"})
             continue
-        exp_bytes = bytes(expected) if isinstance(
-            expected, (bytes, bytearray)) else bytes(
-            v & 0xFF for v in expected) if isinstance(
-            expected, (list, tuple)) else None
+        exp_bytes = _golden_bytes(expected)
         row = {"name": name, "cycles": res["cycles"],
                "rtl_bytes": len(res["bytes"]), "status": res["status"]}
         if res["status"] != 0:
@@ -664,8 +693,13 @@ def run_acceptance_dv(project_root: str, top_rtl: str,
                         "= model content math."
                     ),
                 })
+        elif exp_bytes is None:
+            # Unsupported golden shape: leave the row UNJUDGED (-> honest skip
+            # below) instead of diverging it against a 0-byte reference.
+            row["ok"] = None
+            row["note"] = "golden output not byte-comparable"
         else:
-            ok = exp_bytes is not None and bytes(res["bytes"]) == exp_bytes
+            ok = bytes(res["bytes"]) == exp_bytes
             row["ok"] = ok
             if not ok:
                 row["first_divergence"] = (
@@ -685,12 +719,22 @@ def run_acceptance_dv(project_root: str, top_rtl: str,
                 })
         rows.append(row)
 
-    passed = bool(rows) and not violations and all(
-        r.get("ok") for r in rows if r.get("ok") is not None
-    )
-    summary = {"passed": passed, "skipped": False,
-               "reason": f"{len(rows)} acceptance case(s), "
-                         f"{len(violations)} violation(s)",
+    # HONEST SKIPS, NEVER A FALSE PASS: rows the golden could not judge (the
+    # reference raised, or its output is not byte-comparable) used to be
+    # FILTERED OUT of the verdict, so a sweep where every case was ungradable
+    # reported PASSED without ever comparing RTL to anything.
+    graded = [r for r in rows if r.get("ok") is not None]
+    ungraded = [r for r in rows if r.get("ok") is None]
+    passed = (bool(graded) and not ungraded and not violations
+              and all(r["ok"] for r in graded))
+    skipped = bool(ungraded) and not violations
+    reason = f"{len(rows)} acceptance case(s), {len(violations)} violation(s)"
+    if skipped:
+        reason = (f"{len(ungraded)}/{len(rows)} acceptance case(s) not "
+                  "gradable against the golden: "
+                  + "; ".join(str(r.get("note", "")) for r in ungraded[:3]))
+    summary = {"passed": passed, "skipped": skipped,
+               "reason": reason,
                "cases": rows, "violations": violations}
     try:
         out_json = Path(project_root) / ".coresmith" / "acceptance_dv.json"
@@ -701,5 +745,6 @@ def run_acceptance_dv(project_root: str, top_rtl: str,
     except Exception:  # noqa: BLE001
         pass
     logger.info("acceptance dv: %s (%s)",
-                "PASSED" if passed else "FAILED", summary["reason"])
+                "PASSED" if passed else ("SKIPPED" if skipped else "FAILED"),
+                summary["reason"])
     return summary

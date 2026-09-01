@@ -778,14 +778,32 @@ def _run_equiv_sim(
                 pass
 
         try:
-            proc = subprocess.run(
+            # Own process group so a timeout kills the WHOLE tree (make ->
+            # verilator -> g++ / sim) instead of orphaning compilers that keep
+            # burning CPU/RAM while the harness-error retry rebuilds on top of
+            # them (same fix as run_integration_simulation).
+            import signal as _signal
+
+            _proc = subprocess.Popen(
                 [make_bin, "-C", str(sim_dir)],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
                 env=env,
-                timeout=wall_timeout,
                 preexec_fn=_limit_child,
+                start_new_session=True,
+            )
+            try:
+                _out, _err = _proc.communicate(timeout=wall_timeout)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(os.getpgid(_proc.pid), _signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+                _proc.wait()
+                raise
+            proc = subprocess.CompletedProcess(
+                [make_bin, "-C", str(sim_dir)], _proc.returncode, _out, _err,
             )
         except subprocess.TimeoutExpired:
             # A build/sim that couldn't finish in the bounded window is "cannot
