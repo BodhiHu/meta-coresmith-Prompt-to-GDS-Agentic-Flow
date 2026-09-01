@@ -801,6 +801,26 @@ def _guard_rtl_phase(state: BlockState, node_name: str) -> None:
         )
 
 
+# Constraint sources that survive a fresh block lifecycle: chip-level DV
+# decisions and operator rules are pinned precisely because the spec appends
+# they mirror are destroyed by the per-tier re-spec.
+_PERSISTENT_CONSTRAINT_SOURCES = ("chip_dv_revise", "chip_dv_fix", "human")
+
+
+def _prune_block_constraints(cpath: Path) -> None:
+    """Drop per-lifecycle constraints, keeping the regeneration-proof pins."""
+    try:
+        cur = json.loads(cpath.read_text()) if cpath.exists() else []
+    except (json.JSONDecodeError, OSError):
+        cur = []
+    kept = [c for c in cur if isinstance(c, dict)
+            and c.get("source") in _PERSISTENT_CONSTRAINT_SOURCES]
+    try:
+        cpath.write_text(json.dumps(kept, indent=2) if kept else "[]")
+    except OSError:
+        pass
+
+
 def _callbacks(state: BlockState) -> list:
     """Return an empty callback list (event writing is now internal to ClaudeLLM)."""
     return []
@@ -842,13 +862,17 @@ async def init_block_node(state: BlockState) -> dict:
     block_dir = Path(_pr(state)) / ".coresmith" / "blocks" / block_name
     block_dir.mkdir(parents=True, exist_ok=True)
     # Reset transient files for a fresh block lifecycle
-    for fname in ("constraints.json", "diagnosis.json",
-                  "attempt_history.json", "previous_error.txt"):
+    for fname in ("diagnosis.json", "attempt_history.json", "previous_error.txt"):
         fpath = block_dir / fname
         if fname.endswith(".json"):
-            fpath.write_text("[]" if "history" in fname or "constraint" in fname else "{}")
+            fpath.write_text("[]" if "history" in fname else "{}")
         else:
             fpath.write_text("")
+    # constraints.json is an accumulating ledger, not a transient file: the
+    # chip-level revise/fix pins and operator-added rules are regeneration-
+    # proof by contract (Arm-U audit CRITICAL #2/#3), so only the per-lifecycle
+    # (debug-agent) entries are dropped here.
+    _prune_block_constraints(block_dir / "constraints.json")
 
     return {
         "attempt": 1,
@@ -976,28 +1000,38 @@ async def _resolve_interrupt(payload: dict) -> dict:
 
     ledger.parent.mkdir(parents=True, exist_ok=True)
     _lockf = open(ledger.parent / ".ledger.lock", "a+")
-    import fcntl as _fcntl2
-    _fcntl2.flock(_lockf, _fcntl2.LOCK_EX)
+    _fcntl.flock(_lockf, _fcntl.LOCK_EX)
     try:
         prior = ([ln for ln in ledger.read_text().splitlines() if ln.strip()]
                  if ledger.exists() else prior)
+        # Re-check the budget under the write lock: the check above happened
+        # before two awaited agent calls, so N concurrently-parked branches
+        # can each have passed it and overshoot the cap.
+        if len(prior) >= _chip_lead_max_decisions():
+            log(f"  [CHIP-LEAD] decision budget exhausted "
+                f"({len(prior)}/{_chip_lead_max_decisions()}) -- parking",
+                YELLOW)
+            _CHIP_LEAD_TRIPPED = True
+            return interrupt(payload)
+        # The append and the event write stay inside the try: a raise here
+        # with the flock held would block every other branch forever on the
+        # (synchronous) flock syscall.
+        with ledger.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps({
+                "interrupt_type": payload.get("type", ""),
+                "block_name": payload.get("block_name", ""),
+                "action": action,
+                "reasoning": decision.get("reasoning", ""),
+            }) + "\n")
+        write_graph_event(
+            os.environ.get("CORESMITH_PROJECT_ROOT", "."), "Chip Lead",
+            "chip_lead_decision",
+            {"type": payload.get("type", ""), "action": action,
+             "decision_index": len(prior) + 1},
+        )
     finally:
-        pass
-    with ledger.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps({
-            "interrupt_type": payload.get("type", ""),
-            "block_name": payload.get("block_name", ""),
-            "action": action,
-            "reasoning": decision.get("reasoning", ""),
-        }) + "\n")
-    write_graph_event(
-        os.environ.get("CORESMITH_PROJECT_ROOT", "."), "Chip Lead",
-        "chip_lead_decision",
-        {"type": payload.get("type", ""), "action": action,
-         "decision_index": len(prior) + 1},
-    )
-    _fcntl2.flock(_lockf, _fcntl2.LOCK_UN)
-    _lockf.close()
+        _fcntl.flock(_lockf, _fcntl.LOCK_UN)
+        _lockf.close()
     log(f"  [CHIP-LEAD] {payload.get('type', '?')} -> {action} "
         f"({len(prior) + 1}/{_chip_lead_max_decisions()})", GREEN)
     return decision
@@ -1356,6 +1390,11 @@ async def generate_uarch_spec_node(state: BlockState) -> dict:
             chars = len(result.get("spec_text", ""))
             log(f"  [UARCH] Generated spec ({chars} chars)", GREEN)
             span.set_attribute("chars", chars)
+            # Gate/uarch-patch feedback is a one-shot prescription for THIS
+            # re-spec: once a spec regenerated with it, drop the file so a
+            # stale prescription cannot steer later tiers or runs.
+            if gate_feedback:
+                gate_fb_path.unlink(missing_ok=True)
 
     write_graph_event(_pr(state), "Generate Uarch Spec", "graph_node_exit", {
         "block": block_name,
@@ -1938,6 +1977,8 @@ _DETERMINISTIC_GATE_MARKERS = (
     "SPLIT-BRAIN CONDITIONAL-COMPILATION",                 # ifdef lint report
     "deterministic stage-realization",                     # stage lint subtitle
     "UNSYNTHESIZABLE COMBINATIONAL CLOUD",                 # stage lint header
+    "MEMORY BELONGS IN AN SRAM MACRO",                     # memory-tier report
+    "pre-synth memory-tier lint",                          # memory-tier wrapper
 )
 
 
@@ -2302,7 +2343,9 @@ async def generate_rtl_node(state: BlockState) -> dict:
             except (json.JSONDecodeError, OSError):
                 pass
 
-        if attempt == 1 and rtl_path_obj.exists() and _file_is_fresh(rtl_path_obj, state):
+        if (attempt == 1 and rtl_path_obj.exists()
+                and _file_is_fresh(rtl_path_obj, state)
+                and _artifact_up_to_date(rtl_path_obj, state, block_name)):
             log(f"  [RTL] Using existing (fresh): {block['rtl_target']}", GREEN)
         else:
             log(f"  [RTL] Generating Verilog for {block_name}...", YELLOW)
@@ -2956,7 +2999,11 @@ async def generate_testbench_node(state: BlockState) -> dict:
         force_regen = state.get("force_regen_tb", False) or _conform_force_tb
         if not force_regen and (
             (state.get("preserve_testbench") and tb_path_obj.exists()) or
-            (attempt == 1 and tb_path_obj.exists() and _file_is_fresh(tb_path_obj, state))
+            (attempt == 1 and tb_path_obj.exists()
+             and _file_is_fresh(tb_path_obj, state)
+             and _artifact_up_to_date(tb_path_obj, state, block_name,
+                                      also_newer_than=[Path(rtl_path)]
+                                      if rtl_path else None))
         ):
             log(f"  [TB] Using existing (fresh): {block['testbench']}", GREEN)
         else:
@@ -3215,8 +3262,12 @@ async def generate_testbench_node(state: BlockState) -> dict:
                 sim_result, block_dir, span,
             )
 
-    # Write sim error for diagnose if failed
-    if not sim_passed and sim_result:
+    # Write sim error for diagnose if failed -- but ONLY when the sim loop
+    # itself failed. The equiv / branch-parity / oracle gates above flip
+    # sim_passed on a PASSING sim_result after writing their own actionable
+    # report; overwriting it with the tail of a passing sim log leaves
+    # diagnose with no failure evidence at all.
+    if not sim_passed and sim_result and sim_result.get("passed") is not True:
         sim_log = sim_result.get("log", "")
         (block_dir / "previous_error.txt").write_text(sim_log[-5000:])
 
@@ -3313,19 +3364,30 @@ def _ppa_waivers_path(project_root: str) -> Path:
     return Path(project_root) / ".coresmith" / "ppa_waivers.json"
 
 
-def _ppa_tooling_waived(project_root: str) -> bool:
+def _ppa_tooling_waived(project_root: str, run_key: float | None = None) -> bool:
     """True once the operator has accepted an unmeasurable (yosys-absent) PPA
-    gate for this run (A-Fix 2f) -- so we PARK at most once per run."""
+    gate for this run (A-Fix 2f) -- so we PARK at most once per run.
+
+    The waiver file outlives the process, so ``run_key`` (the run's
+    ``pipeline_run_start``) scopes it: a waiver recorded by an EARLIER run does
+    not silently suppress the park in every future run. ``run_key=None`` keeps
+    the unscoped behavior for callers with no run context."""
     p = _ppa_waivers_path(project_root)
     if not p.exists():
         return False
     try:
-        return bool(json.loads(p.read_text()).get("tooling_missing_accepted"))
+        data = json.loads(p.read_text())
     except (OSError, json.JSONDecodeError):
         return False
+    if not data.get("tooling_missing_accepted"):
+        return False
+    if run_key is None:
+        return True
+    return str(data.get("run", "")) == str(run_key)
 
 
-def _record_ppa_tooling_waiver(project_root: str, block_name: str) -> None:
+def _record_ppa_tooling_waiver(project_root: str, block_name: str,
+                               run_key: float | None = None) -> None:
     """Persist the operator's 'proceed' on an unmeasurable PPA gate."""
     p = _ppa_waivers_path(project_root)
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -3336,12 +3398,17 @@ def _record_ppa_tooling_waiver(project_root: str, block_name: str) -> None:
         except (OSError, json.JSONDecodeError):
             data = {}
     data["tooling_missing_accepted"] = True
+    if data.get("run") != run_key:
+        data["waived_at_block"] = block_name
     data.setdefault("waived_at_block", block_name)
+    # Scope the waiver to THIS run (see _ppa_tooling_waived).
+    data["run"] = run_key
     p.write_text(json.dumps(data, indent=2))
 
 
 def _ppa_should_park_tooling_missing(
-    project_root: str, ppa_ok: bool | None, ppa_meta: dict | None
+    project_root: str, ppa_ok: bool | None, ppa_meta: dict | None,
+    run_key: float | None = None,
 ) -> bool:
     """A-Fix 2f decision (pure): PARK when the deterministic PPA gate could not
     run because its tooling (yosys) is absent, under the STRICT profile, and it
@@ -3361,7 +3428,7 @@ def _ppa_should_park_tooling_missing(
     ensure_applied()
     if resolve_profile() != "strict":
         return False
-    return not _ppa_tooling_waived(project_root)
+    return not _ppa_tooling_waived(project_root, run_key)
 
 
 def _park_ppa_unmeasurable(state: BlockState, block_name: str) -> None:
@@ -3395,7 +3462,8 @@ def _park_ppa_unmeasurable(state: BlockState, block_name: str) -> None:
             "not re-ask."
         ),
     })
-    _record_ppa_tooling_waiver(pr, block_name)
+    _record_ppa_tooling_waiver(pr, block_name,
+                               state.get("pipeline_run_start") or None)
 
 
 def _evaluate_ppa_gate(
@@ -4058,15 +4126,16 @@ def _resolve_run_die_budget(project_root: str) -> tuple[float | None, str]:
         prd=prd, requirements=reqs, ers_technology_text=ers_tech)
 
 
-def _container_block_names(project_root: str, block_names: list) -> set:
-    """Blocks whose measured per-block synth CONTAINS other listed blocks.
+def _container_leaf_map(project_root: str, block_names: list) -> dict:
+    """Map each container block -> the set of listed blocks its RTL contains.
 
-    An integration-top block built as a self-contained source (its RTL --
-    directly or via one level of ``include`` -- instantiates other listed
-    blocks) synthesizes FLAT: its measured area already includes the leaves.
+    Same detection as ``_container_block_names`` (whose result is this map's
+    key set); the per-container membership is what lets the die rollup
+    de-duplicate every container against ITS OWN leaves instead of collapsing
+    all containers into one group and dropping the smaller ones.
     """
     inc_re = re.compile(r'^\s*`include\s+"([^"]+)"', re.MULTILINE)
-    out: set = set()
+    out: dict = {}
     for name in block_names:
         try:
             br = json.loads(
@@ -4108,24 +4177,38 @@ def _container_block_names(project_root: str, block_names: list) -> set:
             continue
         if not text:
             continue
-        for other in block_names:
-            if other == name:
-                continue
-            if re.search(
-                rf"\b{re.escape(other)}\s+(?:#|[a-zA-Z_]\w*\s*\()", text
-            ):
-                out.add(name)
-                break
+        contained = {
+            other for other in block_names
+            if other != name and re.search(
+                rf"\b{re.escape(other)}\s+(?:#|[a-zA-Z_]\w*\s*\()", text)
+        }
+        if contained:
+            out[name] = contained
     return out
 
 
-def _subsume_container_items(items: list, containers: set) -> tuple:
+def _container_block_names(project_root: str, block_names: list) -> set:
+    """Blocks whose measured per-block synth CONTAINS other listed blocks.
+
+    An integration-top block built as a self-contained source (its RTL --
+    directly or via one level of ``include`` -- instantiates other listed
+    blocks) synthesizes FLAT: its measured area already includes the leaves.
+    """
+    return set(_container_leaf_map(project_root, block_names))
+
+
+def _subsume_container_items(items: list, containers: set,
+                             containment: dict | None = None) -> tuple:
     """Drop the double-count between flat container blocks and their leaves.
 
-    Returns ``(items, note)``: when both containers and leaves carry measured
-    area, keep whichever side is LARGER -- the honest design area is
-    max(flat container, sum-of-leaves), never their sum -- and drop the
-    other, with a note for the log/report.
+    Returns ``(items, note)``. With a ``containment`` map the resolution is
+    RECURSIVE: a container's honest area is max(flat container,
+    sum-of-its-direct-children), where a nested container child contributes
+    its RESOLVED max -- never its flat area PLUS its own leaves, which the
+    flat area already includes. Disjoint container tops resolve
+    independently instead of the design being reported as only the biggest
+    one. Without a ``containment`` map every container is assumed to cover
+    every leaf (single group, legacy behavior).
     ``CORESMITH_DIE_ROLLUP_CONTAINER_DEDUP=0`` restores the legacy sum.
     """
     if (os.environ.get("CORESMITH_DIE_ROLLUP_CONTAINER_DEDUP", "1")
@@ -4135,18 +4218,93 @@ def _subsume_container_items(items: list, containers: set) -> tuple:
     leaf = [i for i in items if i.name not in containers]
     if not cont or not leaf:
         return items, ""
-    cont_max = max(i.area_um2 for i in cont)
-    leaf_sum = sum(i.area_um2 for i in leaf)
-    if leaf_sum >= cont_max:
-        return leaf, (
-            f"container block(s) {sorted(i.name for i in cont)} subsumed by "
-            f"their leaves (flat {cont_max:,.0f} um2 <= sum-of-leaves "
-            f"{leaf_sum:,.0f} um2) -- not double-counted")
-    biggest = max(cont, key=lambda i: i.area_um2)
-    return [biggest], (
-        f"leaf blocks subsumed by flat container {biggest.name} "
-        f"({cont_max:,.0f} um2 >= sum-of-leaves {leaf_sum:,.0f} um2) -- "
-        f"not double-counted")
+    notes: list = []
+    kept: list = []
+    by_name = {i.name: i for i in items}
+    order = {i.name: n for n, i in enumerate(items)}
+
+    if not containment:
+        # Legacy: one group -- the biggest container vs every leaf.
+        top = max(cont, key=lambda i: i.area_um2)
+        leaf_sum = sum(i.area_um2 for i in leaf)
+        if leaf_sum >= top.area_um2:
+            kept.extend(leaf)
+            notes.append(
+                f"container block(s) {[top.name]} subsumed by "
+                f"their leaves (flat {top.area_um2:,.0f} um2 <= sum-of-leaves "
+                f"{leaf_sum:,.0f} um2) -- not double-counted")
+        else:
+            kept.append(top)
+            notes.append(
+                f"leaf blocks subsumed by flat container {top.name} "
+                f"({sorted(i.name for i in leaf)}: {top.area_um2:,.0f} "
+                f"um2 >= sum-of-leaves {leaf_sum:,.0f} um2) -- not "
+                f"double-counted")
+        kept.sort(key=lambda i: order.get(i.name, 0))
+        return kept, "; ".join(notes)
+
+    def _reach(name: str) -> set:
+        seen: set = set()
+        stack = list(containment.get(name) or ())
+        while stack:
+            n = stack.pop()
+            if n in seen or n == name:
+                continue
+            seen.add(n)
+            stack.extend(containment.get(n) or ())
+        return seen
+
+    claimed: set = set()
+
+    def _resolve(name: str, visiting: set) -> tuple:
+        """(kept_items, resolved_area) for the subtree rooted at ``name``."""
+        if name in visiting or name in claimed:
+            return [], 0.0  # cycle, or already claimed by a larger root
+        item = by_name.get(name)
+        children = containment.get(name) or ()
+        # Direct children only: a name also reachable through a SIBLING
+        # nested container is counted inside that sibling's resolution.
+        direct = [c for c in sorted(children)
+                  if not any(c in _reach(c2) for c2 in children if c2 != c)]
+        child_kept: list = []
+        child_area = 0.0
+        for c in direct:
+            k, a = _resolve(c, visiting | {name})
+            child_kept.extend(k)
+            child_area += a
+        if item is None:
+            return child_kept, child_area  # unmeasured container: pass through
+        if name not in containers or not child_kept:
+            return [item], item.area_um2
+        if child_area >= item.area_um2:
+            notes.append(
+                f"container block(s) {[name]} subsumed by "
+                f"their leaves (flat {item.area_um2:,.0f} um2 <= sum-of-leaves "
+                f"{child_area:,.0f} um2) -- not double-counted")
+            return child_kept, child_area
+        notes.append(
+            f"leaf blocks subsumed by flat container {name} "
+            f"({sorted(i.name for i in child_kept)}: {item.area_um2:,.0f} "
+            f"um2 >= sum-of-leaves {child_area:,.0f} um2) -- not "
+            f"double-counted")
+        return [item], item.area_um2
+
+    contained_anywhere: set = set()
+    for c in cont:
+        contained_anywhere |= _reach(c.name)
+    roots = [c for c in cont if c.name not in contained_anywhere]
+    if not roots:  # pathological containment cycle: legacy single group
+        return _subsume_container_items(items, containers, None)
+    for top in sorted(roots, key=lambda i: -i.area_um2):
+        k, _a = _resolve(top.name, set())
+        kept.extend(i for i in k if i.name not in {j.name for j in kept})
+        claimed.add(top.name)
+        claimed |= _reach(top.name)
+    # Containers never re-surface as standalone leaves.
+    claimed |= {c.name for c in cont}
+    kept.extend(i for i in leaf if i.name not in claimed)
+    kept.sort(key=lambda i: order.get(i.name, 0))
+    return kept, "; ".join(notes)
 
 
 def _die_cap_excludes_sram(project_root: str) -> bool:
@@ -4238,8 +4396,8 @@ def _measured_die_rollup(project_root: str, block_names: list):
     # FLAT elaboration of the leaves it instantiates already CONTAINS their
     # area -- summing both double-counts the design (0.250 flat top + 0.254
     # leaves rolled to 0.504 against a 0.337 budget the 0.254 design fits).
-    items, _subsume_note = _subsume_container_items(
-        items, _container_block_names(project_root, block_names))
+    _cmap = _container_leaf_map(project_root, block_names)
+    items, _subsume_note = _subsume_container_items(items, set(_cmap), _cmap)
     if _subsume_note:
         log(f"  [DIE-ROLLUP] {_subsume_note}", YELLOW)
     std_rollup = _mprice.evaluate_die_rollup(
@@ -4466,7 +4624,9 @@ async def synthesize_node(state: BlockState) -> dict:
             budget_area_um2=ppa_meta.get("budget_area_um2"),
             report_path=str(_skip_report_path),
         )
-        if _ppa_should_park_tooling_missing(_pr(state), ppa_ok, ppa_meta):
+        if _ppa_should_park_tooling_missing(
+                _pr(state), ppa_ok, ppa_meta,
+                state.get("pipeline_run_start") or None):
             _park_ppa_unmeasurable(state, block_name)
         return {"synth_success": True, "synth_gate_count": 0,
                 "ppa_ok": ppa_ok, "ppa_reasons": ppa_reasons,
@@ -4640,7 +4800,9 @@ async def synthesize_node(state: BlockState) -> dict:
         ppa_ok, ppa_reasons, ppa_meta = _evaluate_ppa_gate(
             _pr(state), block_name, rtl_path, result,
         )
-        if _ppa_should_park_tooling_missing(_pr(state), ppa_ok, ppa_meta):
+        if _ppa_should_park_tooling_missing(
+                _pr(state), ppa_ok, ppa_meta,
+                state.get("pipeline_run_start") or None):
             _park_ppa_unmeasurable(state, block_name)
 
     # --- POST-SYNTHESIS GATE-LEVEL SIMULATION (CORESMITH_GATE_SIM) ----------
@@ -4879,17 +5041,41 @@ async def diagnose_node(state: BlockState) -> dict:
             "category": "SIM_TIMEOUT",
         })
         _ah_path.write_text(_json.dumps(_hist, indent=2))
+        # Bounded exactly like _route_decision's Rule -1: this short-circuit
+        # returns before the router ever sees the category, so the cap has to
+        # be enforced here or a genuinely-hung block retries forever (the sim
+        # timeout also does not consume the attempt budget in decide_node).
+        try:
+            _sim_to_max = int(
+                os.environ.get("CORESMITH_SIM_TIMEOUT_MAX_RETRIES", "4"))
+        except ValueError:
+            _sim_to_max = 4
+        _to_count = sum(1 for _h in _hist
+                        if _h.get("category") == "SIM_TIMEOUT")
+        _to_exhausted = _to_count >= _sim_to_max
+        if _to_exhausted:
+            log(f"  [DIAGNOSE] SIM_TIMEOUT x{_to_count} (max {_sim_to_max}) -- "
+                f"the extended cap is no longer helping, escalating", RED)
+            _to_diag["escalate"] = True
+            _to_diag["diagnosis"] += (
+                f" Retried {_to_count} time(s) with an extended cap without "
+                f"producing a verdict -- the block is hung or far too slow.")
         (block_dir / "diagnosis.json").write_text(_json.dumps(_to_diag, indent=2))
         write_graph_event(_pr(state), "Diagnose Failure", "graph_node_exit", {
             "block": block_name, "category": "SIM_TIMEOUT",
             "confidence": 0.0, "needs_human": False,
+            "escalate": _to_exhausted,
         })
-        return {"debug_action": "retry_rtl"}
+        return {"debug_action": "escalate" if _to_exhausted else "retry_rtl"}
 
     # Short-circuit: detect infrastructure failures (LLM timeout/crash)
     # and skip the debug LLM call which would likely also fail.
-    _INFRA_MARKERS = ("[ClaudeLLM error:", "timed out", "exit_code=-9",
-                      "circuit breaker open")
+    # The markers must stay LLM-SPECIFIC: a bare "timed out" also matches
+    # genuine tool/design failures that land here ("Verilator lint timed out",
+    # "OpenSTA timed out after 300s" inside a fail-closed PPA reason), which
+    # were then misfiled as infrastructure and never diagnosed.
+    _INFRA_MARKERS = ("[ClaudeLLM error:", "claude CLI timed out",
+                      "exit_code=-9", "circuit breaker open")
     if any(m in error_log for m in _INFRA_MARKERS):
         log("  [DIAGNOSE] Infrastructure failure detected, skipping debug LLM", YELLOW)
         infra_diag = {
@@ -5953,6 +6139,27 @@ async def _retire_pin_mapped_blocks(
         # retry -> re-plan against the (hopefully amended) PRD and loop
 
 
+# Opening sentence of every feedback string init_tier writes (see
+# _gate_feedback_for_block) -- its provenance marker on disk.
+_GATE_FEEDBACK_HEADER = "The composed-chip integration gate FAILED"
+
+
+def _is_own_gate_feedback(path: Path) -> bool:
+    """True when ``gate_feedback.txt`` was written by init_tier itself.
+
+    Sibling nodes deliver their prescription through the SAME file (the
+    uarch_patch-on-retry auto-apply writes it moments before routing back
+    here), so the stale-feedback clearing below must not delete a message
+    generate_uarch_spec has not read yet.
+    """
+    try:
+        return path.read_text(
+            encoding="utf-8", errors="replace").lstrip().startswith(
+                _GATE_FEEDBACK_HEADER)
+    except OSError:
+        return False
+
+
 async def init_tier_node(state: OrchestratorState) -> dict:
     """Compute the tier list (once) and log the current tier."""
     pr = state.get("project_root", str(PROJECT_ROOT))
@@ -5994,7 +6201,12 @@ async def init_tier_node(state: OrchestratorState) -> dict:
     # stale feedback never leaks into a later draw or a clean first pass (mir
     # absent/passed -> no feedback anywhere).
     mir = state.get("model_integration_result") or {}
-    gate_failed = bool(mir) and not mir.get("passed", True)
+    # An ADVISORY-bypassed gate (CORESMITH_DETERMINISTIC_BFM) reports
+    # passed=False on purpose: it is explicitly not hard-blocking and not
+    # re-speccing, so treating it as a gate failure here would broadcast a
+    # "gate FAILED" re-spec prescription to every block in the tier.
+    gate_failed = (bool(mir) and not mir.get("passed", True)
+                   and not mir.get("advisory_bypass"))
     # Engine Fix #5b: when the gate precisely localized the failure (affected_
     # blocks/edge), feed only those blocks; otherwise BROADCAST to all tier
     # blocks (the first_divergence_block stub can't be trusted as a sole target).
@@ -6012,7 +6224,7 @@ async def init_tier_node(state: OrchestratorState) -> dict:
             fbp.parent.mkdir(parents=True, exist_ok=True)
             if fb:
                 fbp.write_text(fb, encoding="utf-8")
-            elif fbp.exists():
+            elif fbp.exists() and _is_own_gate_feedback(fbp):
                 fbp.unlink()
         except OSError:
             pass
@@ -6136,7 +6348,7 @@ def _gate_feedback_for_block(mir: dict, block_name: str,
     point. Engine Fix #5/#5b.
     """
     parts = [
-        "The composed-chip integration gate FAILED -- the wired block models do "
+        _GATE_FEEDBACK_HEADER + " -- the wired block models do "
         "not compose into a chip that matches the reference.",
         f"gap_class={mir.get('gap_class', 'block_math')}.",
     ]
@@ -6157,9 +6369,18 @@ def _gate_feedback_for_block(mir: dict, block_name: str,
     # the FIRST divergence position -- the most useful clue when unlocalized).
     gap_class = mir.get("gap_class", "block_math")
     div_off = -1
-    if "expected" in mir or "observed" in mir:
-        exp = repr(mir.get("expected"))[:200]
-        obs = repr(mir.get("observed"))[:200]
+    # The gate nodes carry expected/observed per VIOLATION, not at top level
+    # (only hand-built results do), so fall back to the first violation that
+    # has them -- otherwise the bisect below never runs in production.
+    src = mir
+    if "expected" not in src and "observed" not in src:
+        for v in (mir.get("violations") or []):
+            if isinstance(v, dict) and ("expected" in v or "observed" in v):
+                src = v
+                break
+    if "expected" in src or "observed" in src:
+        exp = repr(src.get("expected"))[:200]
+        obs = repr(src.get("observed"))[:200]
         parts.append(f"reference expected {exp}; composed chip observed {obs}.")
         try:
             from orchestrator.architecture.model_integration import (
@@ -6168,7 +6389,7 @@ def _gate_feedback_for_block(mir: dict, block_name: str,
             from orchestrator.architecture.model_integration import (
                 first_divergence_offset as _fdo,
             )
-            e, o = mir.get("expected"), mir.get("observed")
+            e, o = src.get("expected"), src.get("observed")
             if _ibs(e) and _ibs(o):
                 div_off = _fdo(e, o)
                 if div_off >= 0:
@@ -7230,6 +7451,57 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                 "reason": "No block RTL could be parsed",
             }}
 
+        # A block whose RTL file RESOLVED but whose ports could NOT be parsed is
+        # dropped from `modules` -- the same silent-deletion defect the
+        # completeness gate above exists to stop, one step later (and with
+        # 1-of-2 parsed it would even take the single-block wrapper path below).
+        # Park in the same shape rather than assembling around it.
+        _unparsed = [n for n in rtl_paths if n not in modules]
+        if _unparsed and _block_rtl_complete_gate_enabled():
+            log(f"  [INTEGRATION] BLOCK PORTS UNPARSEABLE for {_unparsed} -- "
+                f"refusing to assemble a chip that is missing a block", RED)
+            write_graph_event(pr, "Integration Check", "block_rtl_unparsed",
+                              {"unparsed_blocks": _unparsed,
+                               "parsed_blocks": sorted(modules)})
+            response = (await _resolve_interrupt({
+                "type": "integration_failure",
+                "error_kind": "unparsed_block_rtl",
+                "unparsed_blocks": _unparsed,
+                "unparsed_block_rtl_paths": {n: rtl_paths[n] for n in _unparsed},
+                "error_count": len(_unparsed),
+                "supported_actions": ["override", "abort"],
+                "outer_agent_guidance": (
+                    "These blocks' RTL files exist but their module header "
+                    "could not be parsed, so assembling now would ship a chip "
+                    "with those blocks DELETED -- no instance, no ports. For "
+                    "each one: check that the file declares a module matching "
+                    "the block (see .coresmith/block_specs.json rtl_target) in "
+                    "a form the port parser accepts. `override` assembles "
+                    "WITHOUT those blocks -- only for a block that genuinely "
+                    "does not belong in the chip. `abort` ends integration."
+                ),
+            })) or {}
+            _act = response.get("action", "abort")
+            write_graph_event(pr, "Integration Check",
+                              "block_rtl_unparsed_resume", {"action": _act})
+            if _act == "override":
+                log("  [INTEGRATION] unparseable block RTL OVERRIDE -- "
+                    f"assembling WITHOUT {_unparsed}", YELLOW)
+                rtl_paths = {n: _rp for n, _rp in rtl_paths.items()
+                             if n in modules}
+            else:
+                result = {
+                    "aborted": True, "skipped": True,
+                    "reason": ("block RTL ports unparseable: "
+                               f"{_unparsed}"),
+                    "error": "unparsed_block_rtl",
+                    "error_count": len(_unparsed),
+                    "missing_blocks": _unparsed,
+                }
+                write_graph_event(pr, "Integration Check",
+                                  "graph_node_exit", result)
+                return {"integration_result": result}
+
         block_port_summaries = []
         for name, mod in sorted(modules.items()):
             block_port_summaries.append({
@@ -7295,7 +7567,10 @@ async def integration_check_node(state: OrchestratorState) -> dict:
             log(f"  [INTEGRATION] Single-block design: generated wrapper "
                 f"{top_name} for {solo_name}", GREEN)
 
-            solo_rtl_path = list(rtl_paths.values())[0]
+            # By NAME: rtl_paths can still carry other blocks' files, and
+            # linting the wrapper against the wrong source is a confusing
+            # failure at best and a wrong chip at worst.
+            solo_rtl_path = rtl_paths.get(solo_name) or list(rtl_paths.values())[0]
             lint_result = await asyncio.to_thread(
                 lint_top_level, output_path, [solo_rtl_path], top_name
             )
@@ -8691,6 +8966,10 @@ async def uarch_integration_gate_node(state: OrchestratorState) -> dict:
                     out = {
                         "model_integration_result": {
                             "passed": False, "derate_revise": True,
+                            # route_after_uarch_gate routes on action_taken;
+                            # without it the unknown-action fail-safe ENDs the
+                            # run instead of re-speccing.
+                            "action_taken": "revise_uarch",
                             "derate_signoff": esc,
                         },
                         "uarch_revise_attempts": (
@@ -9654,6 +9933,20 @@ def _maxgeo_conformance_scope_enabled() -> bool:
     ) != "0"
 
 
+def _tb_writer_flags(tb_result: dict | None) -> dict:
+    """The engine-writer flags a reused testbench must carry forward.
+
+    ``_maxgeo_conformance_scope`` keys off flags ONLY the engine's own bfm_lib
+    writer sets, and they live in the writer's in-memory return -- so a
+    fix_rtl/fix_tb resume that rebuilds tb_result from the persisted DV result
+    has to restore them, or the identical TB that earned an advisory verdict
+    one cycle earlier hard-fails the scope gate."""
+    tbr = tb_result or {}
+    return {k: tbr[k] for k in ("deterministic_bfm", "conformance_only",
+                                "contract")
+            if tbr.get(k) is not None}
+
+
 def _maxgeo_conformance_scope(
     project_root: str, tb_path: str, tb_result: dict | None,
     dims: dict, marker: dict, missing: dict,
@@ -9964,6 +10257,7 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
                 "testbench_path": previous_tb_path,
                 "tb_path": previous_tb_path,
                 "test_count": previous_dv.get("test_count", 0),
+                **(previous_dv.get("tb_writer_flags") or {}),
             }
         else:
             # 1. Generate integration testbench
@@ -10572,6 +10866,7 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
                 "interrupt_payload": payload,
                 "test_count": test_count,
                 "testbench_path": tb_path,
+                "tb_writer_flags": _tb_writer_flags(tb_result),
                 "sim_log_path": sim_result.get("log_path", ""),
                 "design_name": design_name,
                 "contract_audit": contract_audit,
@@ -11183,6 +11478,7 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
                 "testbench_path": previous_tb_path,
                 "tb_path": previous_tb_path,
                 "test_count": previous_dv.get("test_count", 0),
+                **(previous_dv.get("tb_writer_flags") or {}),
             }
         else:
             log("  [VALIDATION-DV] Generating ERS/KPI validation testbench...", YELLOW)
@@ -11567,6 +11863,7 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
                 "test_count": test_count,
                 "requirement_count": requirement_count,
                 "testbench_path": tb_path,
+                "tb_writer_flags": _tb_writer_flags(tb_result),
                 "sim_log_path": sim_result.get("log_path", ""),
                 "design_name": design_name,
                 "contract_audit": contract_audit,

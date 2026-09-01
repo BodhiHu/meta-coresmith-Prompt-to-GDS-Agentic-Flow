@@ -946,6 +946,25 @@ class TestInternalNodes:
         assert result["debug_action"] == ""
 
     @pytest.mark.asyncio
+    async def test_init_block_keeps_regeneration_proof_constraints(self, tmp_path):
+        # The chip-level revise/fix pins and operator rules are the whole point
+        # of constraints.json surviving regeneration; only the per-lifecycle
+        # (debug-agent) entries are dropped.
+        block_dir = tmp_path / ".coresmith" / "blocks" / "scrambler"
+        block_dir.mkdir(parents=True)
+        (block_dir / "constraints.json").write_text(json.dumps([
+            {"rule": "INTEGRATION_DV REVISION", "source": "chip_dv_revise"},
+            {"rule": "keep the fix", "source": "chip_dv_fix"},
+            {"rule": "operator rule", "source": "human"},
+            {"rule": "per-attempt hint", "source": "debug_agent"},
+        ]))
+        state = _block_state(_make_block("scrambler"), tmp_path=str(tmp_path))
+        await init_block_node(state)
+        kept = json.loads((block_dir / "constraints.json").read_text())
+        assert [c["source"] for c in kept] == [
+            "chip_dv_revise", "chip_dv_fix", "human"]
+
+    @pytest.mark.asyncio
     async def test_init_block_creates_disk_dir(self, tmp_path):
         state = _block_state(_make_block("scrambler"), tmp_path=str(tmp_path))
         await init_block_node(state)
@@ -2721,13 +2740,37 @@ class TestGateFeedbackThreading:
 
     @pytest.mark.asyncio
     async def test_no_gate_result_clears_stale_feedback(self, tmp_path):
-        # First pass-1 fan-out (mir None): no feedback, and any stale file from a
-        # prior run is cleared so it can't leak into a fresh draw.
+        # First pass-1 fan-out (mir None): no feedback, and a stale file this
+        # node itself wrote is cleared so it can't leak into a fresh draw.
         stale = self._fb_path(tmp_path, "frame_ctrl")
         stale.parent.mkdir(parents=True)
-        stale.write_text("stale gate feedback")
+        stale.write_text(pipeline_graph._gate_feedback_for_block(
+            {"passed": False}, "frame_ctrl"))
         await pipeline_graph.init_tier_node(self._state(tmp_path, None))
         assert not stale.exists()
+
+    @pytest.mark.asyncio
+    async def test_clearing_preserves_other_writers_feedback(self, tmp_path):
+        # A sibling node (uarch_patch-on-retry) delivers its prescription
+        # through the SAME file; init_tier must not delete it before
+        # generate_uarch_spec reads it.
+        fb = self._fb_path(tmp_path, "frame_ctrl")
+        fb.parent.mkdir(parents=True)
+        fb.write_text("MICROARCH REVISION (auto-applied from a high-confidence "
+                      "diagnose uarch_patch, confidence 0.95): ...")
+        await pipeline_graph.init_tier_node(self._state(tmp_path, None))
+        assert fb.exists()
+        assert "MICROARCH REVISION" in fb.read_text()
+
+    @pytest.mark.asyncio
+    async def test_advisory_bypass_is_not_a_gate_failure(self, tmp_path):
+        # The advisory bypass reports passed=False on purpose -- it must NOT
+        # broadcast "gate FAILED" re-spec feedback to every tier block.
+        mir = {"passed": False, "advisory_bypass": True,
+               "gap_class": "block_math"}
+        await pipeline_graph.init_tier_node(self._state(tmp_path, mir))
+        for name in ("frame_ctrl", "other_blk"):
+            assert not self._fb_path(tmp_path, name).exists()
 
     @pytest.mark.asyncio
     async def test_passed_gate_means_no_feedback(self, tmp_path):
@@ -3661,3 +3704,44 @@ async def test_gate_sim_skipped_when_synthesis_failed(tmp_path, monkeypatch):
     prev = (tmp_path / ".coresmith" / "blocks" / "blk" / "previous_error.txt")
     assert "SYNTH BOOM" in prev.read_text()  # synth error preserved
     assert pipeline_graph.route_after_synth(out) == "diagnose"
+
+
+class TestDeterministicGateMarkers:
+    def test_memory_tier_gate_is_a_deterministic_gate(self, tmp_path):
+        # The pre-synth memory-tier gate fails the SAME sim-passing RTL every
+        # time, so it must be recognized as deterministic or skip_regen
+        # livelocks on it.
+        (tmp_path / "previous_error.txt").write_text(
+            "UNSYNTHESIZABLE -- pre-synth memory-tier lint (yosys NOT run):\n\n"
+            "MEMORY BELONGS IN AN SRAM MACRO (register-tier storage over the "
+            "SRAM threshold)")
+        assert pipeline_graph._deterministic_gate_retry(tmp_path) is True
+
+
+class TestContainerSubsumeGroups:
+    def _item(self, name, area):
+        from orchestrator.langgraph.mem_price import RollupItem
+        return RollupItem(name=name, area_um2=area, source="ppa_history")
+
+    def test_disjoint_containers_each_counted(self, monkeypatch):
+        # Two independent container tops: each is de-duplicated against ITS OWN
+        # leaves, so the die rollup is not reduced to the biggest container.
+        monkeypatch.delenv("CORESMITH_DIE_ROLLUP_CONTAINER_DEDUP", raising=False)
+        items = [self._item("enc_top", 300000.0), self._item("dec_top", 250000.0),
+                 self._item("a", 60000.0), self._item("b", 40000.0),
+                 self._item("c", 60000.0), self._item("d", 40000.0)]
+        out, note = pipeline_graph._subsume_container_items(
+            items, {"enc_top", "dec_top"},
+            {"enc_top": {"a", "b"}, "dec_top": {"c", "d"}})
+        assert sorted(i.name for i in out) == ["dec_top", "enc_top"]
+        assert sum(i.area_um2 for i in out) == 550000.0
+        assert note
+
+    def test_nested_container_absorbed_once(self, monkeypatch):
+        monkeypatch.delenv("CORESMITH_DIE_ROLLUP_CONTAINER_DEDUP", raising=False)
+        items = [self._item("chip_top", 300000.0), self._item("mid", 200000.0),
+                 self._item("a", 50000.0)]
+        out, _note = pipeline_graph._subsume_container_items(
+            items, {"chip_top", "mid"},
+            {"chip_top": {"mid"}, "mid": {"a"}})
+        assert [i.name for i in out] == ["chip_top"]
