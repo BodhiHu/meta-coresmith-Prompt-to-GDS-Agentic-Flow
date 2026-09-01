@@ -277,6 +277,18 @@ class DebugAgent:
         try:
             user_message = build_debug_user_message(block_name, phase)
 
+            diag_path = Path(project_root) / ".coresmith" / "blocks" / block_name / "diagnosis.json"
+            # The path is STABLE across attempts and ClaudeLLM.call() returns
+            # error strings instead of raising, so a bare exists() check adopts
+            # the PREVIOUS attempt's diagnosis -- for a different failure --
+            # whenever this call writes nothing. Snapshot the bytes before the
+            # call and adopt the file only if it CHANGED (same guard as
+            # ContractAuditAgent).
+            try:
+                diag_before = diag_path.read_bytes() if diag_path.exists() else None
+            except OSError:
+                diag_before = None
+
             run_name = f"Analyze Failure [{block_title}]"
             await self.llm.call(
                 system=DEBUG_SYSTEM_PROMPT,
@@ -284,8 +296,13 @@ class DebugAgent:
                 run_name=run_name,
             )
 
-            diag_path = Path(project_root) / ".coresmith" / "blocks" / block_name / "diagnosis.json"
-            if diag_path.exists():
+            try:
+                written_by_this_call = (
+                    diag_path.exists() and diag_path.read_bytes() != diag_before
+                )
+            except OSError:
+                written_by_this_call = False
+            if written_by_this_call:
                 return json.loads(diag_path.read_text())
 
             return {

@@ -62,6 +62,25 @@ class OutputContractReviewAgent:
             )
             out.parent.mkdir(parents=True, exist_ok=True)
 
+            # The output path is STABLE across review rounds and is never
+            # cleared, so a bare out.exists() below would adopt the PREVIOUS
+            # round's verdict (for a different decomposition) whenever this
+            # call writes nothing -- ClaudeLLM.call() returns error strings
+            # rather than raising. Snapshot the bytes and adopt the file only
+            # if it CHANGED, exactly as ContractAuditAgent does.
+            try:
+                _before = out.read_bytes() if out.exists() else None
+            except OSError:
+                _before = None
+
+            def _written_by_this_call() -> bool:
+                try:
+                    if not out.exists():
+                        return False
+                    return out.read_bytes() != _before
+                except OSError:
+                    return False
+
             default = self._default_result(block_names)
             try:
                 bd_json = json.dumps(block_diagram or {}, indent=2)[:24000]
@@ -85,7 +104,7 @@ class OutputContractReviewAgent:
                     prompt=prompt,
                     run_name="Output Contract Review",
                 )
-                if out.exists():
+                if _written_by_this_call():
                     result = json.loads(out.read_text(encoding="utf-8"))
                 else:
                     result = self._parse_json(content, default)

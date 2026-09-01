@@ -38,9 +38,7 @@ else:
     )
 
 
-_JSON_BLOCK_RE = re.compile(
-    r"```json\s*\n\s*(\{[^}]*\})\s*\n\s*```", re.DOTALL
-)
+_JSON_FENCE_RE = re.compile(r"```json\s*(.*?)```", re.DOTALL)
 
 
 def _endpoint_block(endpoint: Any) -> str | None:
@@ -86,22 +84,77 @@ def _filter_connections_for_blocks(
     return filtered, deferred
 
 
-def _parse_issue_counts(summary: str) -> tuple[int, int]:
+def _balanced_json_objects(text: str) -> list[str]:
+    """Return every brace-balanced ``{...}`` span in ``text``, in order.
+
+    A regex cannot match nested objects, so the counts block is scanned by
+    hand (skipping braces inside string literals) -- otherwise a summary
+    carrying an extra nested key parses as "no counts at all".
+    """
+    objs: list[str] = []
+    depth = 0
+    start = -1
+    in_str = False
+    esc = False
+    for i, ch in enumerate(text):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}" and depth:
+            depth -= 1
+            if depth == 0 and start >= 0:
+                objs.append(text[start:i + 1])
+    return objs
+
+
+def _extract_issue_counts(summary: str) -> tuple[int, int] | None:
     """Extract issues_found / issues_fixed from the LLM's JSON summary block.
 
-    Falls back to (0, 0) if parsing fails, which forces human review
-    rather than silently misclassifying the outcome.
+    Returns ``None`` when no counts could be parsed. That is deliberately
+    distinct from (0, 0): the caller reads issues_found == 0 as a clean,
+    auto-approvable review and issues_fixed == 0 as "no spec was edited", so
+    reporting zeros for an unparsed summary would silently turn a
+    found-and-fixed review into a green no-op.
     """
-    m = _JSON_BLOCK_RE.search(summary)
-    if m:
+    candidates: list[str] = []
+    for m in _JSON_FENCE_RE.finditer(summary):
+        candidates.extend(_balanced_json_objects(m.group(1)))
+    if not candidates:
+        candidates = _balanced_json_objects(summary)
+
+    parsed: tuple[int, int] | None = None
+    for raw in candidates:
         try:
-            data = json.loads(m.group(1))
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(data, dict):
+            continue
+        if "issues_found" not in data and "issues_fixed" not in data:
+            continue
+        try:
             found = int(data.get("issues_found", 0))
             fixed = int(data.get("issues_fixed", 0))
-            return max(found, 0), max(fixed, 0)
-        except (json.JSONDecodeError, ValueError, TypeError):
-            pass
-    return 0, 0
+        except (ValueError, TypeError):
+            continue
+        parsed = (max(found, 0), max(fixed, 0))  # last counts block wins
+    return parsed
+
+
+def _parse_issue_counts(summary: str) -> tuple[int, int]:
+    """Counts from the summary, (0, 0) when there is no counts block."""
+    return _extract_issue_counts(summary) or (0, 0)
 
 
 class IntegrationReviewAgent:
@@ -159,6 +212,16 @@ class IntegrationReviewAgent:
                 dst = review_dir / f"{name}.md"
                 shutil.copy2(src, dst)
                 spec_paths.append(str(dst))
+
+            # Byte snapshot of the exact files handed to the agent, so an
+            # unparseable summary can still be distinguished from a genuine
+            # no-op review (see _parse_issue_counts).
+            spec_before: dict[str, bytes | None] = {}
+            for sp in spec_paths:
+                try:
+                    spec_before[sp] = Path(sp).read_bytes()
+                except OSError:
+                    spec_before[sp] = None
 
             bd_path = root / ".coresmith" / "block_diagram.json"
             review_bd_path = bd_path
@@ -229,7 +292,30 @@ class IntegrationReviewAgent:
 
             summary = content.strip() if content else "No issues found."
 
-            issues_found, issues_fixed = _parse_issue_counts(summary)
+            edited_specs = []
+            for sp in spec_paths:
+                try:
+                    if Path(sp).read_bytes() != spec_before.get(sp):
+                        edited_specs.append(sp)
+                except OSError:
+                    continue
+
+            counts = _extract_issue_counts(summary)
+            if counts is None:
+                # No parseable counts block. Taking (0, 0) on faith would read
+                # downstream as a clean review needing no regeneration even
+                # when the agent edited specs on disk, so use the evidence we
+                # actually have: the specs this call changed.
+                issues_found = issues_fixed = len(edited_specs)
+                summary = (
+                    "NOTE: the review summary carried no parseable "
+                    '{"issues_found": ..., "issues_fixed": ...} JSON block; '
+                    f"the counts below are derived from the {len(edited_specs)} "
+                    "uArch spec file(s) this review edited on disk.\n\n"
+                    f"{summary}"
+                )
+            else:
+                issues_found, issues_fixed = counts
 
             # Surface the review-dir so the caller (or the next iteration's
             # uArch generator) can compare canonical specs vs review copies

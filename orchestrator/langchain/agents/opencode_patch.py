@@ -31,8 +31,18 @@ _MODEL_MAP = {
 }
 
 
-def _opencode_call(self, system_prompt: str, user_prompt: str) -> str:
-    """Drop-in for ClaudeLLM._generate_via_cli, backed by `opencode run`."""
+def _opencode_call(
+    self,
+    system_prompt: str,
+    user_prompt: str,
+    resume_session_id: str | None = None,
+) -> str:
+    """Drop-in for ClaudeLLM._generate_via_cli, backed by `opencode run`.
+
+    ``call()`` dispatches ``_generate_via_cli(system, prompt, resume_session_id)``
+    with three positional args, so the third one must be accepted here even
+    though `opencode run` has no session-resume equivalent (it is ignored).
+    """
     resolved = _slm._resolve_model(self.model)
     opencode_model = _MODEL_MAP.get(resolved, "local/Qwen/Qwen3.6-27B")
 
@@ -78,5 +88,9 @@ def _opencode_call(self, system_prompt: str, user_prompt: str) -> str:
 
 # Monkey-patch
 _slm.ClaudeLLM._generate_via_cli = _opencode_call
-_slm.ClaudeLLM.claude_path = _OPENCODE_PATH  # bypass the "Claude CLI not found" check
+# Bypass the "Claude CLI not found" check in __init__. A class attribute is
+# useless here -- __init__ assigns the INSTANCE attribute self.claude_path
+# (empty by default) and then still runs _find_claude_binary(). CLAUDE_CLI_PATH
+# is the supported seam; it is honoured for the default claude_cli provider.
+os.environ.setdefault("CLAUDE_CLI_PATH", _OPENCODE_PATH)
 logger.warning("ClaudeLLM._generate_via_cli has been monkey-patched to use opencode")

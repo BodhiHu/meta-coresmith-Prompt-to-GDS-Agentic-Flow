@@ -226,12 +226,11 @@ class ModelIntegrationGenerator:
             out = Path(output_path)
             out.parent.mkdir(parents=True, exist_ok=True)
 
-            on_disk = ""
-            if out.exists():
+            def _read_out() -> str:
                 try:
-                    on_disk = out.read_text(encoding="utf-8")
+                    return out.read_text(encoding="utf-8") if out.exists() else ""
                 except OSError:
-                    on_disk = ""
+                    return ""
 
             # RETRY ONCE with the rejection quoted back. A rejected chip model
             # leaves the composition gate with nothing to compose, so the gate
@@ -249,6 +248,14 @@ class ModelIntegrationGenerator:
                     "Do not change anything else, and do not respond with a "
                     "diff or a partial file.",
                 ])
+                # Snapshot the artifact BEFORE the call so disk-first
+                # arbitration can tell "the tool-enabled CLI wrote this file
+                # during THIS call" from "this is the superseded model of a
+                # PREVIOUS generation" (the pipeline regenerates in place
+                # without deleting the old _chip_model.py, and a stale file
+                # still passes static validation -- it would beat the fresh
+                # fix and silently re-install what the regen replaced).
+                pre_existing = _read_out()
                 content = await self.llm.call(
                     system=SYSTEM_PROMPT,
                     prompt=prompt,
@@ -256,6 +263,9 @@ class ModelIntegrationGenerator:
                               + (f" retry {_round}" if _round else "")),
                 )
                 code = self._extract_python(content)
+                on_disk = _read_out()
+                if on_disk and on_disk == pre_existing:
+                    on_disk = ""  # not written by this call
                 chosen = self._choose_chip_model(code, on_disk, block_models_dir)
                 if not chosen:
                     raise RuntimeError(

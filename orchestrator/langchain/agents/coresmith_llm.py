@@ -425,12 +425,17 @@ def _parse_stream_json(stdout: str) -> tuple[str, dict]:
     text for diagnosis.
 
     Returns ``(final_text, usage_dict)``.  ``usage_dict`` may be empty
-    if no ``result`` event was emitted (timeout / stall / crash).
+    if no ``result`` event was emitted (timeout / stall / crash).  The
+    ``result`` event's ``subtype`` is surfaced as ``result_subtype`` so
+    callers can tell a clean finish from an ``error_max_turns``
+    termination -- the latter carries no ``result`` text, so the returned
+    text is indistinguishable from a normal (but truncated) answer.
     """
     final_text = ""
     usage: dict = {}
     cost_usd: float | None = None
     num_turns: int | None = None
+    subtype: str = ""
     fallback_chunks: list[str] = []
     for raw in stdout.splitlines():
         raw = raw.strip()
@@ -446,6 +451,7 @@ def _parse_stream_json(stdout: str) -> tuple[str, dict]:
             usage = obj.get("usage") or {}
             cost_usd = obj.get("total_cost_usd")
             num_turns = obj.get("num_turns")
+            subtype = obj.get("subtype") or subtype
         elif ev_type == "assistant":
             msg = obj.get("message", {}) or {}
             for block in msg.get("content", []) or []:
@@ -458,6 +464,8 @@ def _parse_stream_json(stdout: str) -> tuple[str, dict]:
         out_usage["total_cost_usd"] = cost_usd
     if num_turns is not None:
         out_usage["num_turns"] = num_turns
+    if subtype:
+        out_usage["result_subtype"] = subtype
     return final_text, out_usage
 
 
@@ -697,6 +705,12 @@ _CODEX_MODEL_MAP = {
     "haiku-3.5": "gpt-5.4-mini",
 }
 
+# Reserved alias meaning "the kimi CLI already picked its model from
+# KIMI_MODEL_NAME". It is NOT a real model id, so the ACP session must skip the
+# session/set_config_option round-trip entirely rather than send it (the ACP
+# server rejects unknown ids with invalid_params "Model not found").
+KIMI_ENV_MODEL_SENTINEL = "__kimi_env_model__"
+
 _KIMI_MODEL_MAP = {
     # Kimi Code catalog aliases (not raw API model IDs).
     "opus-4.7": "kimi-code/k3",
@@ -892,7 +906,7 @@ def _resolve_model(model: str, provider: str = "claude_cli") -> str:
     if provider == "kimi_cli":
         # The KIMI_MODEL_* provider is exposed under a reserved runtime alias.
         if os.environ.get("KIMI_MODEL_NAME", "").strip():
-            return "__kimi_env_model__"
+            return KIMI_ENV_MODEL_SENTINEL
 
         env_override = (
             os.environ.get("CORESMITH_KIMI_MODEL", "").strip()
@@ -1596,16 +1610,32 @@ class ClaudeLLM:
                 f"stdout_len={len(output)}, first100={output[:100]!r}"
             )
 
-            if output.startswith("Error: Reached max turns") and attempt < max_retries - 1:
+            # Max-turns exhaustion. Under --output-format stream-json the CLI
+            # no longer prints the legacy plain-text "Error: Reached max turns"
+            # sentinel: the terminating result event carries
+            # subtype=error_max_turns and no result text, so the parsed output
+            # is the model's partial prose. Key the retry on the event itself
+            # (the old sentinel is still honoured for plain-text CLIs).
+            hit_max_turns = (
+                usage.get("result_subtype") == "error_max_turns"
+                or output.startswith("Error: Reached max turns")
+            )
+            if hit_max_turns and attempt < max_retries - 1:
                 wait = 5 * (attempt + 1)
                 logger.warning(
-                    f"Claude CLI returned '{output}', retrying in {wait}s "
-                    f"(attempt {attempt+1}/{max_retries})"
+                    f"Claude CLI hit --max-turns {self.max_turns}, retrying in "
+                    f"{wait}s (attempt {attempt+1}/{max_retries})"
                 )
                 _time_mod.sleep(wait)
                 t0 = _time_mod.monotonic()
                 span_start_ns = _time_mod.time_ns()
                 continue
+            if hit_max_turns:
+                logger.error(
+                    "Claude CLI hit --max-turns %d on every attempt; returning "
+                    "the truncated response (%d chars)",
+                    self.max_turns, len(output),
+                )
             break
 
         elapsed = _time_mod.monotonic() - t0
@@ -2127,8 +2157,15 @@ class ClaudeLLM:
             text=True,
             cwd=workdir,
             bufsize=1,
+            # Own session/group so the whole tree (the ACP server plus any
+            # tool/sim grandchildren) can be reaped as a group -- the registry
+            # invariant reap_active_cli_processes relies on (pgid == pid).
+            start_new_session=True,
         )
         _register_process(process)
+        # Captured while the child is guaranteed alive and the group leader;
+        # re-deriving via os.getpgid() later would race a pid reuse.
+        child_pgid = process.pid
         self._write_llm_event(project_root, "llm_call_start", {
             "model": resolved_model,
             "provider": "kimi_cli",
@@ -2178,6 +2215,18 @@ class ClaudeLLM:
                 "id": request_id,
                 "method": method,
                 "params": params,
+            })
+
+        def _send_session_prompt(sid: str) -> None:
+            effective_prompt = prompt
+            if self.disable_tools:
+                effective_prompt = (
+                    "Do not use tools or modify files. Answer using only the supplied context.\n\n"
+                    + prompt
+                )
+            _request(prompt_request_id, "session/prompt", {
+                "sessionId": sid,
+                "prompt": [{"type": "text", "text": effective_prompt}],
             })
 
         t_out = threading.Thread(target=_read_stdout, daemon=True)
@@ -2262,22 +2311,19 @@ class ClaudeLLM:
                     if not session_id:
                         protocol_error = "Kimi ACP session/new returned no sessionId"
                         break
-                    _request(3, "session/set_config_option", {
-                        "sessionId": session_id,
-                        "configId": "model",
-                        "value": resolved_model,
-                    })
+                    if resolved_model == KIMI_ENV_MODEL_SENTINEL:
+                        # KIMI_MODEL_NAME already selected the model inside the
+                        # CLI; the sentinel is not a model id the ACP server
+                        # knows, so go straight to the prompt.
+                        _send_session_prompt(session_id)
+                    else:
+                        _request(3, "session/set_config_option", {
+                            "sessionId": session_id,
+                            "configId": "model",
+                            "value": resolved_model,
+                        })
                 elif response_id == 3:
-                    effective_prompt = prompt
-                    if self.disable_tools:
-                        effective_prompt = (
-                            "Do not use tools or modify files. Answer using only the supplied context.\n\n"
-                            + prompt
-                        )
-                    _request(prompt_request_id, "session/prompt", {
-                        "sessionId": session_id,
-                        "prompt": [{"type": "text", "text": effective_prompt}],
-                    })
+                    _send_session_prompt(session_id)
                 elif response_id == prompt_request_id:
                     complete = True
         except (BrokenPipeError, OSError) as exc:
@@ -2288,13 +2334,15 @@ class ClaudeLLM:
                     _request(5, "session/cancel", {"sessionId": session_id})
                 except (BrokenPipeError, OSError):
                     pass
-            if process.poll() is None:
-                process.terminate()
+            # Reap the whole group, not just the direct child: kimi tool calls
+            # spawn grandchildren that share this group and would otherwise
+            # survive (and keep holding our pipes) after the call ends.
+            _reap_process_group(process, child_pgid, grace_s=self._REAP_GRACE_S)
+            for _stream in (process.stdout, process.stderr):
                 try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=5)
+                    _stream.close()
+                except Exception:
+                    pass
             t_out.join(timeout=5)
             t_err.join(timeout=5)
             _unregister_process()
@@ -2735,18 +2783,29 @@ class ClaudeLLM:
             except (ValueError, OSError):
                 pass  # stream closed
 
-        # Write prompt to stdin and close it immediately
-        try:
-            process.stdin.write(user_prompt)
-            process.stdin.close()
-        except (BrokenPipeError, OSError):
-            pass
+        def _write_stdin() -> None:
+            """Feed the prompt to the child and close its stdin."""
+            try:
+                process.stdin.write(user_prompt)
+                process.stdin.close()
+            except (BrokenPipeError, OSError, ValueError):
+                pass  # child exited / was reaped mid-write
 
-        # Start reader threads for stdout and stderr
+        # Start reader threads for stdout and stderr BEFORE the prompt write:
+        # a child that blocks on its own stdout would otherwise deadlock us.
         t_out = threading.Thread(target=_read_stream, args=(process.stdout, stdout_chunks), daemon=True)
         t_err = threading.Thread(target=_read_stream, args=(process.stderr, stderr_chunks), daemon=True)
         t_out.start()
         t_err.start()
+
+        # Write the prompt off-thread. A pipe holds ~64KB and CoreSmith prompts
+        # are routinely 80KB+, so a child that never drains stdin (e.g. hung on
+        # an interactive auth/update prompt -- the very case stall detection
+        # exists for) would block this write forever on the calling thread,
+        # before the watchdog loop is even entered. Off-threading it keeps the
+        # hard timeout and stall detection covering the write phase.
+        t_in = threading.Thread(target=_write_stdin, daemon=True)
+        t_in.start()
 
         # Set up live streaming trajectory file for realtime webview updates
         live_dir = Path(project_root) / ".coresmith" / "live_streams"
@@ -2851,6 +2910,8 @@ class ClaudeLLM:
                 except Exception:
                     pass
             # Reader threads should now see EOF promptly; short join suffices.
+            # The stdin writer wakes with EPIPE once the child is reaped.
+            t_in.join(timeout=5)
             t_out.join(timeout=5)
             t_err.join(timeout=5)
             _unregister_process()
