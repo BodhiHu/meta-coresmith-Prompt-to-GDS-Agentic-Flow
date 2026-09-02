@@ -20,6 +20,9 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 CHIP_MODEL_FUNC = "chip_model"
 _SIGNAL_CTORS = {"Signal", "ClockSignal", "ResetSignal"}
+# Enclosing-scope name -> [(lineno, bound value expr | None)], used to expand
+# ``*name``/``**name`` at a constructor call site. See ``_local_bindings``.
+_Bindings = dict[str, list[tuple[int, "ast.expr | None"]]]
 
 
 def composition_audit_enabled() -> bool:
@@ -156,28 +159,133 @@ def block_signature_appendix(models_dir: str | Path, max_chars: int = 4000) -> s
     return text[:max_chars]
 
 
-def _map_call_args(call: ast.Call, params: list[str]) -> tuple[dict[str, ast.expr], list[str]]:
+def _local_bindings(fn: ast.AST) -> _Bindings:
+    """Record every local rebinding of a name inside one function body.
+
+    Maps a name to ``(lineno, value)`` pairs, where ``value`` is the expression
+    of a simple ``name = <expr>`` / ``name: T = <expr>`` and ``None`` marks any
+    other rebinding (tuple unpack, loop target, walrus, augmented assign).
+    ``*name`` is only expandable when the LAST rebinding at or before the call
+    site carries an expandable literal.
+    """
+    values: dict[tuple[str, int], ast.expr] = {}
+    for sub in ast.walk(fn):
+        if isinstance(sub, ast.Assign) and len(sub.targets) == 1:
+            target, value = sub.targets[0], sub.value
+        elif isinstance(sub, ast.AnnAssign) and sub.value is not None:
+            target, value = sub.target, sub.value
+        else:
+            continue
+        if isinstance(target, ast.Name):
+            values[(target.id, target.lineno)] = value
+    binds: _Bindings = {}
+    for sub in ast.walk(fn):
+        if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Store):
+            binds.setdefault(sub.id, []).append(
+                (sub.lineno, values.get((sub.id, sub.lineno)))
+            )
+    return binds
+
+
+def _bound_before(name: str, lineno: int, binds: _Bindings) -> ast.expr | None:
+    """Value bound to ``name`` by the last rebinding at or before ``lineno``."""
+    prior = [b for b in binds.get(name, []) if b[0] <= lineno]
+    return max(prior, key=lambda b: b[0])[1] if prior else None
+
+
+def _star_elements(
+    node: ast.expr, lineno: int, binds: _Bindings
+) -> list[ast.expr] | None:
+    """Positionals ``*node`` expands to, or None when not statically knowable.
+
+    Resolves an inline ``[...]``/``(...)`` literal and a plain local name bound
+    to one earlier in the same function. A nested ``Starred`` element, an
+    attribute (``*self.bundle``) or a call result is unresolvable.
+    """
+    if isinstance(node, ast.Name):
+        node = _bound_before(node.id, lineno, binds)
+    if isinstance(node, (ast.List, ast.Tuple)) and not any(
+            isinstance(elt, ast.Starred) for elt in node.elts):
+        return list(node.elts)
+    return None
+
+
+def _kwargs_items(
+    node: ast.expr, lineno: int, binds: _Bindings
+) -> list[tuple[str, ast.expr]] | None:
+    """``(name, value)`` pairs ``**node`` expands to, or None when unknown."""
+    if isinstance(node, ast.Name):
+        node = _bound_before(node.id, lineno, binds)
+    if not isinstance(node, ast.Dict):
+        return None
+    items: list[tuple[str, ast.expr]] = []
+    for key, value in zip(node.keys, node.values):
+        if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
+            return None
+        items.append((key.value, value))
+    return items
+
+
+def _map_call_args(
+    call: ast.Call,
+    params: list[str],
+    binds: _Bindings | None = None,
+    flexible: bool = False,
+) -> tuple[dict[str, ast.expr], list[str], bool]:
+    """Bind one constructor call's arguments to the constructor's parameters.
+
+    ``*args``/``**kwargs`` AT THE CALL SITE are expanded statically whenever the
+    starred value is a list/tuple/dict literal -- written inline or bound to a
+    local name earlier in the same enclosing function. ``inv_start = [a, b, ...];
+    InverseEngine(*inv_start, *cav_start)`` is the idiom regenerated chip models
+    keep producing; dropping those positionals reported every port they covered
+    as a missing required parameter, i.e. a hard pre-simulation stop on valid
+    code (three hand-expansion repair rounds on a live run).
+
+    A star that cannot be expanded leaves the call's ARITY UNKNOWN. That is
+    reported through the third return value so the caller reports neither
+    missing nor surplus positionals for the call; the keyword checks still hold.
+    """
+    binds = binds if binds is not None else {}
     bound: dict[str, ast.expr] = {}
     problems: list[str] = []
-    has_star = any(isinstance(a, ast.Starred) for a in call.args) or any(
-        kw.arg is None for kw in call.keywords
-    )
-    pos = [a for a in call.args if not isinstance(a, ast.Starred)]
-    if not has_star and len(pos) > len(params):
+    unresolved = False
+
+    pos: list[ast.expr] = []
+    for arg in call.args:
+        if not isinstance(arg, ast.Starred):
+            pos.append(arg)
+            continue
+        elts = _star_elements(arg.value, call.lineno, binds)
+        if elts is None:
+            # Every positional after an unknown-length star shifts by an
+            # unknown amount, so nothing past this point can be bound.
+            unresolved = True
+            break
+        pos.extend(elts)
+
+    if not unresolved and not flexible and len(pos) > len(params):
         problems.append(f"{len(pos)} positional args but constructor takes {len(params)}")
     for idx, arg in enumerate(pos):
         if idx < len(params):
             bound[params[idx]] = arg
+
     for kw in call.keywords:
         if kw.arg is None:
-            continue
-        if kw.arg not in params:
-            problems.append(f"unexpected keyword argument {kw.arg!r}")
-        elif kw.arg in bound:
-            problems.append(f"parameter {kw.arg!r} bound twice")
+            items = _kwargs_items(kw.value, call.lineno, binds)
+            if items is None:
+                unresolved = True
+                continue
         else:
-            bound[kw.arg] = kw.value
-    return bound, problems
+            items = [(kw.arg, kw.value)]
+        for name, value in items:
+            if name not in params:
+                problems.append(f"unexpected keyword argument {name!r}")
+            elif name in bound:
+                problems.append(f"parameter {name!r} bound twice")
+            else:
+                bound[name] = value
+    return bound, problems, unresolved
 
 
 def _const_int(node: ast.AST, consts: dict[str, int]) -> int | None:
@@ -302,6 +410,7 @@ def audit_chip_model(chip_model_path: str | Path, models_dir: str | Path) -> Aud
         if name and ctor in _SIGNAL_CTORS:
             nets[name] = sub.value
 
+    binds = _local_bindings(elaborate)
     endpoints: dict[str, list[_Endpoint]] = {}
     instance_no = 0
     for call in (n for n in ast.walk(elaborate) if isinstance(n, ast.Call)):
@@ -309,8 +418,18 @@ def audit_chip_model(chip_model_path: str | Path, models_dir: str | Path) -> Aud
         if fn not in aliases:
             continue
         stem, info = aliases[fn], infos[aliases[fn]]
-        bound, problems = _map_call_args(call, info.params)
-        if not info.flexible:
+        bound, problems, unresolved = _map_call_args(
+            call, info.params, binds, info.flexible
+        )
+        if unresolved:
+            # Unknown arity: a missing/surplus verdict here would be a guess,
+            # and a wrong one stops the run before simulation. Say so instead.
+            res.warnings.append(
+                f"{stem} instantiation line {call.lineno}: constructor call "
+                "uses unresolvable *args/**kwargs; positional coverage not "
+                "statically verified"
+            )
+        elif not info.flexible:
             missing = [p for p in info.required if p not in bound]
             if missing:
                 problems.append("missing required parameter(s): " + ", ".join(missing))

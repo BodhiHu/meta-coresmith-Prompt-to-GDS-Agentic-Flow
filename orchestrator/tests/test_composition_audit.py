@@ -12,36 +12,30 @@ Each failure-class fixture is a miniature of a REAL defect observed in the
 - ``instantiation_signature``: Gemini's ``qp_data`` unexpected-kwarg (x4
   attempts burned).
 - ``zero_width_signal``: Gemini's ``intbv value 0 >= maximum 00000000``.
-- ``unlowerable_symdict``: Sonnet's derive_wr_last snooping the producer's
-  internal FSM from inside chip_model.
+- ``unlowerable_introspection``: Sonnet's derive_wr_last snooping the
+  producer's internal FSM from inside chip_model.
 
-No LLM, no EDA, no simulation -- pure AST. Compatible with
-``-m "not live_llm and not requires_nix and not e2e"``.
+``TestStarredArgExpansion`` covers the auditor's own false-positive class: a
+valid ``inv_start = [...]; InverseEngine(*inv_start, *cav_start)`` was reported
+as "missing required parameter(s)" for every port the star covered, a hard
+pre-simulation stop that cost three hand-expansion repair rounds on a live run.
 
-NOTE: every fixture below is written in the pre-Amaranth-migration MyHDL
-``@block``-decorated-function style. myhdl is a deprecated, OPTIONAL backend
-(superseded by Amaranth) and deliberately not a core dependency, so this
-module importorskip-guards on it. But myhdl availability is NOT the only
-precondition: composition_audit.py's ``_analyze_block_module``/
-``audit_chip_model`` (and microarch_exp.py's ``elaborate_block_model``) were
-migrated to require Amaranth-style ``class <block>(Elaboratable)`` block
-models with ``__init__``/``elaborate`` methods -- confirmed by installing
-myhdl locally and re-running this file: most of these tests (14/18) STILL
-fail on a structural mismatch ("not an Amaranth Elaboratable class" / empty
-audit results), myhdl or not. Only a handful (the crash-localization tests
-that need a REAL exec to raise mid-simulation) are gated purely on myhdl's
-presence. So this guard makes CI honestly SKIP rather than fail, but it does
-NOT mean the composition auditor is exercised on a dev box with myhdl
-installed either -- these fixtures need a full migration to Amaranth syntax
-to actually cover the auditor's current (Amaranth-only) contract. Flagged
-upstream; not fixed here to keep this change minimal and reviewable.
+Pure AST for everything except ``TestGateIntegration`` /
+``TestCrashTracebackLocalization``, which import and run the fixture through
+the real gate (Amaranth elaboration, no EDA). No LLM, no simulation of RTL.
+Compatible with ``-m "not live_llm and not requires_nix and not e2e"``.
+
+Every fixture is Amaranth: the auditor only understands
+``class <stem>(Elaboratable)`` block models with ``__init__``/``elaborate``,
+derives ports from ``__init__`` parameters aliased onto ``self``, and derives
+port DIRECTION from ``self.<port>.eq(...)`` targets inside ``elaborate``. The
+fixtures are minimal by design -- the auditor never executes a block model, so
+they only have to have the right SHAPE, not to be useful hardware.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-
-import pytest
 
 from orchestrator.architecture.composition_audit import (
     audit_chip_model,
@@ -51,73 +45,96 @@ from orchestrator.architecture.composition_audit import (
     composition_audit_enabled,
 )
 
-myhdl = pytest.importorskip(
-    "myhdl",
-    reason="MyHDL superseded by Amaranth; fixtures retained but backend is optional",
-)
-
 # ---------------------------------------------------------------------------
 # Miniature block models
 # ---------------------------------------------------------------------------
 
 PROD_MODEL = '''\
-from myhdl import block, Signal, intbv, always_seq
+from amaranth import Elaboratable, Module
 
-@block
-def prod(clk, rst, din, din_vld, dout, dout_vld):
-    @always_seq(clk.posedge, reset=rst)
-    def logic():
-        dout_vld.next = din_vld
-        if din_vld:
-            dout.next = din + 1
-    return logic
+
+class prod(Elaboratable):
+    def __init__(self, clk, rst, din, din_vld, dout, dout_vld):
+        self.clk, self.rst = clk, rst
+        self.din, self.din_vld = din, din_vld
+        self.dout, self.dout_vld = dout, dout_vld
+
+    def elaborate(self, platform):
+        m = Module()
+        m.d.sync += self.dout_vld.eq(self.din_vld)
+        with m.If(self.din_vld):
+            m.d.sync += self.dout.eq(self.din + 1)
+        return m
 '''
 
 CONS_MODEL = '''\
-from myhdl import block, Signal, intbv, always_seq
+from amaranth import Elaboratable, Module
 
-@block
-def cons(clk, rst, din, din_vld, pos, dout, dout_vld):
-    @always_seq(clk.posedge, reset=rst)
-    def logic():
-        dout_vld.next = din_vld
-        if din_vld:
-            dout.next = din + pos
-    return logic
+
+class cons(Elaboratable):
+    def __init__(self, clk, rst, din, din_vld, pos, dout, dout_vld):
+        self.clk, self.rst = clk, rst
+        self.din, self.din_vld, self.pos = din, din_vld, pos
+        self.dout, self.dout_vld = dout, dout_vld
+
+    def elaborate(self, platform):
+        m = Module()
+        m.d.sync += self.dout_vld.eq(self.din_vld)
+        with m.If(self.din_vld):
+            m.d.sync += self.dout.eq(self.din + self.pos)
+        return m
 '''
 
 # A block with a 3-signal srdy/drdy handshake: drives qp_drdy (grant) and its
 # output pair; consumes qp/qp_srdy.
 QP_MODEL = '''\
-from myhdl import block, Signal, intbv, always_seq
+from amaranth import Elaboratable, Module
 
-@block
-def qp_block(clk, rst, qp, qp_srdy, qp_drdy, dout, dout_vld):
-    @always_seq(clk.posedge, reset=rst)
-    def logic():
-        qp_drdy.next = 1
-        dout_vld.next = qp_srdy
-        if qp_srdy:
-            dout.next = qp
-    return logic
+
+class qp_block(Elaboratable):
+    def __init__(self, clk, rst, qp, qp_srdy, qp_drdy, dout, dout_vld):
+        self.clk, self.rst = clk, rst
+        self.qp, self.qp_srdy, self.qp_drdy = qp, qp_srdy, qp_drdy
+        self.dout, self.dout_vld = dout, dout_vld
+
+    def elaborate(self, platform):
+        m = Module()
+        m.d.comb += self.qp_drdy.eq(1)
+        m.d.sync += self.dout_vld.eq(self.qp_srdy)
+        with m.If(self.qp_srdy):
+            m.d.sync += self.dout.eq(self.qp)
+        return m
 '''
 
-# A factory that drives its output through a LOCAL helper @block (the driven-
-# param analysis must follow the local call graph).
+# A block that drives its output through a LOCAL helper submodule: the driven-
+# param analysis must still see self.dout as an output (and self.din as an
+# input) when the value routes through the helper.
 NESTED_MODEL = '''\
-from myhdl import block, Signal, intbv, always_seq
+from amaranth import Elaboratable, Module, Signal
 
-@block
-def _inner(clk, rst, src, dst):
-    @always_seq(clk.posedge, reset=rst)
-    def logic():
-        dst.next = src
-    return logic
 
-@block
-def nested(clk, rst, din, dout):
-    i = _inner(clk, rst, din, dout)
-    return i
+class _inner(Elaboratable):
+    def __init__(self):
+        self.src = Signal(8)
+        self.dst = Signal(8)
+
+    def elaborate(self, platform):
+        m = Module()
+        m.d.sync += self.dst.eq(self.src)
+        return m
+
+
+class nested(Elaboratable):
+    def __init__(self, clk, rst, din, dout):
+        self.clk, self.rst, self.din, self.dout = clk, rst, din, dout
+
+    def elaborate(self, platform):
+        m = Module()
+        inner = _inner()
+        m.submodules.inner = inner
+        m.d.comb += inner.src.eq(self.din)
+        m.d.comb += self.dout.eq(inner.dst)
+        return m
 '''
 
 
@@ -141,6 +158,12 @@ def _chip(tmp_path: Path, body: str) -> Path:
 
 def _checks(violations: list[dict]) -> list[str]:
     return [v.get("audit_check", "") for v in violations]
+
+
+def _observed(violations: list[dict], check: str) -> str:
+    return " ".join(
+        v["observed"] for v in violations if v.get("audit_check") == check
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -176,24 +199,29 @@ class TestBlockPortInfo:
 # ---------------------------------------------------------------------------
 
 CLEAN_CHIP = '''\
-from myhdl import block, Signal, intbv, always_comb
+from amaranth import Elaboratable, Module, Signal
 from prod import prod
 from cons import cons
 
-@block
-def chip_model(clk, rst, x, x_vld, pos_in, y, y_vld):
-    mid = Signal(intbv(0)[8:])
-    mid_vld = Signal(bool(0))
-    pos = Signal(intbv(0)[8:])
 
-    i0 = prod(clk, rst, x, x_vld, mid, mid_vld)
-    i1 = cons(clk, rst, mid, mid_vld, pos, y, y_vld)
+class chip_model(Elaboratable):
+    def __init__(self, clk, rst, x, x_vld, pos_in, y, y_vld):
+        self.clk, self.rst = clk, rst
+        self.x, self.x_vld, self.pos_in = x, x_vld, pos_in
+        self.y, self.y_vld = y, y_vld
 
-    @always_comb
-    def glue_pos():
-        pos.next = pos_in + 0
+    def elaborate(self, platform):
+        m = Module()
+        mid = Signal(8)
+        mid_vld = Signal()
+        pos = Signal(8)
 
-    return i0, i1, glue_pos
+        m.submodules.i0 = prod(
+            self.clk, self.rst, self.x, self.x_vld, mid, mid_vld)
+        m.submodules.i1 = cons(
+            self.clk, self.rst, mid, mid_vld, pos, self.y, self.y_vld)
+        m.d.comb += pos.eq(self.pos_in)
+        return m
 
 
 def simulate(stimulus):
@@ -214,25 +242,40 @@ class TestCleanChip:
 # ---------------------------------------------------------------------------
 
 UNDRIVEN_CHIP = '''\
-from myhdl import block, Signal, intbv, always_comb
+from amaranth import Elaboratable, Module, Signal
 from prod import prod
 from cons import cons
 
-@block
-def chip_model(clk, rst, x, x_vld, y, y_vld):
-    mid = Signal(intbv(0)[8:])
-    mid_vld = Signal(bool(0))
-    # consumed by BOTH blocks below, driven by NOTHING (raster_pos_latched):
-    pos_latched = Signal(intbv(0)[8:])
 
-    i0 = prod(clk, rst, x, x_vld, mid, mid_vld)
-    i1 = cons(clk, rst, mid, mid_vld, pos_latched, y, y_vld)
-    i2 = cons(clk, rst, mid, mid_vld, pos_latched, y, y_vld)
-    return i0, i1, i2
+class chip_model(Elaboratable):
+    def __init__(self, clk, rst, x, x_vld, y, y_vld):
+        self.clk, self.rst = clk, rst
+        self.x, self.x_vld = x, x_vld
+        self.y, self.y_vld = y, y_vld
+
+    def elaborate(self, platform):
+        m = Module()
+        mid = Signal(8)
+        mid_vld = Signal()
+        # consumed by BOTH blocks below, driven by NOTHING (raster_pos_latched):
+        pos_latched = Signal(8)
+
+        m.submodules.i0 = prod(
+            self.clk, self.rst, self.x, self.x_vld, mid, mid_vld)
+        m.submodules.i1 = cons(
+            self.clk, self.rst, mid, mid_vld, pos_latched, self.y, self.y_vld)
+        m.submodules.i2 = cons(
+            self.clk, self.rst, mid, mid_vld, pos_latched, self.y, self.y_vld)
+        return m
 
 
 def simulate(stimulus):
     return [], 0
+'''
+
+_I2_LINE = '''\
+        m.submodules.i2 = cons(
+            self.clk, self.rst, mid, mid_vld, pos_latched, self.y, self.y_vld)
 '''
 
 
@@ -248,11 +291,7 @@ class TestUndrivenNet:
         assert v["gap_class"] == "contract"
 
     def test_single_consumer_zero_init_is_warning_only(self, tmp_path):
-        single = UNDRIVEN_CHIP.replace(
-            "    i2 = cons(clk, rst, mid, mid_vld, pos_latched, y, y_vld)\n"
-            "    return i0, i1, i2",
-            "    return i0, i1",
-        )
+        single = UNDRIVEN_CHIP.replace(_I2_LINE, "")
         _models_dir(tmp_path, prod=PROD_MODEL, cons=CONS_MODEL)
         chip = _chip(tmp_path, single)
         res = audit_chip_model(chip, chip.parent)
@@ -261,8 +300,8 @@ class TestUndrivenNet:
 
     def test_nonzero_init_tieoff_allowed(self, tmp_path):
         tied = UNDRIVEN_CHIP.replace(
-            "pos_latched = Signal(intbv(0)[8:])",
-            "pos_latched = Signal(intbv(1)[8:])",
+            "pos_latched = Signal(8)",
+            "pos_latched = Signal(8, init=1)",
         )
         _models_dir(tmp_path, prod=PROD_MODEL, cons=CONS_MODEL)
         chip = _chip(tmp_path, tied)
@@ -275,21 +314,34 @@ class TestUndrivenNet:
 # ---------------------------------------------------------------------------
 
 KWARG_CHIP = '''\
-from myhdl import block, Signal, intbv
+from amaranth import Elaboratable, Module, Signal
 from qp_block import qp_block
 
-@block
-def chip_model(clk, rst, y, y_vld):
-    qp = Signal(intbv(0)[6:])
-    qp_srdy = Signal(bool(0))
-    qp_drdy = Signal(bool(0))
-    i0 = qp_block(clk=clk, rst=rst, qp_data=qp, qp_srdy=qp_srdy,
-                  qp_drdy=qp_drdy, dout=y, dout_vld=y_vld)
-    return i0
+
+class chip_model(Elaboratable):
+    def __init__(self, clk, rst, y, y_vld):
+        self.clk, self.rst = clk, rst
+        self.y, self.y_vld = y, y_vld
+
+    def elaborate(self, platform):
+        m = Module()
+        qp = Signal(6)
+        qp_srdy = Signal()
+        qp_drdy = Signal()
+        m.submodules.i0 = qp_block(
+            clk=self.clk, rst=self.rst, qp_data=qp, qp_srdy=qp_srdy,
+            qp_drdy=qp_drdy, dout=self.y, dout_vld=self.y_vld)
+        return m
 
 
 def simulate(stimulus):
     return [], 0
+'''
+
+_KWARG_CALL = '''\
+        m.submodules.i0 = qp_block(
+            clk=self.clk, rst=self.rst, qp_data=qp, qp_srdy=qp_srdy,
+            qp_drdy=qp_drdy, dout=self.y, dout_vld=self.y_vld)
 '''
 
 
@@ -314,14 +366,221 @@ class TestInstantiationSignature:
 
     def test_too_many_positionals(self, tmp_path):
         chip_text = KWARG_CHIP.replace(
-            "    i0 = qp_block(clk=clk, rst=rst, qp_data=qp, qp_srdy=qp_srdy,\n"
-            "                  qp_drdy=qp_drdy, dout=y, dout_vld=y_vld)",
-            "    i0 = qp_block(clk, rst, qp, qp_srdy, qp_drdy, y, y_vld, qp)",
+            _KWARG_CALL,
+            "        m.submodules.i0 = qp_block(\n"
+            "            self.clk, self.rst, qp, qp_srdy, qp_drdy, self.y,\n"
+            "            self.y_vld, qp)\n",
         )
         _models_dir(tmp_path, qp_block=QP_MODEL)
         chip = _chip(tmp_path, chip_text)
         res = audit_chip_model(chip, chip.parent)
         assert "instantiation_signature" in _checks(res.violations)
+        assert "8 positional args but constructor takes 7" in _observed(
+            res.violations, "instantiation_signature"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Call-site *args / **kwargs (the hand-expansion repair-loop class)
+# ---------------------------------------------------------------------------
+
+def _star_chip(call: str, prologue: str = "", init_extra: str = "") -> str:
+    """A qp_block instantiation wrapped in a minimal Amaranth chip model."""
+    return (
+        "from amaranth import Elaboratable, Module, Signal\n"
+        "from qp_block import qp_block\n"
+        "\n"
+        "\n"
+        "class chip_model(Elaboratable):\n"
+        "    def __init__(self, clk, rst, y, y_vld):\n"
+        "        self.clk, self.rst = clk, rst\n"
+        "        self.y, self.y_vld = y, y_vld\n"
+        + init_extra
+        + "\n"
+        "    def elaborate(self, platform):\n"
+        "        m = Module()\n"
+        "        qp = Signal(6)\n"
+        "        qp_srdy = Signal()\n"
+        "        qp_drdy = Signal()\n"
+        + prologue
+        + f"        m.submodules.i0 = {call}\n"
+        "        return m\n"
+        "\n"
+        "\n"
+        "def simulate(stimulus):\n"
+        "    return [], 0\n"
+    )
+
+
+_UNRESOLVED_NOTE = "unresolvable *args/**kwargs"
+
+
+class TestStarredArgExpansion:
+    """``Engine(*ports)`` is valid Python and valid Amaranth.
+
+    Reporting its covered ports as missing is a hard pre-simulation stop on
+    correct code: the live run burned three rounds hand-expanding 51/50/37/41
+    -positional calls because regeneration kept re-creating the idiom.
+    """
+
+    def _audit(self, tmp_path, chip_text):
+        _models_dir(tmp_path, qp_block=QP_MODEL)
+        chip = _chip(tmp_path, chip_text)
+        return audit_chip_model(chip, chip.parent)
+
+    def test_star_names_bound_to_list_literals_cover_required(self, tmp_path):
+        res = self._audit(tmp_path, _star_chip(
+            "qp_block(*head, *tail)",
+            prologue=(
+                "        head = [self.clk, self.rst, qp, qp_srdy]\n"
+                "        tail = [qp_drdy, self.y, self.y_vld]\n"
+            ),
+        ))
+        assert res.violations == []
+        assert not [w for w in res.warnings if _UNRESOLVED_NOTE in w]
+
+    def test_star_tuple_literal_and_trailing_plain_arg(self, tmp_path):
+        res = self._audit(tmp_path, _star_chip(
+            "qp_block(*head, qp_drdy, self.y, self.y_vld)",
+            prologue="        head = (self.clk, self.rst, qp, qp_srdy)\n",
+        ))
+        assert res.violations == []
+
+    def test_last_binding_before_the_call_wins(self, tmp_path):
+        res = self._audit(tmp_path, _star_chip(
+            "qp_block(*ports)",
+            prologue=(
+                "        ports = [self.clk, self.rst]\n"
+                "        ports = [self.clk, self.rst, qp, qp_srdy, qp_drdy,\n"
+                "                 self.y, self.y_vld]\n"
+            ),
+        ))
+        assert res.violations == []
+
+    def test_short_list_names_exactly_the_uncovered_params(self, tmp_path):
+        res = self._audit(tmp_path, _star_chip(
+            "qp_block(*head)",
+            prologue="        head = [self.clk, self.rst, qp, qp_srdy]\n",
+        ))
+        assert "instantiation_signature" in _checks(res.violations)
+        observed = _observed(res.violations, "instantiation_signature")
+        assert "missing required parameter(s): qp_drdy, dout, dout_vld" in observed
+        # the params the star DID cover are not named
+        for covered in ("clk,", "rst,", "qp,"):
+            assert covered not in observed.split("missing required")[1]
+
+    def test_inline_starred_list_literal(self, tmp_path):
+        res = self._audit(tmp_path, _star_chip(
+            "qp_block(*[self.clk, self.rst, qp, qp_srdy, qp_drdy, self.y,\n"
+            "                                   self.y_vld])"
+        ))
+        assert res.violations == []
+
+    def test_inline_starred_list_literal_too_long(self, tmp_path):
+        # Expansion makes the arity KNOWN, so a genuine surplus is still a
+        # violation -- the star is not a blanket amnesty.
+        res = self._audit(tmp_path, _star_chip(
+            "qp_block(*[self.clk, self.rst, qp, qp_srdy, qp_drdy, self.y,\n"
+            "                                   self.y_vld, qp])"
+        ))
+        assert "8 positional args but constructor takes 7" in _observed(
+            res.violations, "instantiation_signature"
+        )
+
+    def test_unresolvable_attribute_star_is_a_note_not_a_violation(self, tmp_path):
+        res = self._audit(tmp_path, _star_chip(
+            "qp_block(*self.bundle, qp_drdy, self.y, self.y_vld)",
+            init_extra="        self.bundle = (clk, rst, y, y_vld)\n",
+        ))
+        assert res.violations == []
+        notes = [w for w in res.warnings if _UNRESOLVED_NOTE in w]
+        assert len(notes) == 1
+        assert "positional coverage not statically verified" in notes[0]
+        assert "qp_block" in notes[0]
+
+    def test_unresolvable_call_result_star_is_a_note(self, tmp_path):
+        res = self._audit(tmp_path, _star_chip(
+            "qp_block(*ports)",
+            prologue="        ports = self._collect_ports(qp, qp_srdy)\n",
+        ))
+        assert res.violations == []
+        assert len([w for w in res.warnings if _UNRESOLVED_NOTE in w]) == 1
+
+    def test_reassigned_non_literally_is_unresolvable(self, tmp_path):
+        res = self._audit(tmp_path, _star_chip(
+            "qp_block(*ports)",
+            prologue=(
+                "        ports = [self.clk, self.rst, qp, qp_srdy, qp_drdy,\n"
+                "                 self.y, self.y_vld]\n"
+                "        ports = self._reorder(ports)\n"
+            ),
+        ))
+        assert res.violations == []
+        assert len([w for w in res.warnings if _UNRESOLVED_NOTE in w]) == 1
+
+    def test_nested_star_inside_the_list_is_unresolvable(self, tmp_path):
+        res = self._audit(tmp_path, _star_chip(
+            "qp_block(*ports)",
+            prologue=(
+                "        head = [qp, qp_srdy]\n"
+                "        ports = [self.clk, self.rst, *head, qp_drdy,\n"
+                "                 self.y, self.y_vld]\n"
+            ),
+        ))
+        assert res.violations == []
+        assert len([w for w in res.warnings if _UNRESOLVED_NOTE in w]) == 1
+
+    def test_double_star_dict_literal_binds_by_name(self, tmp_path):
+        res = self._audit(tmp_path, _star_chip(
+            "qp_block(**wiring)",
+            prologue=(
+                '        wiring = {"clk": self.clk, "rst": self.rst,\n'
+                '                  "qp": qp, "qp_srdy": qp_srdy,\n'
+                '                  "qp_drdy": qp_drdy, "dout": self.y,\n'
+                '                  "dout_vld": self.y_vld}\n'
+            ),
+        ))
+        assert res.violations == []
+        assert not [w for w in res.warnings if _UNRESOLVED_NOTE in w]
+
+    def test_double_star_dict_literal_keeps_the_unexpected_kwarg_check(self, tmp_path):
+        res = self._audit(tmp_path, _star_chip(
+            "qp_block(**wiring)",
+            prologue=(
+                '        wiring = {"clk": self.clk, "rst": self.rst,\n'
+                '                  "qp_data": qp, "qp_srdy": qp_srdy,\n'
+                '                  "qp_drdy": qp_drdy, "dout": self.y,\n'
+                '                  "dout_vld": self.y_vld}\n'
+            ),
+        ))
+        observed = _observed(res.violations, "instantiation_signature")
+        assert "unexpected keyword argument 'qp_data'" in observed
+        assert "missing required parameter(s): qp" in observed
+
+    def test_unresolvable_double_star_is_a_note(self, tmp_path):
+        res = self._audit(tmp_path, _star_chip(
+            "qp_block(self.clk, self.rst, **self.wiring)",
+            init_extra="        self.wiring = {}\n",
+        ))
+        assert res.violations == []
+        assert len([w for w in res.warnings if _UNRESOLVED_NOTE in w]) == 1
+
+    def test_expanded_positionals_feed_the_net_analysis(self, tmp_path):
+        # Expansion is not just violation suppression: the ports the star
+        # covers must become real endpoints, so a net wired ONLY through a
+        # star list is still checked for a driver.
+        _models_dir(tmp_path, prod=PROD_MODEL, cons=CONS_MODEL)
+        chip = _chip(tmp_path, UNDRIVEN_CHIP.replace(
+            "        m.submodules.i1 = cons(\n"
+            "            self.clk, self.rst, mid, mid_vld, pos_latched,"
+            " self.y, self.y_vld)\n",
+            "        wires = [self.clk, self.rst, mid, mid_vld, pos_latched,\n"
+            "                 self.y, self.y_vld]\n"
+            "        m.submodules.i1 = cons(*wires)\n",
+        ))
+        res = audit_chip_model(chip, chip.parent)
+        assert "instantiation_signature" not in _checks(res.violations)
+        assert "pos_latched" in _observed(res.violations, "undriven_net")
 
 
 # ---------------------------------------------------------------------------
@@ -329,17 +588,25 @@ class TestInstantiationSignature:
 # ---------------------------------------------------------------------------
 
 ZERO_WIDTH_CHIP = '''\
-from myhdl import block, Signal, intbv
+from amaranth import Elaboratable, Module, Signal
 from prod import prod
 
 W_BAD = 4 - 4
 
-@block
-def chip_model(clk, rst, x, x_vld, y, y_vld):
-    mid = Signal(intbv(0)[W_BAD:])
-    mid_vld = Signal(bool(0))
-    i0 = prod(clk, rst, x, x_vld, mid, mid_vld)
-    return i0
+
+class chip_model(Elaboratable):
+    def __init__(self, clk, rst, x, x_vld, y, y_vld):
+        self.clk, self.rst = clk, rst
+        self.x, self.x_vld = x, x_vld
+        self.y, self.y_vld = y, y_vld
+
+    def elaborate(self, platform):
+        m = Module()
+        mid = Signal(W_BAD)
+        mid_vld = Signal()
+        m.submodules.i0 = prod(
+            self.clk, self.rst, self.x, self.x_vld, mid, mid_vld)
+        return m
 
 
 def simulate(stimulus):
@@ -356,8 +623,8 @@ class TestZeroWidth:
 
     def test_unresolvable_width_not_flagged(self, tmp_path):
         text = ZERO_WIDTH_CHIP.replace(
-            "mid = Signal(intbv(0)[W_BAD:])",
-            "mid = Signal(intbv(0)[some_runtime_width:])",
+            "mid = Signal(W_BAD)",
+            "mid = Signal(some_runtime_width)",
         )
         _models_dir(tmp_path, prod=PROD_MODEL)
         chip = _chip(tmp_path, text)
@@ -366,26 +633,31 @@ class TestZeroWidth:
 
 
 # ---------------------------------------------------------------------------
-# unlowerable_symdict
+# unlowerable_introspection (private simulator/hierarchy snooping)
 # ---------------------------------------------------------------------------
 
 SYMDICT_CHIP = '''\
-from myhdl import block, Signal, intbv, always_comb
+from amaranth import Elaboratable, Module, Signal
 from prod import prod
 
-@block
-def chip_model(clk, rst, x, x_vld, y, y_vld):
-    mid = Signal(intbv(0)[8:])
-    mid_vld = Signal(bool(0))
-    i0 = prod(clk, rst, x, x_vld, mid, mid_vld)
 
-    state_sig = i0.symdict['state']
+class chip_model(Elaboratable):
+    def __init__(self, clk, rst, x, x_vld, y, y_vld):
+        self.clk, self.rst = clk, rst
+        self.x, self.x_vld = x, x_vld
+        self.y, self.y_vld = y, y_vld
 
-    @always_comb
-    def glue():
-        y_vld.next = bool(state_sig)
+    def elaborate(self, platform):
+        m = Module()
+        mid = Signal(8)
+        mid_vld = Signal()
+        i0 = prod(self.clk, self.rst, self.x, self.x_vld, mid, mid_vld)
+        m.submodules.i0 = i0
 
-    return i0, glue
+        # snooping the producer's PRIVATE hierarchy instead of a real port
+        state_sig = i0._fragment.state
+        m.d.comb += self.y_vld.eq(state_sig)
+        return m
 
 
 def simulate(stimulus):
@@ -393,19 +665,27 @@ def simulate(stimulus):
 '''
 
 SYMDICT_IN_SIMULATE_ONLY = '''\
-from myhdl import block, Signal, intbv
+from amaranth import Elaboratable, Module
 from prod import prod
 
-@block
-def chip_model(clk, rst, x, x_vld, y, y_vld):
-    i0 = prod(clk, rst, x, x_vld, y, y_vld)
-    return i0
+
+class chip_model(Elaboratable):
+    def __init__(self, clk, rst, x, x_vld, y, y_vld):
+        self.clk, self.rst = clk, rst
+        self.x, self.x_vld = x, x_vld
+        self.y, self.y_vld = y, y_vld
+
+    def elaborate(self, platform):
+        m = Module()
+        m.submodules.i0 = prod(
+            self.clk, self.rst, self.x, self.x_vld, self.y, self.y_vld)
+        return m
 
 
 def simulate(stimulus):
     holder = {}
     # post-sim observation snoop -- LEGITIMATE (rule 8)
-    recon = holder.get("dut") and holder["dut"].subs[0].symdict.get("recon")
+    recon = holder.get("dut") and holder["dut"]._fragment.recon
     return recon, 0
 '''
 
@@ -415,47 +695,24 @@ class TestSymdict:
         _models_dir(tmp_path, prod=PROD_MODEL)
         chip = _chip(tmp_path, SYMDICT_CHIP)
         res = audit_chip_model(chip, chip.parent)
-        assert "unlowerable_symdict" in _checks(res.violations)
+        assert "unlowerable_introspection" in _checks(res.violations)
 
     def test_symdict_in_simulate_allowed(self, tmp_path):
         _models_dir(tmp_path, prod=PROD_MODEL)
         chip = _chip(tmp_path, SYMDICT_IN_SIMULATE_ONLY)
         res = audit_chip_model(chip, chip.parent)
-        assert "unlowerable_symdict" not in _checks(res.violations)
+        assert "unlowerable_introspection" not in _checks(res.violations)
 
 
 # ---------------------------------------------------------------------------
 # multi_driven_net
 # ---------------------------------------------------------------------------
 
-MULTI_DRIVEN_CHIP = '''\
-from myhdl import block, Signal, intbv, always_comb
-from prod import prod
-from cons import cons
-
-@block
-def chip_model(clk, rst, x, x_vld, pos_in, y, y_vld):
-    mid = Signal(intbv(0)[8:])
-    mid_vld = Signal(bool(0))
-    pos = Signal(intbv(0)[8:])
-
-    i0 = prod(clk, rst, x, x_vld, mid, mid_vld)
-    i1 = cons(clk, rst, mid, mid_vld, pos, y, y_vld)
-
-    @always_comb
-    def glue_pos():
-        pos.next = pos_in + 0
-
-    @always_comb
-    def glue_mid():
-        mid.next = 0   # SECOND driver: prod already drives mid
-
-    return i0, i1, glue_pos, glue_mid
-
-
-def simulate(stimulus):
-    return [], 0
-'''
+MULTI_DRIVEN_CHIP = CLEAN_CHIP.replace(
+    "        m.d.comb += pos.eq(self.pos_in)\n",
+    "        m.d.comb += pos.eq(self.pos_in)\n"
+    "        m.d.comb += mid.eq(0)   # SECOND driver: prod already drives mid\n",
+)
 
 
 class TestMultiDriven:
@@ -495,8 +752,9 @@ class TestRobustness:
         d = _models_dir(tmp_path, prod=PROD_MODEL)
         _write(d / "broken.py", "def broken(:\n")
         chip = _chip(tmp_path, CLEAN_CHIP.replace("from cons import cons\n", "")
-                     .replace("    i1 = cons(clk, rst, mid, mid_vld, pos, y, y_vld)\n", "")
-                     .replace("return i0, i1, glue_pos", "return i0, glue_pos"))
+                     .replace("        m.submodules.i1 = cons(\n"
+                              "            self.clk, self.rst, mid, mid_vld,"
+                              " pos, self.y, self.y_vld)\n", ""))
         res = audit_chip_model(chip, chip.parent)
         assert all(v["audit_check"] != "instantiation_signature"
                    for v in res.violations)
@@ -525,23 +783,30 @@ def run(stim):
     return [v + 1 for v in stim]
 '''
 
-# Statically clean, but simulate() calls a block factory with a bad kwarg at
+# Statically clean, but simulate() constructs a block model with a bad kwarg at
 # RUNTIME -- escapes the static audit, raises TypeError in the sim. Exercises
 # the R2 signature-feedback enrichment on the simulate()-raised path.
 RUNTIME_KWARG_CHIP = '''\
-from myhdl import block, Signal, intbv
+from amaranth import Elaboratable, Module, Signal
 from prod import prod
 
-@block
-def chip_model(clk, rst, x, x_vld, y, y_vld):
-    i0 = prod(clk, rst, x, x_vld, y, y_vld)
-    return i0
+
+class chip_model(Elaboratable):
+    def __init__(self, clk, rst, x, x_vld, y, y_vld):
+        self.clk, self.rst = clk, rst
+        self.x, self.x_vld = x, x_vld
+        self.y, self.y_vld = y, y_vld
+
+    def elaborate(self, platform):
+        m = Module()
+        m.submodules.i0 = prod(
+            self.clk, self.rst, self.x, self.x_vld, self.y, self.y_vld)
+        return m
 
 
 def simulate(stimulus):
-    clk = Signal(bool(0))
-    bad = prod(clk=clk, rst=None, data_in=1, din_vld=None, dout=None,
-               dout_vld=None)
+    clk = Signal()
+    prod(clk=clk, rst=None, data_in=1, din_vld=None, dout=None, dout_vld=None)
     return [], 0
 '''
 
@@ -604,70 +869,50 @@ class TestGateIntegration:
 # live wall: bare "IndexError: list index out of range" -> unlocalized ->
 # broadcast re-spec of every block).
 CRASHING_MODEL = '''\
-from myhdl import block, Signal, intbv, always_seq
+from amaranth import Elaboratable, Module
 
 _LUT = [1, 2, 3]
 
-@block
-def crasher(clk, rst, din, din_vld, dout, dout_vld):
-    @always_seq(clk.posedge, reset=rst)
-    def logic():
-        dout_vld.next = din_vld
-        if din_vld:
-            dout.next = _LUT[int(din) + 10]   # IndexError on any real beat
-    return logic
+
+class crasher(Elaboratable):
+    def __init__(self, clk, rst, din, din_vld, dout, dout_vld):
+        self.clk, self.rst = clk, rst
+        self.din, self.din_vld = din, din_vld
+        self.dout, self.dout_vld = dout, dout_vld
+
+    def elaborate(self, platform):
+        m = Module()
+        m.d.sync += self.dout_vld.eq(self.din_vld)
+        m.d.sync += self.dout.eq(_LUT[13])   # IndexError on elaboration
+        return m
 '''
 
 CRASHING_CHIP = '''\
-from myhdl import (block, Signal, intbv, instance, delay, ResetSignal,
-                   StopSimulation)
+from amaranth import Elaboratable, Module, Signal
+from amaranth.sim import Simulator
 from crasher import crasher
 
 
-@block
-def chip_model(clk, rst, x, x_vld, y, y_vld):
-    i0 = crasher(clk, rst, x, x_vld, y, y_vld)
-    return i0
+class chip_model(Elaboratable):
+    def __init__(self, clk, rst, x, x_vld, y, y_vld):
+        self.clk, self.rst = clk, rst
+        self.x, self.x_vld = x, x_vld
+        self.y, self.y_vld = y, y_vld
+
+    def elaborate(self, platform):
+        m = Module()
+        m.submodules.i0 = crasher(
+            self.clk, self.rst, self.x, self.x_vld, self.y, self.y_vld)
+        return m
 
 
 def simulate(stimulus):
-    captured = []
-
-    @block
-    def tb():
-        clk = Signal(bool(0))
-        rst = ResetSignal(0, active=1, isasync=False)
-        x = Signal(intbv(0)[8:])
-        x_vld = Signal(bool(0))
-        y = Signal(intbv(0)[8:])
-        y_vld = Signal(bool(0))
-        dut = chip_model(clk, rst, x, x_vld, y, y_vld)
-
-        @instance
-        def clkgen():
-            while True:
-                clk.next = not clk
-                yield delay(5)
-
-        @instance
-        def drive():
-            rst.next = 1
-            yield clk.posedge
-            yield clk.posedge
-            rst.next = 0
-            for v in stimulus:
-                x.next = int(v)
-                x_vld.next = 1
-                yield clk.posedge
-            x_vld.next = 0
-            for _ in range(4):
-                yield clk.posedge
-            raise StopSimulation
-
-        return dut, clkgen, drive
-
-    tb().run_sim()
-    return captured, 1
+    dut = chip_model(Signal(), Signal(), Signal(8), Signal(),
+                     Signal(8), Signal())
+    sim = Simulator(dut)
+    sim.add_clock(1e-6)
+    sim.run()
+    return [], 1
 '''
 
 
@@ -761,11 +1006,24 @@ class TestCrashTracebackLocalization:
         monkeypatch.delenv("CORESMITH_SIM_PYTHON", raising=False)
         _models_dir(tmp_path, prod=PROD_MODEL)
         chip_text = (
-            "from myhdl import block, Signal, intbv\n"
+            "from amaranth import Elaboratable, Module\n"
             "from prod import prod\n"
-            "@block\n"
-            "def chip_model(clk, rst, x, x_vld, y, y_vld):\n"
-            "    return prod(clk, rst, x, x_vld, y, y_vld)\n"
+            "\n"
+            "\n"
+            "class chip_model(Elaboratable):\n"
+            "    def __init__(self, clk, rst, x, x_vld, y, y_vld):\n"
+            "        self.clk, self.rst = clk, rst\n"
+            "        self.x, self.x_vld = x, x_vld\n"
+            "        self.y, self.y_vld = y, y_vld\n"
+            "\n"
+            "    def elaborate(self, platform):\n"
+            "        m = Module()\n"
+            "        m.submodules.i0 = prod(\n"
+            "            self.clk, self.rst, self.x, self.x_vld, self.y,"
+            " self.y_vld)\n"
+            "        return m\n"
+            "\n"
+            "\n"
             "def simulate(stimulus):\n"
             "    lut = [1]\n"
             "    return [lut[9]], 1\n"   # IndexError in _chip_model.py itself
