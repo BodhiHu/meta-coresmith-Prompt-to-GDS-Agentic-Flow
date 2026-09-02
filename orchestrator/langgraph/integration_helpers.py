@@ -640,6 +640,7 @@ def generate_top_level_rtl(
     connections: list[dict],
     modules: dict[str, VerilogModule],
     mismatches: list[IntegrationMismatch] | None = None,
+    project_root=None,
 ) -> dict:
     """Generate the top-level Verilog module that instantiates and wires all blocks.
 
@@ -652,6 +653,9 @@ def generate_top_level_rtl(
         connections: Architecture connection list.
         modules: Parsed block modules.
         mismatches: Known mismatches (used to skip broken connections).
+        project_root: Run directory the ``rtl/integration/`` output is
+            anchored to. Defaults to the module-level ``PROJECT_ROOT``
+            (resolved at call time so monkeypatching it still works).
 
     Returns:
         dict with keys: verilog, rtl_path, module_name, block_count,
@@ -843,7 +847,7 @@ def generate_top_level_rtl(
     verilog = "\n".join(lines)
 
     # Write to disk
-    rtl_dir = PROJECT_ROOT / "rtl" / "integration"
+    rtl_dir = Path(project_root or PROJECT_ROOT) / "rtl" / "integration"
     rtl_dir.mkdir(parents=True, exist_ok=True)
     rtl_path = rtl_dir / f"{safe_name}.v"
     rtl_path.write_text(verilog, encoding="utf-8")
@@ -1669,10 +1673,15 @@ def lint_top_level(
     top_rtl_path: str,
     block_rtl_paths: list[str],
     design_name: str = "integration",
+    project_root=None,
 ) -> dict:
     """Run Verilator lint on the top-level module with all block RTL files.
 
     Includes all block Verilog files so Verilator can resolve instantiations.
+
+    ``project_root`` anchors the ``sim_build/integration_lint`` dedup scratch
+    dir at the RUN directory; it defaults to the module-level ``PROJECT_ROOT``
+    (resolved at call time) so existing callers are unchanged.
 
     Returns:
         dict with: clean (bool), errors (str), warnings (str), log_path (str).
@@ -1710,7 +1719,8 @@ def lint_top_level(
     # sim keeps the lib body -- the two stages must see the same sources. Writes
     # deduped copies into a scratch dir alongside the run logs.
     try:
-        _dd_dir = PROJECT_ROOT / "sim_build" / "integration_lint"
+        _dd_dir = (Path(project_root or PROJECT_ROOT) / "sim_build"
+                   / "integration_lint")
         _dd_dir.mkdir(parents=True, exist_ok=True)
         lint_sources = _dedup_module_sources(lint_sources, _dd_dir)
     except Exception:
@@ -1844,6 +1854,7 @@ async def generate_integration_testbench(
     prior_failure: str = "",
     chip_model_path: str = "",
     parameter_table: str = "",
+    project_root=None,
 ) -> dict:
     """Generate a cocotb integration testbench via the Lead DV agent.
 
@@ -1851,6 +1862,10 @@ async def generate_integration_testbench(
     description of why the previous integration DV attempt failed so the
     LLM can avoid repeating the same mistake. The underlying
     ``IntegrationTestbenchGenerator.generate`` accepts the same kwarg.
+
+    ``project_root`` anchors ``tb/integration/`` at the RUN directory; it
+    defaults to the module-level ``PROJECT_ROOT`` (resolved at call time) so
+    existing callers are unchanged.
 
     Returns:
         dict with: tb_path (str), testbench_path (str), test_count (int).
@@ -1870,7 +1885,7 @@ async def generate_integration_testbench(
             "ports": [p.to_dict() for p in mod.ports],
         })
 
-    tb_dir = PROJECT_ROOT / "tb" / "integration"
+    tb_dir = Path(project_root or PROJECT_ROOT) / "tb" / "integration"
     tb_dir.mkdir(parents=True, exist_ok=True)
     output_path = str(tb_dir / f"test_{design_name}.py")
 
@@ -1903,8 +1918,13 @@ async def generate_validation_testbench(
     reference_path: str = "",
     reference_entry: str = "",
     parameter_table: str = "",
+    project_root=None,
 ) -> dict:
     """Generate an ERS/KPI validation cocotb testbench via Lead Validation DV.
+
+    ``project_root`` anchors ``tb/validation/`` at the RUN directory; it
+    defaults to the module-level ``PROJECT_ROOT`` (resolved at call time) so
+    existing callers are unchanged.
 
     Returns:
         dict with: tb_path (str), testbench_path (str), test_count (int).
@@ -1924,7 +1944,7 @@ async def generate_validation_testbench(
             "ports": [p.to_dict() for p in mod.ports],
         })
 
-    tb_dir = PROJECT_ROOT / "tb" / "validation"
+    tb_dir = Path(project_root or PROJECT_ROOT) / "tb" / "validation"
     tb_dir.mkdir(parents=True, exist_ok=True)
     output_path = str(tb_dir / f"test_{design_name}_validation.py")
 
@@ -2373,6 +2393,7 @@ def run_integration_simulation(
     tb_path: str,
     attempt: int = 1,
     sim_scope: str = "integration",
+    project_root=None,
 ) -> dict:
     """Run cocotb simulation on the integrated top-level design.
 
@@ -2386,6 +2407,12 @@ def run_integration_simulation(
     ``sim_build/validation`` + ``step_logs/integration/validation_sim_attempt<N>.log``
     -- preserving the integration run's raw sim log for forensics and avoiding
     build-fingerprint churn between the two runs.
+
+    ``project_root`` anchors ``sim_build/<scope>`` (and the sim PYTHONPATH) at
+    the RUN directory; it defaults to the module-level ``PROJECT_ROOT``
+    (resolved at call time) so existing callers are unchanged. Without it, a
+    process that never set ``CORESMITH_PROJECT_ROOT`` builds the chip inside
+    the engine checkout.
 
     Returns:
         dict with: passed (bool), log (str), returncode (int), log_path (str).
@@ -2401,7 +2428,8 @@ def run_integration_simulation(
     # Distinct sim build dir per scope (avoids fingerprint churn: the two runs
     # differ only in MODULE, which would otherwise trigger a full rebuild on
     # every integration<->validation switch through a shared dir).
-    sim_dir = PROJECT_ROOT / "sim_build" / sim_scope
+    root = Path(project_root) if project_root else PROJECT_ROOT
+    sim_dir = root / "sim_build" / sim_scope
     sim_dir.mkdir(parents=True, exist_ok=True)
     # Distinct step-log name per scope (validation -> validation_sim_attempt<N>.log)
     # so validation_dv never overwrites integration_dv's raw sim log.
@@ -2486,7 +2514,7 @@ def run_integration_simulation(
     venv_bin = str(Path(sys.prefix) / "bin")
     env["PATH"] = f"{venv_bin}:{env.get('PATH', '/usr/bin:/bin')}"
     env["SHELL"] = shutil.which("bash") or "/bin/bash"
-    env["PYTHONPATH"] = f"{sim_dir}:{PROJECT_ROOT}:{env.get('PYTHONPATH', '')}"
+    env["PYTHONPATH"] = f"{sim_dir}:{root}:{env.get('PYTHONPATH', '')}"
     # SERIAL make (-j1): with `--build-jobs 1` in the Makefile this keeps the
     # full-chip Verilator build single-threaded so it can never fork-storm the
     # host (the 2026-07-01 incident). Raise only on a big box via

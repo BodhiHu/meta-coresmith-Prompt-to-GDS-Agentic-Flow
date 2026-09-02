@@ -233,7 +233,7 @@ def test_agent_chip_verify_uses_scratch_namespace(tmp_path, monkeypatch):
 
     captured = {}
 
-    def _fake_sim(design, top, blocks, tbp, attempt=1, sim_scope="integration"):
+    def _fake_sim(design, top, blocks, tbp, attempt=1, sim_scope="integration", **kw):
         captured["sim_scope"] = sim_scope
         return {"passed": True, "log": "ok", "log_path": "/i.log"}
 

@@ -614,12 +614,19 @@ def python_source_file(python_source_ref: str, project_root=None):
 # Golden model wrapper creation
 # ---------------------------------------------------------------------------
 
-def create_golden_model_wrapper(block_name: str, python_source_path: str) -> None:
+def create_golden_model_wrapper(block_name: str, python_source_path: str,
+                                project_root=None) -> None:
     """Create a <block_name>_model.py wrapper on PYTHONPATH for cocotb import.
 
     The testbench generator expects to import ``from <block_name>_model import ...``.
     We create a thin wrapper that imports from the actual source location.
+
+    ``project_root`` anchors ``tb/cocotb/`` at the RUN directory; it defaults
+    to the module-level ``PROJECT_ROOT`` so existing callers are unchanged.
+    Resolved at call time (not as a default argument) so tests that monkeypatch
+    ``PROJECT_ROOT`` keep working.
     """
+    root = Path(project_root) if project_root else PROJECT_ROOT
     # Prefer the per-block Amaranth golden model as the cocotb oracle when the
     # block-goldens feature is on. The block model (arch/block_models/<block>.py)
     # exposes the block-level reference API (e.g. _process_mb, field masks),
@@ -632,12 +639,12 @@ def create_golden_model_wrapper(block_name: str, python_source_path: str) -> Non
         from orchestrator.architecture import composition as _composition
         if _composition.block_goldens_enabled():
             _bm = (
-                PROJECT_ROOT / "arch" / _composition.BLOCK_MODELS_DIRNAME
+                root / "arch" / _composition.BLOCK_MODELS_DIRNAME
                 / f"{block_name}.py"
             )
             if _bm.exists():
                 block_model_module = ".".join(
-                    _bm.relative_to(PROJECT_ROOT).with_suffix("").parts
+                    _bm.relative_to(root).with_suffix("").parts
                 )
     except Exception:  # noqa: BLE001
         block_model_module = ""
@@ -651,7 +658,7 @@ def create_golden_model_wrapper(block_name: str, python_source_path: str) -> Non
     have_python_source = bool(python_source_path and python_source_path.strip())
     # Strip any `:name1,name2` slice suffix to resolve the underlying golden
     # FILE (the wrapper imports the whole module; the slice is for the judge).
-    source_path = python_source_file(python_source_path, PROJECT_ROOT) if have_python_source else None
+    source_path = python_source_file(python_source_path, root) if have_python_source else None
     if source_path is not None and (
         not source_path.exists() or source_path.is_dir()
     ):
@@ -659,14 +666,14 @@ def create_golden_model_wrapper(block_name: str, python_source_path: str) -> Non
     if source_path is None and not block_model_module:
         return
 
-    wrapper_dir = PROJECT_ROOT / "tb" / "cocotb"
+    wrapper_dir = root / "tb" / "cocotb"
     wrapper_dir.mkdir(parents=True, exist_ok=True)
     wrapper_path = wrapper_dir / f"{block_name}_model.py"
 
     if block_model_module:
         module_path = block_model_module
     else:
-        module_parts = source_path.relative_to(PROJECT_ROOT).with_suffix("").parts
+        module_parts = source_path.relative_to(root).with_suffix("").parts
         module_path = ".".join(module_parts)
 
     # Refresh a stale wrapper that points at the wrong module (e.g. an old
@@ -1028,6 +1035,9 @@ async def generate_uarch_spec(
         _ct = block_contract_sha1(str(PROJECT_ROOT), block["name"])
         if _ct:
             (_bd / "uarch_spec_contract_sha1").write_text(_ct, encoding="utf-8")
+            # The spec now matches the LIVE contract -- retire any eager
+            # staleness marker a contract amendment left behind for this block.
+            (_bd / CONTRACT_STALE_MARKER).unlink(missing_ok=True)
     except OSError:
         pass
 
@@ -1045,6 +1055,78 @@ async def generate_uarch_spec(
     return result
 
 
+# Eager staleness marker written next to a block whose interface-contract
+# slice moved under it (see :func:`write_amended_contract`). Disk-first, so a
+# future preflight can read it without replaying the amendment.
+CONTRACT_STALE_MARKER = "contract_stale"
+
+
+def recorded_contract_sha1(project_root, block_name: str,
+                           sidecar: str) -> str:
+    """Contract sha1 an on-disk artifact was generated against ('' when the
+    ``.coresmith/blocks/<b>/<sidecar>`` provenance file is absent/unreadable).
+
+    ``sidecar`` is ``uarch_spec_contract_sha1`` (spec) or
+    ``block_model_contract_sha1`` (block model).
+    """
+    try:
+        path = (Path(project_root) / ".coresmith" / "blocks" / block_name
+                / sidecar)
+        if not path.exists():
+            return ""
+        return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def contract_block_names(contract_doc: dict) -> list:
+    """Every block participating in an ``interface_contracts.json`` document
+    (sorted, deduped). Tolerant of missing fields."""
+    names: set = set()
+    for c in (contract_doc or {}).get("contracts") or []:
+        if not isinstance(c, dict):
+            continue
+        for key in ("producer_block", "consumer_block"):
+            nm = str(c.get(key, "") or "").strip()
+            if nm:
+                names.add(nm)
+    return sorted(names)
+
+
+def write_amended_contract(project_root, contract_doc: dict) -> list:
+    """Persist an amended ``interface_contracts.json`` and EAGERLY flag every
+    block whose contract slice moved. Returns the changed block names.
+
+    Why eager (C5(c)): the gap resolver amends the contract for ONE block, but
+    an amendment lands on an EDGE -- so the partner block's slice changes too.
+    The old code left a note saying partners "may be invalidated ... on their
+    next entry", and the lazy check never fired because the gate-scoped reuse
+    shortcut returned before it. Live consequence: 10/12 specs and 9/12 models
+    entering the composition gate had been generated against a superseded
+    contract. Here we diff the per-block ``block_contract_sha1`` across the
+    write and drop a ``contract_stale`` marker on every block that moved, so
+    the staleness is a fact on disk rather than an inference.
+    """
+    root = Path(project_root)
+    path = root / ".coresmith" / "interface_contracts.json"
+    names = contract_block_names(contract_doc)
+    before = {b: block_contract_sha1(str(root), b) for b in names}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(contract_doc, indent=2), encoding="utf-8")
+    after = {b: block_contract_sha1(str(root), b) for b in names}
+    changed = [b for b in names if before[b] != after[b]]
+    for b in changed:
+        try:
+            bd = root / ".coresmith" / "blocks" / b
+            bd.mkdir(parents=True, exist_ok=True)
+            (bd / CONTRACT_STALE_MARKER).write_text(
+                f"{before[b] or 'none'} -> {after[b] or 'none'}\n",
+                encoding="utf-8")
+        except OSError:
+            pass
+    return changed
+
+
 def gate_scoped_reuse_reason(project_root, block_name: str) -> str:
     """Non-empty reason when this block's spec/model must be REUSED verbatim
     during a µarch-gate revise iteration (disk-first signals, no state needed):
@@ -1054,13 +1136,23 @@ def gate_scoped_reuse_reason(project_root, block_name: str) -> str:
     - ``.coresmith/blocks/<b>/gate_feedback.txt`` is ABSENT => init_tier did
       NOT implicate this block (precise localization writes feedback only for
       affected blocks and clears it for the rest; a broadcast writes it for
-      every tier block, so broadcasts are unaffected by this skip).
+      every tier block, so broadcasts are unaffected by this skip);
+    - the spec's recorded contract provenance
+      (``uarch_spec_contract_sha1``) still MATCHES the live per-block contract
+      slice.
 
     Rationale (armC live, 2026-07-05): each gate revise round re-drew specs,
     reviews, and models for every NON-implicated block (~5 LLM rounds of pure
     waste per iteration) because regen is unconditional on tier re-entry --
     and the integration reviewer's edits kept bumping spec mtimes, cascading
     model regens that even clobbered an operator hand-patch.
+
+    The contract clause (C5(c)) is why "not implicated" is not sufficient on
+    its own: the gap resolver amends the frozen contract mid-run, and a
+    partner block the gate never implicated would otherwise sail into the
+    composition gate carrying a spec written against the SUPERSEDED contract.
+    A block with no contract participation at all (``block_contract_sha1``
+    returns "") has no provenance axis and reuses exactly as before.
 
     ``CORESMITH_GATE_SCOPED_REVISE=0`` disables (old behavior).
     """
@@ -1073,6 +1165,15 @@ def gate_scoped_reuse_reason(project_root, block_name: str) -> str:
         return ""
     if (root / ".coresmith" / "blocks" / block_name / "gate_feedback.txt").exists():
         return ""
+    current = block_contract_sha1(str(root), block_name)
+    if current:
+        recorded = recorded_contract_sha1(
+            root, block_name, "uarch_spec_contract_sha1")
+        if recorded != current:
+            log(f"  [GATE-SCOPE] {block_name}: contract changed since spec "
+                f"({recorded[:12] or 'no sidecar'} -> {current[:12]}) -- "
+                f"regenerating instead of reusing", YELLOW)
+            return ""
     return (
         "gate-scoped revise: the µarch gate did not implicate this block "
         "(no gate_feedback.txt) -- reusing the on-disk spec/model verbatim"
@@ -1394,21 +1495,24 @@ async def _maybe_generate_block_golden(block: dict, callbacks: list = None) -> N
             # fragment_metadata_memory stale-oracle livelock: the contract
             # widened 48->56 bits but the on-disk model was reused, so DV
             # judged the (correct) new RTL against an obsolete oracle. PIN
-            # still wins above (explicit operator intent). No sidecar recorded
-            # (older runs) -> reuse as before.
-            _sc_path = (PROJECT_ROOT / ".coresmith" / "blocks" / block_name
-                        / "block_model_contract_sha1")
-            _rec_ct = ""
-            try:
-                if _sc_path.exists():
-                    _rec_ct = _sc_path.read_text(encoding="utf-8").strip()
-            except OSError:
-                pass
+            # still wins above (explicit operator intent).
+            #
+            # C5(c): this check is now FAIL-CLOSED on a MISSING sidecar as
+            # well. `gate_scoped_reuse_reason` already vouches for the SPEC's
+            # provenance, but the model is generated separately and can lag it
+            # (a model written before the sidecar existed, or a hand-dropped
+            # file); an unprovenanced model must never be reused as the DV
+            # oracle while this block has a live contract slice. A block with
+            # NO contract participation (_cur_ct == "") has no provenance axis
+            # and reuses exactly as before.
+            _rec_ct = recorded_contract_sha1(
+                PROJECT_ROOT, block_name, "block_model_contract_sha1")
             _cur_ct = block_contract_sha1(str(PROJECT_ROOT), block_name)
-            if _rec_ct and _cur_ct and _cur_ct != _rec_ct:
-                log(f"  [BLOCK-MODEL] {block_name}: interface contract changed "
-                    f"since this model was generated -- overriding scoped "
-                    f"reuse, REGENERATING the model", YELLOW)
+            if _cur_ct and _cur_ct != _rec_ct:
+                log(f"  [BLOCK-MODEL] {block_name}: contract changed since "
+                    f"model ({_rec_ct[:12] or 'no sidecar'} -> "
+                    f"{_cur_ct[:12]}) -- overriding scoped reuse, "
+                    f"REGENERATING the model", YELLOW)
             else:
                 log(f"  [BLOCK-MODEL] {block_name}: {_scope}", YELLOW)
                 return
@@ -1552,6 +1656,7 @@ async def _maybe_generate_block_golden(block: dict, callbacks: list = None) -> N
                 if _ct:
                     (_bd / "block_model_contract_sha1").write_text(
                         _ct, encoding="utf-8")
+                    (_bd / CONTRACT_STALE_MARKER).unlink(missing_ok=True)
             except OSError:
                 pass
 
@@ -1617,7 +1722,10 @@ async def _maybe_generate_block_golden(block: dict, callbacks: list = None) -> N
                     f"applicable amendments -- leaving the gap for the "
                     f"feasibility interrupt", RED)
                 break
-            _cpath.write_text(json.dumps(_cdoc, indent=2), encoding="utf-8")
+            # C5(c): persist + EAGERLY diff every block's contract slice
+            # across the write (an amendment lands on an EDGE, so the partner
+            # block moves too) and mark the movers on disk.
+            _moved = write_amended_contract(PROJECT_ROOT, _cdoc)
             try:  # audit trail -- every auto-frozen fact is reviewable
                 with open(PROJECT_ROOT / ".coresmith" /
                           "gap_resolutions.jsonl", "a",
@@ -1633,9 +1741,13 @@ async def _maybe_generate_block_golden(block: dict, callbacks: list = None) -> N
             log(f"  [GAP-RESOLVE] {block_name}: RESOLVED from the committed "
                 f"corpus -- froze {len(_applied)} amendment(s) into the "
                 f"contract ({'; '.join(_applied[:4])}); regenerating", GREEN)
-            log("  [GAP-RESOLVE] NOTE: contract amended -- partner blocks' "
-                "recorded passes may be invalidated (C5/C7 catch this on "
-                "their next entry)", YELLOW)
+            if _moved:
+                log(f"  [GAP-RESOLVE] amendment changed contract slices for: "
+                    f"{_moved} -- their specs/models will regenerate on next "
+                    f"entry", YELLOW)
+            else:
+                log("  [GAP-RESOLVE] amendment changed no block's contract "
+                    "slice hash -- no partner invalidation", YELLOW)
             # Reload the (now richer) contract slice for the next round.
             interface_contract = load_block_contracts(
                 project_root, block_name)
@@ -2465,7 +2577,8 @@ def _normalize_cocotb_timing_keywords(tb_file: Path) -> None:
 def run_simulation(block: dict, rtl_path, tb_path: str, attempt: int = 1,
                    extra_defines: list | None = None,
                    sim_subdir: str | None = None,
-                   extra_args: list | None = None) -> dict:
+                   extra_args: list | None = None,
+                   project_root=None) -> dict:
     """Run cocotb simulation with Verilator.
 
     ``extra_defines`` (e.g. ``["SYNTHESIS"]``) are added as Verilator ``-D``
@@ -2476,9 +2589,17 @@ def run_simulation(block: dict, rtl_path, tb_path: str, attempt: int = 1,
     used by the gate-sim harness (harness.gate_sim) to record a PORT-ONLY
     waveform for post-synthesis vector replay. With all three omitted the
     Makefile and build dir are byte-identical to the default.
+
+    ``project_root`` anchors ``sim_build/`` and the cocotb oracle wrapper at
+    the RUN directory instead of the module-level ``PROJECT_ROOT`` constant.
+    It defaults to ``PROJECT_ROOT`` (resolved at call time, so monkeypatching
+    the constant still works), which is what the daemon relies on; any caller
+    that knows the run's root should pass it, otherwise a process without
+    ``CORESMITH_PROJECT_ROOT`` set writes DV artifacts into the checkout.
     """
     block_name = block["name"]
-    sim_dir = PROJECT_ROOT / "sim_build" / (sim_subdir or block_name)
+    root = Path(project_root) if project_root else PROJECT_ROOT
+    sim_dir = root / "sim_build" / (sim_subdir or block_name)
     sim_dir.mkdir(parents=True, exist_ok=True)
 
     # Bound Verilator's C++ build parallelism (engine fix 2026-06-24). A huge
@@ -2578,9 +2699,10 @@ EXTRA_ARGS += --build-jobs {_build_jobs}
     shutil.copy2(tb_path, sim_tb_path)
     _normalize_cocotb_timing_keywords(sim_tb_path)
 
-    create_golden_model_wrapper(block_name, block.get("python_source", ""))
+    create_golden_model_wrapper(block_name, block.get("python_source", ""),
+                                project_root=root)
 
-    wrapper_src = PROJECT_ROOT / "tb" / "cocotb" / f"{block_name}_model.py"
+    wrapper_src = root / "tb" / "cocotb" / f"{block_name}_model.py"
     if wrapper_src.exists():
         shutil.copy2(wrapper_src, sim_dir / f"{block_name}_model.py")
 
@@ -2589,7 +2711,7 @@ EXTRA_ARGS += --build-jobs {_build_jobs}
     venv_bin = str(Path(sys.prefix) / "bin")
     env["PATH"] = f"{venv_bin}:{env.get('PATH', '/usr/bin:/bin')}"
     env["SHELL"] = shutil.which("bash") or "/bin/bash"
-    env["PYTHONPATH"] = f"{sim_dir}:{PROJECT_ROOT}:{env.get('PYTHONPATH', '')}"
+    env["PYTHONPATH"] = f"{sim_dir}:{root}:{env.get('PYTHONPATH', '')}"
 
     # ANTI-MEMORIZATION DV SEED (engine fix, 2026-06-21).
     # Per-block DV stimulus must be UNPREDICTABLE at RTL-generation time, so a
@@ -2825,7 +2947,7 @@ EXTRA_ARGS += --build-jobs {_build_jobs}
                     # prior DV run's number on the retry path) is ignored and
                     # re-measured, not trusted.
                     throughput_record = evaluate_block_throughput(
-                        str(PROJECT_ROOT), block_name, sim_dir, rtl_path
+                        str(root), block_name, sim_dir, rtl_path
                     )
                 else:
                     throughput_record = {

@@ -478,7 +478,7 @@ class TestWiredIntoTheBlockFlow:
         tb.write_text("def t(dut):\n    dut.host_write_enable.value = 1\n")
         seen = {}
 
-        def _sim(block, rtl_path, tb_path, attempt):
+        def _sim(block, rtl_path, tb_path, attempt, **kw):
             # The sim that runs is the one AFTER the repair -- that is the
             # whole reason the stage sits here and not after the testbench.
             seen["rtl"] = Path(rtl_path).read_text()

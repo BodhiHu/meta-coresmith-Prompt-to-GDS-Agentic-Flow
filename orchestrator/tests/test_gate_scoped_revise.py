@@ -12,10 +12,19 @@ mode-3 corner clamp) because there was a spec pin but no model pin.
 Disk-first signals (no graph state): _last_gate_signature.txt == "a gate
 failure iteration is in progress" (cleared on real pass);
 blocks/<b>/gate_feedback.txt == "the gate implicated this block".
+
+C5(c) (audit 2026-09-01): "the gate did not implicate this block" is NOT
+sufficient on its own. The gap resolver amends interface_contracts.json
+mid-run, so a NON-implicated partner block was reusing a spec/model generated
+against the SUPERSEDED contract -- by the engine's own block_contract_sha1,
+10/12 specs and 9/12 models entering the composition gate were stale. Reuse now
+additionally requires the artifact's recorded contract provenance to match the
+live per-block slice.
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -32,6 +41,36 @@ def _arm(root: Path, *, gate_failing: bool, implicated: bool,
         (cs / "_last_gate_signature.txt").write_text("sig")
     if implicated:
         (cs / "blocks" / block / "gate_feedback.txt").write_text("fb")
+
+
+def _contract(root: Path, block: str = "blk", width: int = 8) -> str:
+    """Give ``block`` a real interface-contract slice; return its live sha1."""
+    cs = root / ".coresmith"
+    cs.mkdir(parents=True, exist_ok=True)
+    (cs / "interface_contracts.json").write_text(json.dumps({
+        "defaults": {"packing": "lsb_first"},
+        "contracts": [{
+            "edge_id": f"upstream__to__{block}",
+            "producer_block": "upstream",
+            "consumer_block": block,
+            "payload": {"width": width},
+        }],
+    }))
+    return ph.block_contract_sha1(str(root), block)
+
+
+def _stamp(root: Path, block: str, sidecar: str, value: str) -> None:
+    bd = root / ".coresmith" / "blocks" / block
+    bd.mkdir(parents=True, exist_ok=True)
+    (bd / sidecar).write_text(value, encoding="utf-8")
+
+
+def _seed_reference(root: Path, monkeypatch) -> None:
+    """Give the block-model generator a reference implementation to resolve."""
+    (root / "inputs").mkdir(exist_ok=True)
+    (root / "inputs" / "toy_golden.py").write_text("def run(s):\n    return s\n")
+    monkeypatch.setenv("CORESMITH_SOURCE_ROOT",
+                       str(root / "inputs" / "toy_golden.py"))
 
 
 class TestGateScopedReuseReason:
@@ -65,6 +104,58 @@ class TestGateScopedReuseReason:
     def test_kill_switch(self, tmp_path, monkeypatch):
         monkeypatch.setenv("CORESMITH_GATE_SCOPED_REVISE", "0")
         _arm(tmp_path, gate_failing=True, implicated=False)
+        assert gate_scoped_reuse_reason(str(tmp_path), "blk") == ""
+
+
+class TestReuseIsContractHashAware:
+    """C5(c): reuse also requires the SPEC's recorded contract provenance to
+    match the live per-block contract slice."""
+
+    @pytest.fixture(autouse=True)
+    def _default_env(self, monkeypatch):
+        monkeypatch.delenv("CORESMITH_GATE_SCOPED_REVISE", raising=False)
+
+    def test_matching_sidecar_still_reuses(self, tmp_path):
+        _arm(tmp_path, gate_failing=True, implicated=False)
+        live = _contract(tmp_path)
+        _stamp(tmp_path, "blk", "uarch_spec_contract_sha1", live)
+        assert gate_scoped_reuse_reason(str(tmp_path), "blk") != ""
+
+    def test_stale_sidecar_forces_regeneration(self, tmp_path):
+        _arm(tmp_path, gate_failing=True, implicated=False)
+        _contract(tmp_path)
+        # provenance from BEFORE the amendment
+        _stamp(tmp_path, "blk", "uarch_spec_contract_sha1", "0" * 40)
+        assert gate_scoped_reuse_reason(str(tmp_path), "blk") == ""
+
+    def test_amended_contract_invalidates_a_matching_sidecar(self, tmp_path):
+        """The live shape of the bug: sidecar matches, THEN the gap resolver
+        widens the payload -- reuse must stop without anyone touching the
+        block's gate_feedback."""
+        _arm(tmp_path, gate_failing=True, implicated=False)
+        live = _contract(tmp_path, width=8)
+        _stamp(tmp_path, "blk", "uarch_spec_contract_sha1", live)
+        assert gate_scoped_reuse_reason(str(tmp_path), "blk") != ""
+        _contract(tmp_path, width=9)          # amendment lands on the edge
+        assert gate_scoped_reuse_reason(str(tmp_path), "blk") == ""
+
+    def test_missing_sidecar_forces_regeneration(self, tmp_path):
+        _arm(tmp_path, gate_failing=True, implicated=False)
+        _contract(tmp_path)
+        assert gate_scoped_reuse_reason(str(tmp_path), "blk") == ""
+
+    def test_block_with_no_contract_slice_reuses_as_before(self, tmp_path):
+        """No contract participation => no provenance axis; the pre-existing
+        (signature + no gate_feedback) behaviour is unchanged."""
+        _arm(tmp_path, gate_failing=True, implicated=False)
+        assert gate_scoped_reuse_reason(str(tmp_path), "blk") != ""
+
+    def test_kill_switch_still_wins_over_the_contract_check(self, tmp_path,
+                                                            monkeypatch):
+        monkeypatch.setenv("CORESMITH_GATE_SCOPED_REVISE", "0")
+        _arm(tmp_path, gate_failing=True, implicated=False)
+        live = _contract(tmp_path)
+        _stamp(tmp_path, "blk", "uarch_spec_contract_sha1", live)
         assert gate_scoped_reuse_reason(str(tmp_path), "blk") == ""
 
 
@@ -126,6 +217,61 @@ class TestModelRegenSkips:
                            str(project / "inputs" / "toy_golden.py"))
         await ph._maybe_generate_block_golden({"name": "blk"})
         assert calls == ["blk"]
+
+    async def test_stale_model_sidecar_regens_even_when_spec_is_current(
+        self, project, monkeypatch
+    ):
+        """A stale MODEL must never be reused as the DV oracle just because
+        the spec's provenance is current (the fragment_metadata_memory
+        stale-oracle livelock)."""
+        calls = self._install_generator_probe(monkeypatch)
+        _arm(project, gate_failing=True, implicated=False)
+        live = _contract(project)
+        _stamp(project, "blk", "uarch_spec_contract_sha1", live)
+        _stamp(project, "blk", "block_model_contract_sha1", "0" * 40)
+        _seed_reference(project, monkeypatch)
+        await ph._maybe_generate_block_golden({"name": "blk"})
+        assert calls == ["blk"]
+
+    async def test_unprovenanced_model_regens_when_a_contract_exists(
+        self, project, monkeypatch
+    ):
+        """Fail-closed on a MISSING model sidecar too -- the model is written
+        separately from the spec and can lag it."""
+        calls = self._install_generator_probe(monkeypatch)
+        _arm(project, gate_failing=True, implicated=False)
+        live = _contract(project)
+        _stamp(project, "blk", "uarch_spec_contract_sha1", live)
+        _seed_reference(project, monkeypatch)
+        await ph._maybe_generate_block_golden({"name": "blk"})
+        assert calls == ["blk"]
+
+    async def test_current_model_sidecar_still_reuses(self, project,
+                                                     monkeypatch):
+        calls = self._install_generator_probe(monkeypatch)
+        _arm(project, gate_failing=True, implicated=False)
+        live = _contract(project)
+        _stamp(project, "blk", "uarch_spec_contract_sha1", live)
+        _stamp(project, "blk", "block_model_contract_sha1", live)
+        await ph._maybe_generate_block_golden({"name": "blk"})
+        assert calls == []
+        assert "hand-patched" in (
+            project / "arch" / "block_models" / "blk.py"
+        ).read_text()
+
+    async def test_regen_retires_the_contract_stale_marker(self, project,
+                                                           monkeypatch):
+        """The eager marker is a signal, not a latch: a regen against the live
+        contract clears it."""
+        self._install_generator_probe(monkeypatch)
+        _arm(project, gate_failing=True, implicated=True)
+        _contract(project)
+        marker = (project / ".coresmith" / "blocks" / "blk"
+                  / ph.CONTRACT_STALE_MARKER)
+        marker.write_text("old -> new\n")
+        _seed_reference(project, monkeypatch)
+        await ph._maybe_generate_block_golden({"name": "blk"})
+        assert not marker.exists()
 
     async def test_spec_pin_path_still_regens_model(self, tmp_path, monkeypatch):
         """armC defect 3: OPERATOR_SPEC_PIN's early return skipped the model

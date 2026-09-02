@@ -184,7 +184,7 @@ class TestVerifyRtl:
             "clean": lint_clean, "errors": "" if lint_clean else "%Error x",
             "log_path": "/lint.log",
         })
-        monkeypatch.setattr(ph, "run_simulation", lambda spec, rp, tb, a: {
+        monkeypatch.setattr(ph, "run_simulation", lambda spec, rp, tb, a, **kw: {
             "passed": sim_passed, "log": "sim log", "log_path": "/sim.log",
             "tests_passed": 5, "tests_total": 5, "tests_failed": 0,
             "sim_timed_out": timed_out,

@@ -416,7 +416,8 @@ def verify_rtl(
     if coverage:
         os.environ["CORESMITH_COVERAGE"] = "1"
     try:
-        sim = run_simulation(block_spec, rtl_path, tbp, attempt or 1)
+        sim = run_simulation(block_spec, rtl_path, tbp, attempt or 1,
+                             project_root=str(pr))
     finally:
         _restore_env("CORESMITH_DV_SEED_PIN", prev_seed_pin)
         _restore_env("CORESMITH_COVERAGE", prev_cov)
@@ -749,7 +750,8 @@ def verify_chip(
             pass
         try:
             res = run_integration_simulation(
-                design, top_rtl, block_rtls, tbp, attempt or 1, sim_scope=sim_scope
+                design, top_rtl, block_rtls, tbp, attempt or 1, sim_scope=sim_scope,
+                project_root=str(pr),
             )
         finally:
             _restore_env("CORESMITH_DV_SEED_PIN", prev_seed_pin)

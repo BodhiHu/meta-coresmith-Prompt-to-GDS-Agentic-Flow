@@ -167,7 +167,7 @@ def _wire_mismatch_design(monkeypatch, *, src_width=8, dst_width=16):
     )
     monkeypatch.setattr(
         pipeline_graph, "lint_top_level",
-        lambda top, blocks, name: {"clean": True, "errors": "", "log_path": ""},
+        lambda top, blocks, name, **kw: {"clean": True, "errors": "", "log_path": ""},
     )
 
     from orchestrator.langchain.agents import integration_lead
