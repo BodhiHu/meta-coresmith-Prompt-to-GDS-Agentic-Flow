@@ -624,8 +624,17 @@ _REF_ENTRY_DECL_RE = re.compile(
 )
 
 # Public callable names we prefer when discovering an entry point.
+#
+# ``main`` is deliberately ABSENT. Discovery is a heuristic over whatever the
+# reference module happens to export, and ``main`` is the one name every
+# UNRELATED utility script also uses: a live run auto-selected a ROM-image
+# generator's zero-argument ``main()`` as the WHOLE-CHIP oracle and every
+# vector died on "main() takes 0 positional arguments but 1 was given" -- a
+# category error that consumed 11 chip-lead decisions. What is removed is the
+# GUESS: an explicit CORESMITH_REFERENCE_ENTRY or a declared
+# reference_entry_point may still name ``main`` (it is then ABI-preflighted).
 _ENTRY_NAME_RE = re.compile(
-    r"^(encode|decode|run|process|main|top|encode_image\w*|chip_top)\b",
+    r"^(encode|decode|run|process|top|encode_image\w*|chip_top)\b",
     re.IGNORECASE,
 )
 
@@ -637,8 +646,16 @@ _ENTRY_NAME_RE = re.compile(
 # available via CORESMITH_REFERENCE_ENTRY or a declared reference_entry_point.)
 _ENTRY_PRIORITY = (
     "encode_image", "encode", "decode", "chip_top", "top", "run", "process",
-    "main",
 )
+
+# Names DISCOVERY must never guess -- not as a conventional name, and not as
+# the module's sole public callable either. ``main`` is a script convention, so
+# the fact that a module exposes one says nothing about whether it models the
+# CHIP: the live regression selected a ROM generator's ``main`` as the
+# whole-chip oracle. Naming it explicitly (CORESMITH_REFERENCE_ENTRY /
+# reference_entry_point) still works -- that is an operator asserting intent,
+# not the engine inferring it.
+_ENTRY_NAME_DENY = frozenset({"main"})
 
 
 def _entry_priority(name: str) -> tuple[int, str]:
@@ -679,10 +696,89 @@ def _public_callables(module) -> list[tuple[str, Callable]]:
     return out
 
 
+class ReferenceEntryPointError(RuntimeError):
+    """An EXPLICITLY configured reference entry cannot be the design's oracle.
+
+    Raised by :func:`resolve_reference_entrypoint` when
+    ``CORESMITH_REFERENCE_ENTRY`` / a declared ``reference_entry_point`` names a
+    callable that takes no positional argument, and by the model-integration
+    gate's stimulus derivation for the same callable. Explicit config is an
+    OPERATOR DECISION: quietly falling back to a heuristic guess hides the typo
+    (and hands the gate a different oracle than the operator asked for), so the
+    run fails fast with the callable's real signature instead.
+    """
+
+
+# Resolution tiers, reported as PROVENANCE so a log shows which one won.
+ENTRY_SOURCE_ENV = "env"
+ENTRY_SOURCE_DECLARED = "declared"
+ENTRY_SOURCE_DISCOVERED = "discovered"
+ENTRY_SOURCE_NONE = "none"
+
+
+def _entry_signature(entry_callable) -> str:
+    """``name(signature)`` for error messages; degrades, never raises."""
+    name = (
+        getattr(entry_callable, "__qualname__", None)
+        or getattr(entry_callable, "__name__", None)
+        or repr(entry_callable)
+    )
+    try:
+        return f"{name}{inspect.signature(entry_callable)}"
+    except (TypeError, ValueError):
+        return f"{name}(<signature unavailable>)"
+
+
+def _entry_accepts_stimulus(entry_callable) -> bool:
+    """ABI preflight: can this callable be CALLED WITH A STIMULUS?
+
+    True iff it accepts at least one positional argument -- a POSITIONAL_ONLY /
+    POSITIONAL_OR_KEYWORD parameter, or ``*args``. Every oracle invocation goes
+    through :func:`_run_reference`, which calls ``entry(stimulus)`` (or
+    ``entry(**stimulus)``, which still needs those parameters), so a
+    zero-positional callable is not an oracle -- it is a script entry point
+    that merely happens to be public.
+
+    Callables whose signature cannot be introspected (C builtins, exotic
+    ``__call__``) are ACCEPTED: "unknown" is not proof of impossibility, and a
+    real invocation failure is still reported as ``reference_uninvokable``.
+    """
+    if entry_callable is None or not callable(entry_callable):
+        return False
+    try:
+        sig = inspect.signature(entry_callable)
+    except (TypeError, ValueError):
+        return True
+    return any(
+        p.kind
+        in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.VAR_POSITIONAL,
+        )
+        for p in sig.parameters.values()
+    )
+
+
+def _entry_abi_message(entry_callable, spec: str = "", source: str = "") -> str:
+    """The actionable message for an entry that cannot accept a stimulus."""
+    origin = f" (from {source})" if source else ""
+    named = f"{spec!r}{origin} -> " if spec else ""
+    return (
+        f"reference entry {named}{_entry_signature(entry_callable)} takes NO "
+        "positional argument, so it cannot be the design's oracle -- the gate "
+        "invokes it as entry(stimulus). Point CORESMITH_REFERENCE_ENTRY (or the "
+        "PRD/FRD 'reference_entry_point:') at the callable that CONSUMES the "
+        "stimulus, e.g. 'encode' or 'my_module:run'."
+    )
+
+
 def resolve_reference_entrypoint(
     project_root: str,
     ref_module,
-) -> tuple[Callable | None, str]:
+    *,
+    with_provenance: bool = False,
+) -> tuple[Callable | None, str] | tuple[Callable | None, str, str]:
     """Resolve the callable that IS the design's executable oracle.
 
     Resolution order (first hit wins):
@@ -695,25 +791,64 @@ def resolve_reference_entrypoint(
        ``reference_entry_point: <name>`` (the name may be dotted/attr-pathed and
        is resolved against ``ref_module``).
     3. Discovery on ``ref_module``: among its public top-level functions, prefer
-       a name matching ``^(encode|decode|run|process|main|top|encode_image*|
+       a name matching ``^(encode|decode|run|process|top|encode_image*|
        chip_top)``; else, if there is exactly one public top-level function,
-       use it.
+       use it. ``main`` is never GUESSED at either step (``_ENTRY_NAME_DENY``)
+       -- tiers 1 and 2 can still name it.
 
-    Returns ``(callable_or_None, dotted_name_str)``. ``dotted_name_str`` is a
-    best-effort human-readable name for logging even when the callable is None.
+    ABI PREFLIGHT (every tier, :func:`_entry_accepts_stimulus`): the oracle is
+    invoked as ``entry(stimulus)``, so a callable with no positional parameter
+    cannot be one. DISCOVERY never selects such a callable -- a live run picked
+    a ROM utility's zero-argument ``main()`` as the whole-chip reference and
+    burned 11 chip-lead decisions on "main() takes 0 positional arguments but 1
+    was given". An EXPLICIT entry (env var / declared) that fails the preflight
+    raises :class:`ReferenceEntryPointError` naming the callable and its
+    signature, rather than silently degrading to the heuristics.
+
+    Returns ``(callable_or_None, dotted_name_str)`` -- or, with
+    ``with_provenance=True``, ``(callable_or_None, dotted_name_str, source)``
+    where ``source`` is ``"env"`` / ``"declared"`` / ``"discovered"`` /
+    ``"none"``, so the daemon log shows WHICH tier chose the oracle.
+    ``dotted_name_str`` is a best-effort human-readable name for logging even
+    when the callable is None.
     """
-    # 1. env override
+    fn, name, source = _resolve_reference_entrypoint_tiered(
+        project_root, ref_module
+    )
+    if with_provenance:
+        return fn, name, source
+    return fn, name
+
+
+def _resolve_reference_entrypoint_tiered(
+    project_root: str,
+    ref_module,
+) -> tuple[Callable | None, str, str]:
+    """The tiered resolution behind :func:`resolve_reference_entrypoint`.
+
+    Returns ``(callable_or_None, name, source)``; see the public wrapper for
+    the tier order and the ABI preflight contract.
+    """
+    # 1. env override -- EXPLICIT: honour it or fail loudly, never guess past it.
     env_entry = os.environ.get("CORESMITH_REFERENCE_ENTRY", "").strip()
     if env_entry:
         fn = _resolve_dotted_entry(env_entry, ref_module)
         if fn is not None:
-            return fn, env_entry
+            if not _entry_accepts_stimulus(fn):
+                raise ReferenceEntryPointError(
+                    _entry_abi_message(fn, env_entry, "CORESMITH_REFERENCE_ENTRY")
+                )
+            logger.info(
+                "composition gate: reference entry %r resolved via %s",
+                env_entry, ENTRY_SOURCE_ENV,
+            )
+            return fn, env_entry, ENTRY_SOURCE_ENV
         logger.warning(
             "composition gate: CORESMITH_REFERENCE_ENTRY=%r did not resolve",
             env_entry,
         )
 
-    # 2. declared in PRD / FRD prose
+    # 2. declared in PRD / FRD prose -- also EXPLICIT.
     root = Path(project_root)
     for doc in (root / "arch" / "prd_spec.md", root / "arch" / "frd_spec.md"):
         if not doc.exists():
@@ -727,7 +862,17 @@ def resolve_reference_entrypoint(
             decl = m.group(1)
             fn = _resolve_dotted_entry(decl, ref_module)
             if fn is not None:
-                return fn, decl
+                if not _entry_accepts_stimulus(fn):
+                    raise ReferenceEntryPointError(
+                        _entry_abi_message(
+                            fn, decl, f"{doc.name} reference_entry_point"
+                        )
+                    )
+                logger.info(
+                    "composition gate: reference entry %r resolved via %s (%s)",
+                    decl, ENTRY_SOURCE_DECLARED, doc.name,
+                )
+                return fn, decl, ENTRY_SOURCE_DECLARED
             logger.warning(
                 "composition gate: declared reference_entry_point %r "
                 "did not resolve",
@@ -737,11 +882,39 @@ def resolve_reference_entrypoint(
     # 3. discovery on the ref module
     if ref_module is not None:
         publics = _public_callables(ref_module)
+        # ABI preflight as a HARD FILTER: a zero-positional callable is never
+        # DISCOVERED as the oracle (that is the ROM-utility `main()` bug).
+        usable: list[tuple[str, Callable]] = []
+        rejected: list[str] = []
+        for name, fn in publics:
+            if _entry_accepts_stimulus(fn):
+                usable.append((name, fn))
+            else:
+                rejected.append(name)
+        if rejected:
+            logger.info(
+                "composition gate: discovery skipped %s -- no positional "
+                "parameter, so they cannot be called with a stimulus",
+                rejected,
+            )
+        denied = [name for name, _ in usable if name.lower() in _ENTRY_NAME_DENY]
+        if denied:
+            usable = [
+                (name, fn)
+                for name, fn in usable
+                if name.lower() not in _ENTRY_NAME_DENY
+            ]
+            logger.warning(
+                "composition gate: discovery will not GUESS %s as the chip "
+                "oracle -- set CORESMITH_REFERENCE_ENTRY=%s (or a declared "
+                "reference_entry_point) if that really is the reference entry",
+                denied, denied[0],
+            )
         # Prefer a conventionally-named entry, RANKED BY INTENT -- not by the
         # alphabetical dir() order, which made an encoder golden exposing both
         # `encode` and `decode` resolve to `decode` ('d' < 'e').
         conventional = [
-            (name, fn) for name, fn in publics if _ENTRY_NAME_RE.match(name)
+            (name, fn) for name, fn in usable if _ENTRY_NAME_RE.match(name)
         ]
         if conventional:
             conventional.sort(key=lambda item: _entry_priority(item[0]))
@@ -755,13 +928,22 @@ def resolve_reference_entrypoint(
                     conventional[0][0],
                 )
             name, fn = conventional[0]
-            return fn, name
+            logger.info(
+                "composition gate: reference entry %r resolved via %s",
+                name, ENTRY_SOURCE_DISCOVERED,
+            )
+            return fn, name, ENTRY_SOURCE_DISCOVERED
         # Else the single public top-level function, if unambiguous.
-        if len(publics) == 1:
-            name, fn = publics[0]
-            return fn, name
+        if len(usable) == 1:
+            name, fn = usable[0]
+            logger.info(
+                "composition gate: reference entry %r resolved via %s "
+                "(sole public function)",
+                name, ENTRY_SOURCE_DISCOVERED,
+            )
+            return fn, name, ENTRY_SOURCE_DISCOVERED
 
-    return None, env_entry or ""
+    return None, env_entry or "", ENTRY_SOURCE_NONE
 
 
 def _resolve_dotted_entry(spec: str, ref_module) -> Callable | None:
@@ -1297,12 +1479,28 @@ def _run_composition_gate_v1(project_root: str) -> list[dict]:
         except Exception as exc:  # noqa: BLE001
             logger.warning("composition gate: reference import failed: %s", exc)
 
-    entry_callable, entry_name = resolve_reference_entrypoint(
-        project_root, ref_module
-    )
+    try:
+        entry_callable, entry_name, entry_source = resolve_reference_entrypoint(
+            project_root, ref_module, with_provenance=True
+        )
+    except ReferenceEntryPointError as exc:
+        # EXPLICIT config (env var / declared) named a callable that cannot take
+        # a stimulus. Falling back to the FRD-expected oracle would answer a
+        # DIFFERENT question than the operator asked -- report it instead.
+        logger.error("composition gate: %s", exc)
+        return [
+            {
+                "type": "composition_gate_error",
+                "first_divergence_block": "",
+                "expected": "",
+                "observed": str(exc),
+                "suggested_fix": str(exc),
+            }
+        ]
     if entry_callable is not None:
         logger.info(
-            "composition gate: reference oracle entry = %s", entry_name
+            "composition gate: reference oracle entry = %s (via %s)",
+            entry_name, entry_source,
         )
     else:
         logger.info(

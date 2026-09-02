@@ -40,7 +40,10 @@ from typing import Any
 # Reuse the v1 helpers that are still correct under v2.
 from orchestrator.architecture.composition import (
     BLOCK_MODELS_DIRNAME,
+    ReferenceEntryPointError,
     ReferenceInvocationError,
+    _entry_abi_message,
+    _entry_accepts_stimulus,
     _normalize_ref_output,
     _outputs_match,
     _run_reference,
@@ -117,9 +120,17 @@ def _default_stimulus(entry_callable: Callable | None) -> Any:
     design (the common toy / objective-math case) can self-test without
     operator input. Returns ``None`` when no sensible default can be derived
     (the gate then logs + no-ops).
+
+    Raises :class:`ReferenceEntryPointError` when the entry takes NO positional
+    argument. Deriving a stimulus for such a callable is meaningless -- it was
+    how a zero-argument ROM utility's ``main()`` reached the oracle seat and
+    failed every vector with "main() takes 0 positional arguments but 1 was
+    given". The ABI error names the callable and its signature instead.
     """
     if entry_callable is None:
         return None
+    if not _entry_accepts_stimulus(entry_callable):
+        raise ReferenceEntryPointError(_entry_abi_message(entry_callable))
     try:
         sig = inspect.signature(entry_callable)
         positional = [
@@ -136,7 +147,8 @@ def _default_stimulus(entry_callable: Callable | None) -> Any:
     # A single short ascending stream is the most broadly-valid default.
     default_stream = [1, 2, 3, 4]
     if not positional:
-        # Zero-arg or *args-only: pass the bare list (simulate() decides).
+        # ``*args``-only (or an unintrospectable signature -- both passed the
+        # preflight above): pass the bare list (simulate() decides).
         return default_stream
     if len(positional) == 1:
         return default_stream
@@ -2107,6 +2119,38 @@ def _run_full_model_dv(
     return violations
 
 
+def _entry_abi_violation(
+    exc: ReferenceEntryPointError,
+    result_info: dict | None = None,
+) -> list[dict]:
+    """The gate's HARD verdict for an entry point that cannot take a stimulus.
+
+    An EXPLICITLY configured oracle whose ABI makes it uninvokable leaves the
+    gate with NO oracle. Skipping (or guessing another callable) would report
+    "clean" for a run nothing validated -- exactly the failure mode that let a
+    zero-argument ROM utility sit in the oracle seat for 11 chip-lead
+    decisions. Report the actionable ABI error as a violation instead.
+    """
+    logger.error("model integration gate: %s", exc)
+    _mark_gate_info(
+        result_info, skipped=False, reason=f"reference entry ABI: {exc}"
+    )
+    return [
+        {
+            "type": "model_integration_failure",
+            "first_divergence_block": "",
+            "expected": "",
+            "observed": str(exc),
+            "criterion": "reference_entry_abi_mismatch",
+            "gap_class": "contract",
+            "suggested_fix": (
+                f"{exc} The gate has NO oracle until the entry point is fixed, "
+                "so this is NOT a pass."
+            ),
+        }
+    ]
+
+
 def _mark_gate_info(
     result_info: dict | None,
     *,
@@ -2351,9 +2395,12 @@ def _run_gate_inner(
             }
         ]
 
-    entry_callable, entry_name = resolve_reference_entrypoint(
-        project_root, ref_module
-    )
+    try:
+        entry_callable, entry_name, entry_source = resolve_reference_entrypoint(
+            project_root, ref_module, with_provenance=True
+        )
+    except ReferenceEntryPointError as exc:
+        return _entry_abi_violation(exc, result_info)
     if entry_callable is None:
         logger.info(
             "model integration gate: no callable reference entry -- no-op"
@@ -2361,13 +2408,24 @@ def _run_gate_inner(
         _mark_gate_info(result_info, skipped=True,
                         reason="no callable reference entry point")
         return []
-    logger.info("model integration gate: reference oracle entry = %s", entry_name)
+    # WARNING, not INFO, and deliberately so: under uvicorn nothing configures
+    # the orchestrator loggers, so an INFO line goes nowhere while a WARNING
+    # reaches daemon.log. WHICH callable is acting as the whole-chip oracle --
+    # and which tier chose it -- is the single fact that would have ended the
+    # zero-argument-`main()` misadventure in one glance instead of 11 decisions.
+    logger.warning(
+        "model integration gate: reference oracle entry = %s (via %s)",
+        entry_name, entry_source,
+    )
 
     # Obtain the stimulus: explicit env file wins; else auto-discovered
     # inputs/model_stimulus.py (finding #5); else a small derived default.
     stimulus, found = _load_env_stimulus(project_root)
     if not found:
-        stimulus = _default_stimulus(entry_callable)
+        try:
+            stimulus = _default_stimulus(entry_callable)
+        except ReferenceEntryPointError as exc:
+            return _entry_abi_violation(exc, result_info)
         if stimulus is None:
             logger.info(
                 "model integration gate: could not derive a default stimulus "

@@ -40,7 +40,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 # Re-exec into the repo venv if we are not already running under it, so
 # httpx + the orchestrator deps resolve without forcing every caller to
@@ -55,6 +55,17 @@ if (
     os.execv(str(_VENV_PY), [str(_VENV_PY), str(Path(__file__).resolve()), *sys.argv[1:]])
 
 import httpx
+
+# The run's persisted env (``.coresmith/env``) loader, shared with the daemon so
+# both apply the SAME semantics (the persisted file wins over ambient values).
+# Stdlib-only, so importing it costs nothing; a CLI copied away from the repo
+# still drives a remote daemon, hence the guard rather than a hard import.
+try:
+    if str(_REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(_REPO_ROOT))
+    from orchestrator import run_env as _run_env
+except ImportError:  # pragma: no cover -- CLI without the engine package
+    _run_env = None
 
 
 # ---------------------------------------------------------------------------
@@ -147,22 +158,39 @@ def _daemon_start(args):
     env = os.environ.copy()
     env["CORESMITH_PROJECT_ROOT"] = str(project_root)
 
-    # Load any sticky env vars the operator persisted at run-start time.
-    # Lets a daemon restart pick up CORESMITH_LLM_PROVIDER, model overrides,
-    # CORESMITH_SKIP_SYNTH, etc. without re-sourcing launch.sh each time.
-    # Format: one "KEY=VALUE" per line, lines starting with # ignored.
+    # Load the sticky env vars the operator persisted at run-start time. Lets a
+    # daemon restart pick up CORESMITH_LLM_PROVIDER, model overrides,
+    # CORESMITH_SKIP_SYNTH, CORESMITH_REFERENCE_ENTRY, etc. without re-sourcing
+    # launch.sh each time. Format: one "KEY=VALUE" per line, "#" lines ignored.
+    #
+    # The file is the run's FROZEN config, so for the keys it contains it is
+    # AUTHORITATIVE: it ASSIGNS rather than setdefault()s. Under setdefault a
+    # stale value already exported in the daemon-launching shell won silently --
+    # observed live with a persisted CORESMITH_REFERENCE_ENTRY=oracle while the
+    # composition gate ran the ambient `run`. Every ambient value we replace is
+    # printed so the operator sees the swap instead of inferring it from gate
+    # behaviour.
     env_file = project_root / ".coresmith" / "env"
-    if env_file.exists():
-        for line in env_file.read_text().splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            k, v = line.split("=", 1)
-            env.setdefault(k.strip(), v.strip())
+    persisted: dict = {}
+    if _run_env is not None:
+        persisted = _run_env.load_persisted_env(project_root)
+        notice = _run_env.format_override_notice(
+            _run_env.apply_persisted_env(project_root, env)
+        )
+        if notice:
+            print(notice)
+    elif env_file.exists():
+        sys.exit(
+            f"error: {env_file} exists but orchestrator.run_env is not "
+            f"importable from {_REPO_ROOT} -- refusing to launch a daemon with "
+            "the run's persisted env unapplied"
+        )
 
-    # PATH is special: env.setdefault above never applies it (PATH always
-    # exists in the ambient env), so toolchain dirs from the run's LAUNCH env
-    # were silently lost on a bare-shell restart -- observed as cocotb picking
+    # PATH is special: the persisted file records the launch PATH under
+    # CORESMITH_SAVED_PATH, never as a bare PATH= line (assigning a whole PATH
+    # would clobber the caller's), so applying the file above does not bring
+    # toolchain dirs from the run's LAUNCH env back -- they were silently lost
+    # on a bare-shell restart, observed as cocotb picking
     # system Verilator 5.020 over oss-cad-suite's 5.051 and failing its >=5.036
     # requirement. The launch PATH is persisted under CORESMITH_SAVED_PATH (see
     # the persist block below); on restart, PREPEND any of its entries missing
@@ -195,12 +223,7 @@ def _daemon_start(args):
         "CORESMITH_CODEX_REASONING_EFFORT", "CORESMITH_CODEX_REASONING_EFFORT_ARCH",
     )
     try:
-        _recorded = set()
-        if env_file.exists():
-            for line in env_file.read_text().splitlines():
-                s = line.strip()
-                if s and not s.startswith("#") and "=" in s:
-                    _recorded.add(s.split("=", 1)[0].strip())
+        _recorded = set(persisted)
         _to_add = []
         for k in _persist_keys:
             v = os.environ.get(k)

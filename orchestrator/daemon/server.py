@@ -66,6 +66,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from orchestrator.graph_lifecycle import GraphLifecycle
+from orchestrator.run_env import apply_persisted_env, format_override_notice
 
 log = logging.getLogger("coresmithd")
 log.setLevel(logging.INFO)
@@ -420,6 +421,43 @@ _architecture = GraphLifecycle(
 
 
 # ---------------------------------------------------------------------------
+# Persisted run env (<project_root>/.coresmith/env)
+# ---------------------------------------------------------------------------
+# The daemon reads its environment ONCE, at process start. `.coresmith/env` is
+# the run's frozen config and operators edit it MID-RUN -- a chip lead appended
+# several keys to a parked run -- but those edits were invisible to every later
+# /run/restart-node and resume, so a knob the operator had already "set" was
+# still unset in the graph until someone bounced the daemon. Re-apply the file
+# before launching graph work, with the SAME persisted-wins semantics the CLI
+# uses (one implementation: orchestrator.run_env).
+
+def _apply_run_env(where: str) -> list[str]:
+    """Re-read ``.coresmith/env`` into ``os.environ``; return the changed keys.
+
+    The persisted file wins over whatever this process currently holds --
+    including values the daemon itself set earlier in the run. Best-effort: an
+    absent/unreadable file is a no-op and a failure never breaks the handler.
+    """
+    try:
+        changes = apply_persisted_env(_PROJECT_ROOT)
+    except Exception:  # noqa: BLE001 -- an env refresh must never fail a request
+        _daemon_log("warning", "%s: persisted env refresh failed", where,
+                    exc_info=True)
+        return []
+    if changes:
+        # _daemon_log, not log: under uvicorn the `coresmithd` logger has no
+        # handler, and a silent env swap is exactly what this fix is about.
+        _daemon_log(
+            "warning", "%s: reloaded .coresmith/env -- applied %s",
+            where, [k for k, _, _ in changes],
+        )
+        notice = format_override_notice(changes)
+        if notice:
+            _daemon_log("warning", "%s: %s", where, notice)
+    return [k for k, _, _ in changes]
+
+
+# ---------------------------------------------------------------------------
 # Request models
 # ---------------------------------------------------------------------------
 
@@ -565,6 +603,10 @@ async def run_start(req: StartRequest):
                 "force=true (CLI: `run start --force`).",
             )
 
+    # Mid-run edits to .coresmith/env (gate knobs, provider selectors) apply to
+    # the work this request is about to launch, not only to the next daemon.
+    env_updated = _apply_run_env("run/start")
+
     block_queue = _load_block_queue(req.blocks_file)
     if not block_queue:
         raise HTTPException(
@@ -622,6 +664,8 @@ async def run_start(req: StartRequest):
         "block_count": len(block_queue),
         "status": _pipeline.status,
     }
+    if env_updated:
+        response["env_updated"] = env_updated
     if arch_warnings:
         response["warnings"] = arch_warnings
     return response
@@ -695,6 +739,10 @@ async def run_resume(req: ResumeRequest):
     if _pipeline.task is not None and not _pipeline.task.done():
         raise HTTPException(409, "pipeline still running; nothing to resume")
 
+    # A resume re-enters the graph in THIS process: pick up any .coresmith/env
+    # edits the operator made while the run was parked.
+    env_updated = _apply_run_env("run/resume")
+
     graph_config = {"configurable": {"thread_id": _pipeline.thread_id}}
     state_snapshot = await _pipeline.graph.aget_state(graph_config)
 
@@ -721,13 +769,16 @@ async def run_resume(req: ResumeRequest):
         # (cmd=None) to advance a stranded/paused run without a fake action.
         _consumed_interrupt_ids.clear()
         await _pipeline.safe_resume(None, graph_config)
-        return {
+        _ticked = {
             "resumed": True,
             "ticked": True,
             "next_nodes": list(state_snapshot.next),
             "action": req.action,
             "status": _pipeline.status,
         }
+        if env_updated:
+            _ticked["env_updated"] = env_updated
+        return _ticked
 
     # Reject an action the parked interrupt does not support (400 + allowed list)
     # rather than silently forwarding it into the graph.
@@ -762,7 +813,10 @@ async def run_resume(req: ResumeRequest):
     _consumed_interrupt_ids = {iid for iid, _ in interrupts}
 
     await _pipeline.safe_resume(cmd, graph_config)
-    return {"resumed": True, "interrupts": len(interrupts), "action": req.action}
+    result = {"resumed": True, "interrupts": len(interrupts), "action": req.action}
+    if env_updated:
+        result["env_updated"] = env_updated
+    return result
 
 
 @app.post("/run/pause")
@@ -804,6 +858,7 @@ async def run_continue():
     """
     if _pipeline.task is not None and not _pipeline.task.done():
         raise HTTPException(409, "pipeline already running")
+    _apply_run_env("run/continue")
     await _pipeline.ensure_graph()
     snap = await _pipeline.graph.aget_state(
         {"configurable": {"thread_id": _pipeline.thread_id}}
@@ -866,6 +921,9 @@ async def run_restart_node(req: RestartNodeRequest):
     """
     if _pipeline.task is not None and not _pipeline.task.done():
         raise HTTPException(409, "pipeline already running -- pause first")
+    # Re-entering a node runs it with THIS process's env; the operator's
+    # mid-run .coresmith/env edits must be live for that re-run (bug C).
+    env_updated = _apply_run_env("run/restart-node")
     refreshed = []
     if req.refresh_sidecars:
         # #6: re-sync intact-RTL blocks' contract sidecars to live before
@@ -888,6 +946,8 @@ async def run_restart_node(req: RestartNodeRequest):
     result = await _pipeline.restart_from_node(req.node)
     if refreshed:
         result["sidecars_refreshed"] = refreshed
+    if env_updated:
+        result["env_updated"] = env_updated
     if result.get("error"):
         raise HTTPException(400, result["error"] + (
             " -- " + result["hint"] if result.get("hint") else ""))
@@ -1037,6 +1097,11 @@ async def architecture_start(req: ArchStartRequest):
     if _architecture.task is not None and not _architecture.task.done():
         raise HTTPException(409, "architecture already running; call /architecture/pause first")
 
+    # The composition / model-integration gates read their knobs
+    # (CORESMITH_REFERENCE_ENTRY, CORESMITH_MODEL_STIMULUS, ...) from the
+    # environment at gate time, and the architecture graph is where they run.
+    env_updated = _apply_run_env("architecture/start")
+
     requirements = req.requirements
     if not requirements and req.requirements_file:
         rf_path = Path(req.requirements_file)
@@ -1102,13 +1167,16 @@ async def architecture_start(req: ArchStartRequest):
 
     graph_config = {"configurable": {"thread_id": _architecture.thread_id}}
     await _architecture.safe_start(initial_state, graph_config)
-    return {
+    response = {
         "started": True,
         "status": _architecture.status,
         "requirements_length": len(requirements),
         "target_clock_mhz": req.target_clock_mhz,
         "pdk_summary": pdk_summary,
     }
+    if env_updated:
+        response["env_updated"] = env_updated
+    return response
 
 
 @app.get("/architecture/state")
@@ -1131,6 +1199,8 @@ async def architecture_resume(req: ArchResumeRequest):
     await _architecture.ensure_graph()
     if _architecture.task is not None and not _architecture.task.done():
         raise HTTPException(409, "architecture still running; nothing to resume")
+
+    env_updated = _apply_run_env("architecture/resume")
 
     config = {"configurable": {"thread_id": _architecture.thread_id}}
     snap = await _architecture.graph.aget_state(config)
@@ -1165,7 +1235,10 @@ async def architecture_resume(req: ArchResumeRequest):
         cmd = None  # plain tick to resume a paused run
 
     await _architecture.safe_resume(cmd, config)
-    return {"resumed": True, "action": resume_value["action"]}
+    result = {"resumed": True, "action": resume_value["action"]}
+    if env_updated:
+        result["env_updated"] = env_updated
+    return result
 
 
 @app.post("/architecture/pause")

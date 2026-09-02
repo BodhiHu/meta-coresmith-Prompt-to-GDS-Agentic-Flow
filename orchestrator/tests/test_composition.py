@@ -805,3 +805,195 @@ class TestFloatPolicyHelpers:
         # with eps=0 still requires equality for ints.
         assert composition.outputs_close([129, 39], [129, 39], 0.0) is True
         assert composition.outputs_close([129, 39], [129, 40], 0.0) is False
+
+
+# ---------------------------------------------------------------------------
+# Reference-entry ABI preflight + resolution provenance
+# ---------------------------------------------------------------------------
+
+class TestEntryAcceptsStimulus:
+    """The oracle is always invoked as ``entry(stimulus)``."""
+
+    def test_positional_forms_accept(self):
+        def one(x):
+            return x
+
+        def defaulted(x=None):
+            return x
+
+        def varargs(*args):
+            return args
+
+        assert composition._entry_accepts_stimulus(one) is True
+        assert composition._entry_accepts_stimulus(defaulted) is True
+        assert composition._entry_accepts_stimulus(varargs) is True
+
+    def test_zero_positional_forms_reject(self):
+        def main():
+            return 0
+
+        def kwonly(*, stimulus=None):
+            return stimulus
+
+        def kwargs_only(**kw):
+            return kw
+
+        assert composition._entry_accepts_stimulus(main) is False
+        assert composition._entry_accepts_stimulus(kwonly) is False
+        assert composition._entry_accepts_stimulus(kwargs_only) is False
+        assert composition._entry_accepts_stimulus(None) is False
+
+    def test_uninspectable_callable_is_accepted(self):
+        # "unknown" is not proof of impossibility -- a real invocation failure
+        # is still reported as reference_uninvokable.
+        assert composition._entry_accepts_stimulus(len) is True
+
+
+class TestEntryAbiPreflight:
+    """THE BUG: a zero-argument ``main()`` became the whole-chip oracle.
+
+    A live run auto-selected ``generate_normative_rom_images.py:main`` -- a
+    ROM utility -- as the golden reference; every vector died on "main() takes
+    0 positional arguments but 1 was given" and the category error consumed 11
+    chip-lead decisions.
+    """
+
+    def test_zero_arg_main_is_never_discovered(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("CORESMITH_REFERENCE_ENTRY", raising=False)
+        mod = _make_ref_module(
+            "def main():\n    return 0\n"
+            "def build_rom(path):\n    return path\n"
+        )
+        fn, name = composition.resolve_reference_entrypoint(str(tmp_path), mod)
+        assert name != "main"
+        assert fn is not None and fn is mod.build_rom
+
+    def test_module_with_only_zero_arg_main_resolves_to_nothing(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.delenv("CORESMITH_REFERENCE_ENTRY", raising=False)
+        mod = _make_ref_module("def main():\n    return 0\n")
+        fn, name, source = composition.resolve_reference_entrypoint(
+            str(tmp_path), mod, with_provenance=True
+        )
+        assert fn is None
+        assert source == composition.ENTRY_SOURCE_NONE
+
+    def test_main_taking_a_stimulus_needs_explicit_config(
+        self, tmp_path, monkeypatch
+    ):
+        """``main(stimulus)`` is invokable, but still never GUESSED at.
+
+        Even as the module's SOLE public function: ``main`` is a script
+        convention, so its presence says nothing about whether it models the
+        chip. An operator asserting it explicitly is a different matter.
+        """
+        src = "def main(stimulus):\n    return stimulus\n"
+        monkeypatch.delenv("CORESMITH_REFERENCE_ENTRY", raising=False)
+        mod = _make_ref_module(src)
+        fn, _name = composition.resolve_reference_entrypoint(str(tmp_path), mod)
+        assert fn is None
+
+        # Declared in the PRD -> resolves (explicit, and ABI-clean).
+        (tmp_path / "arch").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "arch" / "prd_spec.md").write_text(
+            "reference_entry_point: main\n", encoding="utf-8"
+        )
+        fn2, name2, source2 = composition.resolve_reference_entrypoint(
+            str(tmp_path), mod, with_provenance=True
+        )
+        assert fn2 is mod.main
+        assert (name2, source2) == ("main", composition.ENTRY_SOURCE_DECLARED)
+
+        # Env var -> resolves too, and outranks the declaration.
+        monkeypatch.setenv("CORESMITH_REFERENCE_ENTRY", "main")
+        fn3, name3, source3 = composition.resolve_reference_entrypoint(
+            str(tmp_path), mod, with_provenance=True
+        )
+        assert fn3 is mod.main
+        assert (name3, source3) == ("main", composition.ENTRY_SOURCE_ENV)
+
+    def test_explicit_env_entry_with_no_positional_fails_fast(
+        self, tmp_path, monkeypatch
+    ):
+        mod = _make_ref_module(
+            "def main():\n    return 0\n"
+            "def encode(x):\n    return x\n"
+        )
+        monkeypatch.setenv("CORESMITH_REFERENCE_ENTRY", "main")
+        with pytest.raises(composition.ReferenceEntryPointError) as exc:
+            composition.resolve_reference_entrypoint(str(tmp_path), mod)
+        msg = str(exc.value)
+        # Actionable: names the callable, its signature, and the way out --
+        # and does NOT silently fall back to the `encode` heuristic.
+        assert "main()" in msg
+        assert "CORESMITH_REFERENCE_ENTRY" in msg
+        assert "no positional argument" in msg.lower()
+
+    def test_explicit_declared_entry_with_no_positional_fails_fast(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.delenv("CORESMITH_REFERENCE_ENTRY", raising=False)
+        mod = _make_ref_module("def main():\n    return 0\n")
+        (tmp_path / "arch").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "arch" / "prd_spec.md").write_text(
+            "reference_entry_point: main\n", encoding="utf-8"
+        )
+        with pytest.raises(composition.ReferenceEntryPointError) as exc:
+            composition.resolve_reference_entrypoint(str(tmp_path), mod)
+        assert "prd_spec.md" in str(exc.value)
+
+    def test_v1_gate_reports_abi_error_instead_of_guessing(
+        self, tmp_path, monkeypatch
+    ):
+        """The gate surfaces the ABI error as a violation, never as a pass."""
+        monkeypatch.setenv("CORESMITH_BLOCK_GOLDENS", "1")
+        monkeypatch.setenv("CORESMITH_REFERENCE_ENTRY", "main")
+        goldens = tmp_path / "arch" / composition.BLOCK_GOLDENS_DIRNAME
+        goldens.mkdir(parents=True)
+        _write(goldens / "a.py", BLOCK_A_DOUBLER)
+        _write(tmp_path / "inputs" / "x_golden.py", "def main():\n    return 0\n")
+        _write(
+            tmp_path / ".coresmith" / "block_diagram.json",
+            '{"blocks": [{"name": "a"}], "connections": []}',
+        )
+        viols = composition._run_composition_gate_v1(str(tmp_path))
+        assert len(viols) == 1
+        assert viols[0]["type"] == "composition_gate_error"
+        assert "no positional argument" in viols[0]["suggested_fix"].lower()
+
+
+class TestEntryResolutionProvenance:
+    """``with_provenance=True`` reports WHICH tier chose the oracle."""
+
+    def test_env_declared_and_discovered_tiers(self, tmp_path, monkeypatch):
+        mod = _make_ref_module(
+            "def encode(x):\n    return x\n"
+            "def the_oracle(x):\n    return x\n"
+        )
+        monkeypatch.delenv("CORESMITH_REFERENCE_ENTRY", raising=False)
+        _fn, name, source = composition.resolve_reference_entrypoint(
+            str(tmp_path), mod, with_provenance=True
+        )
+        assert (name, source) == ("encode", composition.ENTRY_SOURCE_DISCOVERED)
+
+        (tmp_path / "arch").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "arch" / "prd_spec.md").write_text(
+            "reference_entry_point: the_oracle\n", encoding="utf-8"
+        )
+        _fn, name, source = composition.resolve_reference_entrypoint(
+            str(tmp_path), mod, with_provenance=True
+        )
+        assert (name, source) == ("the_oracle", composition.ENTRY_SOURCE_DECLARED)
+
+        monkeypatch.setenv("CORESMITH_REFERENCE_ENTRY", "encode")
+        _fn, name, source = composition.resolve_reference_entrypoint(
+            str(tmp_path), mod, with_provenance=True
+        )
+        assert (name, source) == ("encode", composition.ENTRY_SOURCE_ENV)
+
+    def test_default_call_still_returns_a_pair(self, tmp_path, monkeypatch):
+        """Back-compat: every existing caller unpacks exactly two values."""
+        monkeypatch.delenv("CORESMITH_REFERENCE_ENTRY", raising=False)
+        mod = _make_ref_module("def encode(x):\n    return x\n")
+        assert len(composition.resolve_reference_entrypoint(str(tmp_path), mod)) == 2
