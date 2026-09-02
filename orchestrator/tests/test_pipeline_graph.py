@@ -2376,13 +2376,70 @@ class TestRouteAfterUarchGate:
             }
         }) == "write_contract_request"
 
-    def test_block_math_retry_goes_to_init_tier(self):
+    # -- `retry` / `fix_rtl` are ON-DISK fixes: re-run the gate ------------
+    # The park payload advertises them as "re-run the gate after an on-disk
+    # fix" / "outer agent patched block/chip model on disk". They used to be
+    # routed into the re-spec loop, and over the cap into
+    # write_contract_request, which ENDs the run: two live `retry` decisions
+    # each produced an exhausted contract request instead of a re-check.
+
+    def test_retry_re_runs_the_gate(self):
         assert pipeline_graph.route_after_uarch_gate({
             "model_integration_result": {
                 "passed": False, "gap_class": "block_math",
                 "action_taken": "retry",
             }
-        }) == "init_tier"
+        }) == "uarch_integration_gate"
+
+    def test_fix_rtl_re_runs_the_gate(self):
+        assert pipeline_graph.route_after_uarch_gate({
+            "model_integration_result": {
+                "passed": False, "gap_class": "block_math",
+                "action_taken": "fix_rtl",
+            }
+        }) == "uarch_integration_gate"
+
+    def test_retry_over_cap_still_re_runs_the_gate(self, monkeypatch):
+        # THE BUG: an exhausted re-spec budget must not turn a re-check into a
+        # contract request (which ENDs the run) -- retry never spends it.
+        monkeypatch.setenv("CORESMITH_UARCH_REVISE_MAX", "4")
+        for action in ("retry", "fix_rtl"):
+            dest = pipeline_graph.route_after_uarch_gate({
+                "uarch_revise_attempts": 9,
+                "model_integration_result": {
+                    "passed": False, "gap_class": "block_math",
+                    "action_taken": action,
+                },
+            })
+            assert dest == "uarch_integration_gate", action
+            assert dest != "write_contract_request"
+            assert dest != pipeline_graph.END
+
+    def test_retry_on_a_contract_gap_also_re_runs_the_gate(self, monkeypatch):
+        # An on-disk fix is an on-disk fix regardless of gap_class; only
+        # revise_contract / revise_uarch belong on the contract-request path.
+        monkeypatch.setenv("CORESMITH_UARCH_REVISE_MAX", "4")
+        assert pipeline_graph.route_after_uarch_gate({
+            "uarch_revise_attempts": 9,
+            "model_integration_result": {
+                "passed": False, "gap_class": "contract",
+                "action_taken": "retry",
+            },
+        }) == "uarch_integration_gate"
+
+    def test_gate_is_a_declared_target_of_its_own_router(self, monkeypatch):
+        # The router's destination must be a legal edge in the compiled
+        # two-pass graph, or the self-edge raises at runtime.
+        monkeypatch.setenv("CORESMITH_BLOCK_GOLDENS", "1")
+        assert "uarch_integration_gate" in \
+            pipeline_graph.route_after_uarch_gate.__edge_labels__
+        # LangGraph's drawable graph collapses conditional targets, so read the
+        # branch path map (the thing that actually has to contain the self-edge
+        # for the router's return value to be routable).
+        compiled = build_pipeline_graph(checkpointer=MemorySaver())
+        branch = compiled.builder.branches["uarch_integration_gate"][
+            "route_after_uarch_gate"]
+        assert branch.ends["uarch_integration_gate"] == "uarch_integration_gate"
 
     def test_unknown_action_ends(self):
         assert pipeline_graph.route_after_uarch_gate({
@@ -3745,3 +3802,323 @@ class TestContainerSubsumeGroups:
             items, {"chip_top", "mid"},
             {"chip_top": {"mid"}, "mid": {"a"}})
         assert [i.name for i in out] == ["chip_top"]
+
+
+# ---------------------------------------------------------------------------
+# Audit 20260901 regressions: gate re-run, override scoping, TB-gen park revise
+# ---------------------------------------------------------------------------
+
+_GATE_VIOLATIONS = [{
+    "type": "model_integration_failure",
+    "gap_class": "block_math",
+    "first_divergence_block": "recon",
+    "expected": [1, 2, 3],
+    "observed": [1, 2, 4],
+    "suggested_fix": "fix the transcribed rounding",
+}]
+
+
+def _park_failing_uarch_gate(monkeypatch, action):
+    """Make the two-pass µarch gate fail and resolve its park with ``action``."""
+    import orchestrator.architecture.model_integration as _mi
+
+    async def _noop_gen(_pr):
+        return None
+
+    monkeypatch.setenv("CORESMITH_BLOCK_GOLDENS", "1")
+    monkeypatch.delenv("CORESMITH_DETERMINISTIC_BFM", raising=False)
+    monkeypatch.setattr(pipeline_graph, "_maybe_generate_chip_model", _noop_gen)
+    monkeypatch.setattr(_mi, "run_model_integration_gate",
+                        lambda pr, *a, **k: list(_GATE_VIOLATIONS))
+    monkeypatch.setattr(pipeline_graph, "interrupt",
+                        lambda payload: {"action": action})
+
+
+class TestUarchGateRetryDoesNotSpendReviseBudget:
+    """`retry` / `fix_rtl` re-check an on-disk fix; they are NOT re-specs.
+
+    Charging them against CORESMITH_UARCH_REVISE_MAX exhausted the budget on
+    mere re-checks, after which the router sent them to write_contract_request
+    -> END. Live: two `retry` decisions each produced an exhausted contract
+    request, and only an out-of-graph POST /run/restart-node re-ran the gate.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("action", ["retry", "fix_rtl"])
+    async def test_on_disk_fix_leaves_the_budget_untouched(
+        self, tmp_path, monkeypatch, action
+    ):
+        _park_failing_uarch_gate(monkeypatch, action)
+        state = {"project_root": str(tmp_path), "uarch_revise_attempts": 2,
+                 "current_tier_index": 3}
+        out = await pipeline_graph.uarch_integration_gate_node(state)
+        assert out["model_integration_result"]["action_taken"] == action
+        assert "uarch_revise_attempts" not in out
+        # ...and no re-fan-out: the tier index is left where the gate found it.
+        assert "current_tier_index" not in out
+        assert pipeline_graph.route_after_uarch_gate({**state, **out}) == \
+            "uarch_integration_gate"
+
+    @pytest.mark.asyncio
+    async def test_revise_uarch_still_spends_it(self, tmp_path, monkeypatch):
+        _park_failing_uarch_gate(monkeypatch, "revise_uarch")
+        state = {"project_root": str(tmp_path), "uarch_revise_attempts": 2,
+                 "current_tier_index": 3}
+        out = await pipeline_graph.uarch_integration_gate_node(state)
+        assert out["uarch_revise_attempts"] == 3
+        assert out["current_tier_index"] == 0
+        assert pipeline_graph.route_after_uarch_gate({**state, **out}) == \
+            "init_tier"
+
+    @pytest.mark.asyncio
+    async def test_repeated_retry_never_writes_a_contract_request(
+        self, tmp_path, monkeypatch
+    ):
+        # End-to-end shape of the live failure: retry after retry after the cap
+        # is spent must keep re-running the gate, never mark the run aborted and
+        # never emit the outer-agent contract-revision marker.
+        monkeypatch.setenv("CORESMITH_UARCH_REVISE_MAX", "1")
+        _park_failing_uarch_gate(monkeypatch, "retry")
+        state = {"project_root": str(tmp_path), "uarch_revise_attempts": 5}
+        for _ in range(3):
+            out = await pipeline_graph.uarch_integration_gate_node(state)
+            assert out["pipeline_aborted"] is False
+            assert pipeline_graph.route_after_uarch_gate({**state, **out}) == \
+                "uarch_integration_gate"
+            state = {**state, **out}
+        assert not (tmp_path / ".coresmith"
+                    / "interface_contract_revision_request.json").exists()
+
+
+class TestFeasibilityOverrideScope:
+    """The ``uarch_feasibility_override`` marker is a SCOPE, not a global waiver.
+
+    A bare-"1" marker waived every budget gate for the block, so overrides
+    granted for stale ORACLE-DISCOVERY findings (category [interface] / tooling)
+    forced blocks past the deterministic mem_price gate and mislabelled
+    within-budget blocks "over-budget accepted".
+    """
+
+    def _block(self, root, name="blk"):
+        (root / "arch" / "uarch_specs").mkdir(parents=True, exist_ok=True)
+        (root / "arch" / "uarch_specs" / f"{name}.md").write_text(
+            "# MEM big: 32x4096 ports=1rw impl=fpmem justification=x\n"
+            "area_budget_um2: 20000\n")
+        bdir = root / ".coresmith" / "blocks" / name
+        bdir.mkdir(parents=True, exist_ok=True)
+        return bdir
+
+    def _write_contract(self, root, name="blk"):
+        """A real contract slice so _block_contract_sha1 hashes to something."""
+        (root / ".coresmith").mkdir(parents=True, exist_ok=True)
+        (root / ".coresmith" / "interface_contracts.json").write_text(
+            json.dumps({"contracts": [
+                {"producer_block": name, "consumer_block": "sink",
+                 "width": 32, "name": "e0"}]}))
+        return pipeline_graph._block_contract_sha1(str(root), name)
+
+    def _marker(self, bdir, **fields):
+        (bdir / "uarch_feasibility_override").write_text(json.dumps(fields))
+
+    def _deferred(self, root, name="blk"):
+        """True when the mem_price gate took the override (defer) branch."""
+        verdict = pipeline_graph._mem_price_gate_verdict(str(root), name)
+        led = root / ".coresmith" / "blocks" / name / "mem_price.json"
+        if not led.exists():
+            return False
+        return verdict is None and json.loads(led.read_text()).get("deferred") is True
+
+    # -- category parsing --------------------------------------------------
+    def test_parses_leading_bracket_tags(self):
+        assert pipeline_graph._feas_issue_categories([
+            "[interface] frozen port too narrow",
+            "[area] storage exceeds budget",
+            "[area] again",              # de-duplicated
+            "no tag at all",
+        ]) == ["interface", "area"]
+
+    def test_no_marker_is_no_scope(self, tmp_path):
+        self._block(tmp_path)
+        assert pipeline_graph._feas_override_scope(str(tmp_path), "blk") is None
+        assert pipeline_graph._feas_override_covers(
+            str(tmp_path), "blk", "area") is False
+
+    # -- the bleed itself --------------------------------------------------
+    def test_interface_only_override_does_not_defer_mem_price(self, tmp_path):
+        bdir = self._block(tmp_path)
+        self._marker(bdir, gate="uarch_feasibility", categories=["interface"])
+        assert pipeline_graph._feas_override_covers(
+            str(tmp_path), "blk", "area") is False
+        assert self._deferred(tmp_path) is False
+
+    def test_area_override_defers_mem_price(self, tmp_path):
+        bdir = self._block(tmp_path)
+        self._marker(bdir, gate="uarch_feasibility",
+                     categories=["interface", "area"])
+        assert self._deferred(tmp_path) is True
+        led = json.loads((bdir / "mem_price.json").read_text())
+        assert "[area]" in led.get("deferred_reason", "")
+
+    def test_legacy_one_marker_still_defers(self, tmp_path):
+        # Compat: pre-JSON runs only ever overrode [area] blockers.
+        bdir = self._block(tmp_path)
+        (bdir / "uarch_feasibility_override").write_text("1")
+        scope = pipeline_graph._feas_override_scope(str(tmp_path), "blk")
+        assert scope == {"categories": ["area"], "legacy": True}
+        assert self._deferred(tmp_path) is True
+
+    # -- expiry ------------------------------------------------------------
+    def test_contract_sha1_mismatch_expires_the_override(self, tmp_path):
+        bdir = self._block(tmp_path)
+        self._write_contract(tmp_path)
+        self._marker(bdir, gate="uarch_feasibility", categories=["area"],
+                     contract_sha1="deadbeef" * 5)
+        assert pipeline_graph._feas_override_scope(str(tmp_path), "blk") is None
+        assert self._deferred(tmp_path) is False
+
+    def test_matching_contract_sha1_keeps_the_override(self, tmp_path):
+        bdir = self._block(tmp_path)
+        sha = self._write_contract(tmp_path)
+        assert sha, "fixture must produce a hashable contract slice"
+        self._marker(bdir, gate="uarch_feasibility", categories=["area"],
+                     contract_sha1=sha)
+        assert self._deferred(tmp_path) is True
+
+    def test_unhashable_contract_does_not_revoke_the_override(self, tmp_path):
+        # No interface_contracts.json -> _block_contract_sha1 is ''; a missing
+        # provenance axis must not silently revoke a granted override.
+        bdir = self._block(tmp_path)
+        self._marker(bdir, gate="uarch_feasibility", categories=["area"],
+                     contract_sha1="deadbeef" * 5)
+        assert self._deferred(tmp_path) is True
+
+    # -- the post-synth budget gate is scoped the same way ------------------
+    def test_post_synth_budget_gate_is_area_scoped(self, tmp_path):
+        bdir = self._block(tmp_path)
+        self._marker(bdir, gate="uarch_feasibility", categories=["interface"])
+        assert pipeline_graph._feas_override_covers(
+            str(tmp_path), "blk", "area") is False
+        self._marker(bdir, gate="uarch_feasibility", categories=["area"])
+        assert pipeline_graph._feas_override_covers(
+            str(tmp_path), "blk", "area") is True
+
+    # -- what the override site writes -------------------------------------
+    def test_override_marker_is_written_as_a_scope(self, tmp_path, monkeypatch):
+        bdir = self._block(tmp_path)
+        sha = self._write_contract(tmp_path)
+        blocking = ["[interface] port too narrow", "[area] over budget"]
+        monkeypatch.setattr(pipeline_graph, "interrupt",
+                            lambda payload: {"action": "override"})
+        # Drive the write site the same way the node does.
+        (bdir / "uarch_feasibility_override").write_text(json.dumps({
+            "gate": "uarch_feasibility",
+            "categories": pipeline_graph._feas_issue_categories(blocking),
+            "contract_sha1": pipeline_graph._block_contract_sha1(
+                str(tmp_path), "blk"),
+            "ts": 0.0,
+        }))
+        scope = pipeline_graph._feas_override_scope(str(tmp_path), "blk")
+        assert scope["gate"] == "uarch_feasibility"
+        assert scope["categories"] == ["interface", "area"]
+        assert scope["contract_sha1"] == sha
+
+
+class TestTbGenerationParkOffersRevise:
+    """A TB that cannot be GENERATED is often a spec-level defect.
+
+    Both "could not generate a usable cocotb testbench" parks offered only
+    retry/fix_rtl/fix_tb/abort, so the chip lead had no lawful way to ask for
+    tier regeneration and had to abort. The daemon validates the resume action
+    against ``supported_actions``, so the payload is the load-bearing half.
+    """
+
+    def _rtl(self, tmp_path):
+        top_rtl = tmp_path / "chip_top.v"
+        block_rtl = tmp_path / "block.v"
+        top_rtl.write_text("module chip_top(input clk); endmodule\n")
+        block_rtl.write_text("module block(input clk); endmodule\n")
+        (tmp_path / "arch" / "uarch_specs").mkdir(parents=True)
+        (tmp_path / "arch" / "uarch_specs" / "recon.md").write_text("# recon\n")
+        return {"top_rtl_path": str(top_rtl), "design_name": "chip_top",
+                "block_rtl_paths": {"block": str(block_rtl)}}
+
+    def _stub(self, monkeypatch, tmp_path, generator, stage):
+        async def fail_generate(**_kwargs):
+            raise RuntimeError("no usable Python cocotb testbench")
+
+        async def fake_contract_audit(**kwargs):
+            assert kwargs["stage"] == stage
+            # The audit is told what the park can offer, so it can point the
+            # operator at an offerable action.
+            assert "revise" in kwargs["supported_actions"]
+            return {"category": "SPEC_BUG", "recommended_action": "revise_uarch",
+                    "outer_agent_summary": "the uArch specs are un-testable",
+                    "affected_blocks": ["recon"],
+                    "audit_path": str(tmp_path / "audit.json")}
+
+        monkeypatch.setattr(pipeline_graph, "load_architecture_connections",
+                            lambda _pr: ({}, {}))
+        monkeypatch.setattr(pipeline_graph, generator, fail_generate)
+        monkeypatch.setattr(pipeline_graph, "_run_top_level_contract_audit",
+                            fake_contract_audit)
+
+    @pytest.mark.asyncio
+    async def test_integration_tb_generation_park_dispatches_revise(
+        self, tmp_path, monkeypatch
+    ):
+        integ = self._rtl(tmp_path)
+        self._stub(monkeypatch, tmp_path, "generate_integration_testbench",
+                   "integration_dv_generation")
+        monkeypatch.setattr(pipeline_graph, "interrupt", lambda p: {
+            "action": "revise", "feedback": "widen the recon output field",
+            "affected_blocks": ["recon"]})
+
+        result = await integration_dv_node({
+            "project_root": str(tmp_path), "integration_result": integ})
+        dv = result["integration_dv_result"]
+        payload = dv["interrupt_payload"]
+        assert payload["phase"] == "tb_generation"
+        assert "revise" in payload["supported_actions"]
+        assert "revise" in payload["outer_agent_guidance"]
+
+        decision = await integration_dv_decision_node({
+            "project_root": str(tmp_path), "integration_dv_result": dv})
+        d = decision["integration_dv_result"]
+        assert d["action_taken"] == "revise"
+        assert d["revised_blocks"] == ["recon"]
+        # Same dispatch as the main DV-failed park: feedback on disk, tiers rerun.
+        spec = (tmp_path / "arch" / "uarch_specs" / "recon.md").read_text()
+        assert "widen the recon output field" in spec
+        assert decision["current_tier_index"] == 0
+        assert route_after_integration_dv_decision(decision) == "init_tier"
+
+    @pytest.mark.asyncio
+    async def test_validation_tb_generation_park_dispatches_revise(
+        self, tmp_path, monkeypatch
+    ):
+        integ = self._rtl(tmp_path)
+        self._stub(monkeypatch, tmp_path, "generate_validation_testbench",
+                   "validation_dv_generation")
+        monkeypatch.setattr(pipeline_graph, "_load_ers_validation_context",
+                            lambda _pr: ('{"validation_kpis": ["must pass"]}', 1))
+        monkeypatch.setattr(pipeline_graph, "interrupt", lambda p: {
+            "action": "revise", "feedback": "declare the KPI counter",
+            "affected_blocks": ["recon"]})
+
+        result = await validation_dv_node({
+            "project_root": str(tmp_path), "integration_result": integ})
+        dv = result["validation_dv_result"]
+        payload = dv["interrupt_payload"]
+        assert payload["phase"] == "tb_generation"
+        assert "revise" in payload["supported_actions"]
+        assert "revise" in payload["outer_agent_guidance"]
+
+        decision = await validation_dv_decision_node({
+            "project_root": str(tmp_path), "validation_dv_result": dv})
+        d = decision["validation_dv_result"]
+        assert d["action_taken"] == "revise"
+        assert d["revised_blocks"] == ["recon"]
+        spec = (tmp_path / "arch" / "uarch_specs" / "recon.md").read_text()
+        assert "declare the KPI counter" in spec
+        assert decision["current_tier_index"] == 0
+        assert route_after_validation_dv_decision(decision) == "init_tier"

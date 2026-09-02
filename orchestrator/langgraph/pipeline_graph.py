@@ -848,7 +848,8 @@ async def init_block_node(state: BlockState) -> dict:
         "block": block_name,
     })
 
-    create_golden_model_wrapper(block_name, block.get("python_source", ""))
+    create_golden_model_wrapper(block_name, block.get("python_source", ""),
+                                project_root=_pr(state))
 
     log(f"\n{'='*60}", CYAN)
     log(f"  Block: {block_name} | Tier {block.get('tier', '?')}", CYAN)
@@ -1436,6 +1437,75 @@ def _ers_parameters_block_present(project_root: str) -> bool:
         return False
 
 
+# Every uarch_feasibility blocking issue LEADS WITH ITS CATEGORY, e.g.
+# "[area] storage exceeds the block budget" -> "area" (see the park payload's
+# outer_agent_guidance, which documents the tag set to the chip-lead).
+_FEAS_ISSUE_TAG_RE = re.compile(r"^\s*\[([A-Za-z_][A-Za-z0-9_-]*)\]")
+
+
+def _feas_issue_categories(issues) -> list[str]:
+    """Ordered, de-duplicated ``[tag]`` categories of blocking issues."""
+    cats: list[str] = []
+    for issue in issues or []:
+        m = _FEAS_ISSUE_TAG_RE.match(str(issue))
+        if m:
+            tag = m.group(1).lower()
+            if tag not in cats:
+                cats.append(tag)
+    return cats
+
+
+def _feas_override_scope(project_root, block_name: str) -> dict | None:
+    """SCOPE of the chip-lead's ``uarch_feasibility_override``, or None.
+
+    The marker used to be a bare ``"1"`` whose mere EXISTENCE waived every
+    budget gate for the block -- block-global, and therefore wrong: an override
+    granted for an ``[interface]`` (or tooling) blocker silently forced the
+    block past the deterministic mem_price gate and the post-synth budget gate
+    as well, and labelled within-budget blocks "over-budget accepted". The
+    marker is now JSON recording WHICH categories were actually overridden and
+    against WHICH contract version, so each gate can ask whether the override
+    is about IT.
+
+    Returns the scope dict (``categories`` always present and lower-cased), or
+    None when there is no marker or the override has EXPIRED -- a recorded
+    ``contract_sha1`` that no longer matches this block's current contract
+    means the lead accepted a different design than the one in front of us. A
+    legacy ``"1"`` marker reads as an ``[area]`` override so pre-JSON runs keep
+    exactly the behavior they had.
+    """
+    path = (Path(project_root) / ".coresmith" / "blocks" / block_name
+            / "uarch_feasibility_override")
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return None
+    try:
+        scope = json.loads(raw)
+    except ValueError:
+        scope = None
+    if not isinstance(scope, dict):
+        return {"categories": ["area"], "legacy": True}
+    scope["categories"] = [
+        str(c).strip().lower()
+        for c in (scope.get("categories") or []) if str(c).strip()
+    ]
+    sha = str(scope.get("contract_sha1") or "")
+    if sha:
+        # Only a KNOWN, DIFFERENT contract expires the override; an unhashable
+        # or absent contract ('' from the helper) must not silently revoke it.
+        current = _block_contract_sha1(project_root, block_name)
+        if current and current != sha:
+            return None
+    return scope
+
+
+def _feas_override_covers(project_root, block_name: str, category: str) -> bool:
+    """True when a live override explicitly covers ``category`` (e.g. "area")."""
+    scope = _feas_override_scope(project_root, block_name)
+    return bool(scope) and category in (scope.get("categories") or [])
+
+
 def _mem_price_gate_verdict(project_root: str, block_name: str) -> dict | None:
     """Tier-2 per-block memory-price gate at spec acceptance (Deliverable 1).
 
@@ -1465,8 +1535,15 @@ def _mem_price_gate_verdict(project_root: str, block_name: str) -> dict | None:
     # price the manifest for the ledger record, then DEFER (carry-forward
     # advisory) instead of demanding a re-spec. The chip-lead has explicitly
     # accepted the area; force past, don't loop.
-    _bdir = Path(project_root) / ".coresmith" / "blocks" / block_name
-    if (_bdir / "uarch_feasibility_override").exists():
+    #
+    # ONLY when the override actually covers [area], though. The marker records
+    # the categories the lead waived; an [interface] / [capability] / tooling
+    # override says nothing about this block's MEMORY budget, and honoring its
+    # bare existence forced unrelated (and within-budget) blocks past this gate.
+    _feas_scope = _feas_override_scope(project_root, block_name)
+    if _feas_scope and "area" in (_feas_scope.get("categories") or []):
+        _ovr_cats = ", ".join(
+            f"[{c}]" for c in (_feas_scope.get("categories") or [])) or "[area]"
         spec_text0 = spec_path.read_text(encoding="utf-8", errors="replace")
         decls0 = _mprice.parse_mem_manifest(spec_text0)
         area_budget0 = floor_area_budget(
@@ -1481,16 +1558,20 @@ def _mem_price_gate_verdict(project_root: str, block_name: str) -> dict | None:
                         block_name, verdict0, area_budget_um2=area_budget0,
                         manifest_present=True, over_budget=not verdict0.ok,
                         deferred=True,
-                        deferred_reason="operator override (uarch_feasibility "
-                                        "[area] override) -- mem_price forced "
-                                        "past, carried forward"))
+                        deferred_reason=(
+                            "operator override (uarch_feasibility override "
+                            f"scoped to {_ovr_cats}, covers [area]) -- "
+                            "mem_price forced past, carried forward")))
         except Exception:  # noqa: BLE001 - never block on the ledger record
             pass
-        log(f"  [MEM-PRICE] {block_name}: uarch_feasibility_override present -- "
-            f"FORCING PAST the mem_price gate (deferred, carried forward) "
-            f"instead of re-entering the revise loop", YELLOW)
+        log(f"  [MEM-PRICE] {block_name}: uarch_feasibility_override scoped to "
+            f"{_ovr_cats} covers [area] -- FORCING PAST the mem_price gate "
+            f"(deferred, carried forward) instead of re-entering the revise "
+            f"loop", YELLOW)
         write_graph_event(project_root, "Review Uarch Spec",
-                          "mem_price_override_deferred", {"block": block_name})
+                          "mem_price_override_deferred",
+                          {"block": block_name,
+                           "categories": _feas_scope.get("categories") or []})
         return None
 
     spec_text = spec_path.read_text(encoding="utf-8", errors="replace")
@@ -1744,10 +1825,13 @@ async def review_uarch_spec_node(state: BlockState) -> dict:
                 blocking_issues.append(_gap_issue)
                 feasible = False
 
-    if blocking_issues and (_bdir / "uarch_feasibility_override").exists():
+    if blocking_issues and _feas_override_scope(_pr(state), block_name):
         # A prior review round was overridden by the chip-lead; do not re-prompt
         # for the same (unchanged) spec on a two-pass re-entry. A genuine re-spec
         # (revise) rewrites the spec and clears intent by producing a new verdict.
+        # An override recorded against a since-changed interface contract has
+        # EXPIRED (_feas_override_scope returns None) -- re-prompt, because the
+        # lead accepted a different design than the one in front of us.
         log(f"  [UARCH-FEAS] {block_name}: blockers present but chip-lead "
             f"OVERRODE earlier -- proceeding without re-prompting", YELLOW)
         blocking_issues = []
@@ -1817,7 +1901,19 @@ async def review_uarch_spec_node(state: BlockState) -> dict:
                 f"despite reported blockers", YELLOW)
             try:
                 _bdir.mkdir(parents=True, exist_ok=True)
-                (_bdir / "uarch_feasibility_override").write_text("1")
+                # SCOPED marker: record WHICH blocker categories were waived and
+                # WHICH contract version they were waived against, so the
+                # downstream budget gates can tell whether this override is
+                # about them and so it expires when the contract moves under it.
+                (_bdir / "uarch_feasibility_override").write_text(
+                    json.dumps({
+                        "gate": "uarch_feasibility",
+                        "categories": _feas_issue_categories(blocking_issues),
+                        "contract_sha1": _block_contract_sha1(
+                            _pr(state), block_name),
+                        "ts": _time.time(),
+                    }, indent=2),
+                    encoding="utf-8")
             except OSError:
                 pass
             # fall through to the normal review/approve path below
@@ -2704,7 +2800,8 @@ async def _maybe_squeeze_throughput(state, block, block_name, rtl_path, tb_path,
             improved = False
             if not rgen.get("error"):
                 new_sim = await asyncio.to_thread(
-                    run_simulation, block, rtl_path, tb_path, attempt)
+                    run_simulation, block, rtl_path, tb_path, attempt,
+                    project_root=_pr(state))
                 new_meas = ((new_sim or {}).get("throughput") or {}).get(
                     "measured_cyc_per_op")
                 ok = (bool(new_sim.get("passed")) and new_meas is not None
@@ -3047,7 +3144,8 @@ async def generate_testbench_node(state: BlockState) -> dict:
                 f"{f' (TB fix #{sim_attempt})' if sim_attempt > 0 else ''}...",
                 YELLOW)
             sim_result = await asyncio.to_thread(
-                run_simulation, block, rtl_path, tb_path, attempt
+                run_simulation, block, rtl_path, tb_path, attempt,
+                project_root=_pr(state),
             )
 
             if sim_result["passed"]:
@@ -3550,11 +3648,11 @@ def _evaluate_ppa_gate(
     # Chip-lead uarch_feasibility override (the marker the mem_price gate
     # honors): defer the BUDGET dimensions (area + logic-FF) of this post-synth
     # gate too, instead of re-failing a storage cost the lead already accepted.
-    # Hard FF ceiling + timing still gate.
+    # Hard FF ceiling + timing still gate. Scoped exactly like mem_price -- only
+    # an [area] override waives an area/FF budget; an [interface] one does not.
     _budget_overridden = bool(
         ppa_honor_feas_override_enabled()
-        and (Path(project_root) / ".coresmith" / "blocks" / block_name
-             / "uarch_feasibility_override").exists()
+        and _feas_override_covers(project_root, block_name, "area")
     )
 
     # rung2 defect 2: seed meta with the parsed budgets so a persisted
@@ -3562,7 +3660,7 @@ def _evaluate_ppa_gate(
     _meta: dict = {"budget_ff": ff_budget, "budget_area_um2": area_budget}
     if _budget_overridden:
         _meta["feas_override_deferred"] = True
-        log(f"  [PPA] {block_name}: uarch_feasibility_override present -- "
+        log(f"  [PPA] {block_name}: uarch_feasibility_override covers [area] -- "
             f"budget dimensions (area/logic-FF) DEFERRED to the die-level "
             f"rollup (hard FF ceiling + timing still gate)", YELLOW)
 
@@ -7576,7 +7674,8 @@ async def integration_check_node(state: OrchestratorState) -> dict:
             # failure at best and a wrong chip at worst.
             solo_rtl_path = rtl_paths.get(solo_name) or list(rtl_paths.values())[0]
             lint_result = await asyncio.to_thread(
-                lint_top_level, output_path, [solo_rtl_path], top_name
+                lint_top_level, output_path, [solo_rtl_path], top_name,
+                project_root=_pr(state),
             )
             lint_clean = lint_result.get("clean", False)
             log(f"  [INTEGRATION] Lint: {'CLEAN' if lint_clean else 'ERRORS'}",
@@ -7681,7 +7780,8 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                 # duplicate `module user_project_wrapper` definition at chip level).
                 _lint_paths = list(asm["lint_block_paths"].values())
                 lint_result = await asyncio.to_thread(
-                    lint_top_level, top_rtl_path, _lint_paths, "user_project_wrapper"
+                    lint_top_level, top_rtl_path, _lint_paths, "user_project_wrapper",
+                    project_root=_pr(state),
                 )
                 lint_clean = lint_result.get("clean", False)
                 # Postcondition: every block is instantiated in the assembled top.
@@ -7919,7 +8019,7 @@ async def integration_check_node(state: OrchestratorState) -> dict:
         block_rtl_list = list(rtl_paths.values())
         lint_result = await asyncio.to_thread(
             lint_top_level, top_rtl_path, block_rtl_list,
-            design_name
+            design_name, project_root=_pr(state),
         )
 
         lint_clean = lint_result.get("clean", False)
@@ -9180,11 +9280,14 @@ async def uarch_integration_gate_node(state: OrchestratorState) -> dict:
             "model_integration_result": result,
             "pipeline_aborted": action == "abort",
         }
-        # Count each non-abort revise/retry so the in-loop re-spec is bounded
+        # Count each RE-SPEC so the in-loop re-spec is bounded
         # (CORESMITH_UARCH_REVISE_MAX). This lets a non-composing decomposition
         # iterate a few variance draws (block_math AND contract gaps) instead of
-        # dead-ending after one, while guaranteeing termination.
-        if action != "abort":
+        # dead-ending after one, while guaranteeing termination. `retry` /
+        # `fix_rtl` are NOT re-specs -- they re-run the gate over a fix the
+        # outer agent already made on disk -- so they do not spend the budget
+        # (charging them ended runs that had merely been re-checked).
+        if action not in ("abort", "retry", "fix_rtl"):
             out["uarch_revise_attempts"] = (
                 int(state.get("uarch_revise_attempts", 0)) + 1
             )
@@ -9451,11 +9554,15 @@ def route_after_uarch_gate(state: OrchestratorState) -> str:
 
     Clean gate -> ``begin_rtl_pass`` (start pass 2). A parked failure:
       - ``abort`` -> END.
+      - ``retry`` / ``fix_rtl`` (an ON-DISK fix, exactly as the park payload
+        advertises them) -> ``uarch_integration_gate``: re-run the gate on the
+        patched files. No re-spec budget is consumed and no contract request
+        is written.
       - ``contract`` gap with ``revise_contract`` / ``revise_uarch`` -> END
         (the frontend cannot mutate frozen contracts; a request marker is
         written by the writer node before END).
-      - ``block_math`` gap with ``revise_uarch`` (or ``retry`` / ``fix_rtl``)
-        -> ``init_tier`` to re-spec the offending block/tier in phase "uarch".
+      - ``block_math`` gap with ``revise_uarch`` -> ``init_tier`` to re-spec
+        the offending block/tier in phase "uarch".
     """
     result = state.get("model_integration_result") or {}
     # A SKIPPED-HONEST gate (goldenless / requirements-only run; rung2 defect 1)
@@ -9473,6 +9580,17 @@ def route_after_uarch_gate(state: OrchestratorState) -> str:
     if action not in ("retry", "revise_uarch", "fix_rtl", "revise_contract"):
         # Unknown action: fail safe to END rather than silently proceeding.
         return END
+    # ON-DISK FIX -> RE-RUN THIS GATE. The park advertises `retry` ("re-run the
+    # gate after an on-disk fix") and `fix_rtl` ("outer agent patched
+    # block/chip model on disk"); neither asks for a re-spec, so neither may
+    # consume the uarch_revise budget or write a contract-revision request.
+    # Sending them through write_contract_request instead ENDed the run under an
+    # exhausted cap (proven live: two `retry` decisions each produced an
+    # exhausted contract request, and only an out-of-graph
+    # POST /run/restart-node actually re-ran the gate). Re-entry is bounded by
+    # the outer agent: every pass costs it one explicit park decision.
+    if action in ("retry", "fix_rtl"):
+        return "uarch_integration_gate"
     # Bound the in-loop re-spec. Over the cap, route through
     # write_contract_request so it writes the machine-readable revision marker
     # for the outer agent, then ENDs (it detects the cap and aborts). Under the
@@ -9489,6 +9607,7 @@ def route_after_uarch_gate(state: OrchestratorState) -> str:
 
 route_after_uarch_gate.__edge_labels__ = {
     "begin_rtl_pass": "GATE CLEAN",
+    "uarch_integration_gate": "RE-RUN GATE (on-disk fix)",
     "init_tier": "RE-SPEC (block_math)",
     "write_contract_request": "CONTRACT GAP",
     END: "ABORT",
@@ -10502,6 +10621,7 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
                     chip_model_path = ""
                 try:
                     tb_result = await generate_integration_testbench(
+                        project_root=_pr(state),
                         design_name=design_name,
                         top_rtl_path=top_rtl_path,
                         modules=modules,
@@ -10531,7 +10651,8 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
                 sim_log=error_msg,
                 sim_log_path="",
                 block_rtl_paths=block_rtl_paths,
-                            supported_actions=["retry", "fix_rtl", "fix_tb", "abort"],
+                            supported_actions=["retry", "fix_rtl", "fix_tb",
+                                               "revise", "abort"],
             )
             payload = {
                 "type": "integration_dv_failure",
@@ -10549,6 +10670,11 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
                     "retry",
                     "fix_rtl",
                     "fix_tb",
+                    # Same lawful escape as the DV-failed park: a TB that
+                    # cannot be generated is often a SPEC-level defect (the
+                    # top contract the uArch specs describe is un-testable),
+                    # and without this the chip-lead's only exit was abort.
+                    "revise",
                     "abort",
                 ],
                 "outer_agent_guidance": (
@@ -10558,6 +10684,9 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
                     "and any partially written testbench. Use action='fix_tb' "
                     "when the testbench generator or prompt needs repair, "
                     "action='fix_rtl' when the top-level contract is invalid, "
+                    "action='revise' when the defect is in the uArch specs "
+                    "themselves (appends your feedback to the affected specs "
+                    "and re-runs the tiers), "
                     "or action='retry' after an external fix. Do not mark the "
                     "pipeline complete until Integration DV runs.\n\n"
                     "Contract audit result: "
@@ -10603,6 +10732,7 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
         sim_result = await asyncio.to_thread(
             run_integration_simulation,
             design_name, top_rtl_path, block_rtl_paths, tb_path,
+            project_root=_pr(state),
         )
 
         passed = sim_result.get("passed", False)
@@ -11515,6 +11645,7 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
                 reference_entry = ""
             try:
                 tb_result = await generate_validation_testbench(
+                    project_root=_pr(state),
                     design_name=design_name,
                     top_rtl_path=top_rtl_path,
                     modules=modules,
@@ -11546,7 +11677,8 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
                 sim_log=error_msg,
                 sim_log_path="",
                 block_rtl_paths=block_rtl_paths,
-                            supported_actions=["retry", "fix_rtl", "fix_tb", "abort"],
+                            supported_actions=["retry", "fix_rtl", "fix_tb",
+                                               "revise", "abort"],
             )
             payload = {
                 "type": "validation_dv_failure",
@@ -11565,6 +11697,9 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
                     "retry",
                     "fix_rtl",
                     "fix_tb",
+                    # See the integration_dv tb_generation park: tier
+                    # regeneration must be reachable from here too.
+                    "revise",
                     "abort",
                 ],
                 "outer_agent_guidance": (
@@ -11574,7 +11709,10 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
                     "an invalid top-level contract, or a validation testbench "
                     "generation bug. Use action='fix_tb' when the validation "
                     "testbench prompt/generator needs repair, action='fix_rtl' "
-                    "when RTL/top contracts must change, or action='retry' "
+                    "when RTL/top contracts must change, action='revise' when "
+                    "the uArch specs themselves must change (appends your "
+                    "feedback to the affected specs and re-runs the tiers), "
+                    "or action='retry' "
                     "after applying an external fix. Do not mark the pipeline "
                     "complete until Validation DV runs and verifies every ERS "
                     "requirement.\n\nContract audit result: "
@@ -11621,7 +11759,7 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
         sim_result = await asyncio.to_thread(
             run_integration_simulation,
             design_name, top_rtl_path, block_rtl_paths, tb_path,
-            sim_scope="validation",
+            sim_scope="validation", project_root=_pr(state),
         )
 
         passed = sim_result.get("passed", False)
@@ -12184,12 +12322,18 @@ def build_pipeline_graph(checkpointer=None):
                 "pipeline_complete": "pipeline_complete",
             },
         )
-        # µarch gate -> {begin_rtl_pass | init_tier | write_contract_request | END}
+        # µarch gate -> {begin_rtl_pass | uarch_integration_gate | init_tier |
+        #                write_contract_request | END}
+        # The self-edge is the `retry` / `fix_rtl` path: the outer agent fixed
+        # the block/chip model on disk and asked for a re-check, so the gate
+        # re-runs itself (it reads everything it needs from disk + state, and
+        # the tier index it was entered with is unchanged).
         orchestrator.add_conditional_edges(
             "uarch_integration_gate",
             route_after_uarch_gate,
             {
                 "begin_rtl_pass": "begin_rtl_pass",
+                "uarch_integration_gate": "uarch_integration_gate",
                 "init_tier": "init_tier",
                 "write_contract_request": "write_contract_request",
                 END: END,

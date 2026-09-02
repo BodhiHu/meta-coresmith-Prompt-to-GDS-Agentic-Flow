@@ -1856,9 +1856,13 @@ def ppa_gate_enabled() -> bool:
 def ppa_honor_feas_override_enabled() -> bool:
     """Post-synth PPA gate honors a chip-lead ``uarch_feasibility_override``
     on the BUDGET dimensions (area + logic-FF), mirroring the mem_price gate
-    (default ON). The absolute FF hard ceiling and the timing dimension still
-    gate -- an accepted [area] blocker never waives routability or timing.
-    ``CORESMITH_PPA_HONOR_FEAS_OVERRIDE=0`` restores budget-strict behavior.
+    (default ON). Only an override whose recorded scope covers ``[area]`` (and
+    whose contract_sha1 still matches the block's current contract) counts --
+    an ``[interface]``/tooling override says nothing about the storage budget
+    and no longer forces past this gate. The absolute FF hard ceiling and the
+    timing dimension still gate -- an accepted [area] blocker never waives
+    routability or timing. ``CORESMITH_PPA_HONOR_FEAS_OVERRIDE=0`` restores
+    budget-strict behavior.
     """
     return (os.environ.get("CORESMITH_PPA_HONOR_FEAS_OVERRIDE", "1")
             or "1").strip() != "0"
