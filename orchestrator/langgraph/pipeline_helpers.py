@@ -291,6 +291,25 @@ def _write_step_log(
     return str(log_file)
 
 
+def archive_step_logs(block_name: str, round_no: int) -> list[str]:
+    """Rename a block's current step logs to ``<name>.round<N>.log`` so a new
+    lifecycle round does not overwrite the evidence of the previous one."""
+    log_dir = _LOG_DIR / block_name
+    moved: list[str] = []
+    if not log_dir.is_dir():
+        return moved
+    for f in sorted(log_dir.glob("*.log")):
+        if ".round" in f.name:
+            continue
+        target = log_dir / f"{f.stem}.round{round_no}.log"
+        try:
+            f.rename(target)
+            moved.append(str(target))
+        except OSError:
+            continue
+    return moved
+
+
 def _write_step_log_error(
     block_name: str,
     step: str,

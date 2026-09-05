@@ -112,6 +112,7 @@ CREATE TABLE IF NOT EXISTS contracts (
 CREATE TABLE IF NOT EXISTS attempts (
     id INTEGER PRIMARY KEY,
     block TEXT NOT NULL,
+    round INTEGER NOT NULL DEFAULT 1,
     attempt INTEGER,
     category TEXT,
     error TEXT,
@@ -122,6 +123,7 @@ CREATE INDEX IF NOT EXISTS idx_attempts_block ON attempts(block);
 CREATE TABLE IF NOT EXISTS diagnoses (
     id INTEGER PRIMARY KEY,
     block TEXT NOT NULL,
+    round INTEGER NOT NULL DEFAULT 1,
     attempt INTEGER,
     category TEXT,
     confidence REAL,
@@ -199,6 +201,13 @@ class ProjectDB:
         with self._conn() as db:
             db.executescript(_SCHEMA)
             db.executescript(_SCOREBOARD_SCHEMA)
+            for table in ("attempts", "diagnoses"):
+                cols = {r[1] for r in db.execute(f"PRAGMA table_info({table})")}
+                if "round" not in cols:
+                    db.execute(f"ALTER TABLE {table} ADD COLUMN round INTEGER NOT NULL DEFAULT 1")
+            cols = {r[1] for r in db.execute("PRAGMA table_info(ppa_history)")}
+            if cols and "tns_ns" not in cols:
+                db.execute("ALTER TABLE ppa_history ADD COLUMN tns_ns REAL")
 
     @contextmanager
     def _conn(self):
@@ -482,13 +491,44 @@ class ProjectDB:
         return out
 
     # ------------------------------------------------------ per-block state
-    def attempt_history(self, block: str) -> list[dict]:
+    # A "round" is one lifecycle of the block subgraph (each init_block entry
+    # starts a new one). Attempt history and diagnoses are kept for every round;
+    # the pipeline reads the current round, reviewers can read them all.
+    def current_round(self, block: str) -> int:
+        return int(self.get_setting(f"round:{block}", "1") or 1)
+
+    def begin_round(self, block: str) -> int:
+        """Start a new lifecycle round for ``block`` and return its number."""
+        with self._tx() as db:
+            row = db.execute("SELECT value FROM settings WHERE name=?", (f"round:{block}",)).fetchone()
+            recorded = max(
+                int(db.execute("SELECT COALESCE(MAX(round), 0) FROM attempts WHERE block=?", (block,)).fetchone()[0]),
+                int(db.execute("SELECT COALESCE(MAX(round), 0) FROM diagnoses WHERE block=?", (block,)).fetchone()[0]),
+            )
+            # A block's first lifecycle is round 1; anything recorded before a
+            # round was started counts as round 1 and the next one becomes 2.
+            new = max(int(row["value"]) if row else 0, recorded) + 1
+            db.execute(
+                "INSERT INTO settings(name, value, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(name) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                (f"round:{block}", str(new), time.time()),
+            )
+        self.export_block_views(block)
+        return new
+
+    def attempt_history(self, block: str, all_rounds: bool = False) -> list[dict]:
         with self._conn() as db:
-            rows = db.execute("SELECT * FROM attempts WHERE block=? ORDER BY id", (block,)).fetchall()
+            if all_rounds:
+                rows = db.execute("SELECT * FROM attempts WHERE block=? ORDER BY id", (block,)).fetchall()
+            else:
+                rows = db.execute("SELECT * FROM attempts WHERE block=? AND round=? ORDER BY id",
+                                  (block, self.current_round(block))).fetchall()
         out = []
         for r in rows:
             d = _uj(r["extra_json"], {}) or {}
             d.update({"attempt": r["attempt"], "error": r["error"], "category": r["category"]})
+            if all_rounds:
+                d["round"] = r["round"]
             out.append({k: v for k, v in d.items() if v is not None})
         return out
 
@@ -496,9 +536,10 @@ class ProjectDB:
         extra = {k: v for k, v in entry.items() if k not in ("attempt", "error", "category")}
         with self._tx() as db:
             db.execute(
-                "INSERT INTO attempts(block, attempt, category, error, extra_json, ts) VALUES (?, ?, ?, ?, ?, ?)",
-                (block, _int(entry.get("attempt")), _s(entry.get("category")), _s(entry.get("error")),
-                 _j(extra) if extra else None, time.time()),
+                "INSERT INTO attempts(block, round, attempt, category, error, extra_json, ts) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (block, self.current_round(block), _int(entry.get("attempt")), _s(entry.get("category")),
+                 _s(entry.get("error")), _j(extra) if extra else None, time.time()),
             )
         self.export_block_views(block)
 
@@ -507,19 +548,33 @@ class ProjectDB:
             db.execute("DELETE FROM attempts WHERE block=?", (block,))
         self.export_block_views(block)
 
-    def diagnosis(self, block: str) -> dict | None:
+    def diagnosis(self, block: str, all_rounds: bool = False) -> dict | None:
+        """The latest diagnosis of the current round (None at a fresh round)."""
         with self._conn() as db:
-            row = db.execute("SELECT diagnosis_json FROM diagnoses WHERE block=? ORDER BY id DESC LIMIT 1",
-                             (block,)).fetchone()
+            if all_rounds:
+                row = db.execute("SELECT diagnosis_json FROM diagnoses WHERE block=? ORDER BY id DESC LIMIT 1",
+                                 (block,)).fetchone()
+            else:
+                row = db.execute(
+                    "SELECT diagnosis_json FROM diagnoses WHERE block=? AND round=? ORDER BY id DESC LIMIT 1",
+                    (block, self.current_round(block))).fetchone()
         return _uj(row["diagnosis_json"], None) if row else None
+
+    def diagnoses(self, block: str) -> list[dict]:
+        """Every diagnosis ever recorded for ``block`` (all rounds, oldest first)."""
+        with self._conn() as db:
+            rows = db.execute("SELECT round, attempt, ts, diagnosis_json FROM diagnoses WHERE block=? ORDER BY id",
+                              (block,)).fetchall()
+        return [{"round": r["round"], "attempt": r["attempt"], "ts": r["ts"],
+                 **(_uj(r["diagnosis_json"], {}) or {})} for r in rows]
 
     def set_diagnosis(self, block: str, diagnosis: dict, attempt: int | None = None) -> None:
         with self._tx() as db:
             db.execute(
-                "INSERT INTO diagnoses(block, attempt, category, confidence, diagnosis_json, ts) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (block, attempt, _s(diagnosis.get("category")), _float(diagnosis.get("confidence")),
-                 _j(diagnosis), time.time()),
+                "INSERT INTO diagnoses(block, round, attempt, category, confidence, diagnosis_json, ts) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (block, self.current_round(block), attempt, _s(diagnosis.get("category")),
+                 _float(diagnosis.get("confidence")), _j(diagnosis), time.time()),
             )
         self.export_block_views(block)
 
@@ -653,6 +708,8 @@ class ProjectDB:
         self._write_view(bdir / "constraints.json", self.constraints(block))
         self._write_view(bdir / "diagnosis.json", self.diagnosis(block) or {})
         self._write_view(bdir / "attempt_history.json", self.attempt_history(block))
+        self._write_view(bdir / "attempt_history_all_rounds.json", self.attempt_history(block, all_rounds=True))
+        self._write_view(bdir / "diagnoses_all_rounds.json", self.diagnoses(block))
         best = self.result(block, "best")
         target = bdir / "best_result.json"
         if best is None:

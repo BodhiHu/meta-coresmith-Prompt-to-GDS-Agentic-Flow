@@ -797,8 +797,13 @@ async def init_block_node(state: BlockState) -> dict:
     block_dir.mkdir(parents=True, exist_ok=True)
     (block_dir / "previous_error.txt").write_text("")
     _bdb = _db(_pr(state))
-    _bdb.clear_diagnosis(block_name)
-    _bdb.clear_attempts(block_name)
+    _round = _bdb.begin_round(block_name)
+    if _round > 1:
+        try:
+            from orchestrator.langgraph.pipeline_helpers import archive_step_logs
+            archive_step_logs(block_name, _round - 1)
+        except Exception:  # noqa: BLE001 - archiving is best-effort
+            pass
     # Constraints are an accumulating ledger: chip-level revise/fix pins and
     # operator rules survive a fresh lifecycle; per-lifecycle (debug-agent)
     # entries are dropped.
@@ -951,6 +956,7 @@ async def _resolve_interrupt(payload: dict) -> dict:
                 "block_name": payload.get("block_name", ""),
                 "action": action,
                 "reasoning": decision.get("reasoning", ""),
+                "ts": _time.time(),
             }) + "\n")
         write_graph_event(
             os.environ.get("CORESMITH_PROJECT_ROOT", "."), "Chip Lead",
@@ -3547,11 +3553,15 @@ def _evaluate_ppa_gate(
                     ])
 
     sta: dict = {}
+    _sta_dir = Path(project_root) / "syn" / "output" / block_name
     if synth_result:
         sta = run_pre_layout_sta(
             synth_result.get("netlist_path", ""), synth_result.get("sdc_path", ""),
             synth_result.get("liberty_path", ""), block_name,
+            report_path=str(_sta_dir / f"{block_name}_sta.rpt"),
         ) or {}
+        _meta["sta_report_path"] = str(_sta_dir / f"{block_name}_sta.rpt")
+        _meta["tns_ns"] = sta.get("tns_ns")
     # pdk-fixes-1: surface the pre-layout WNS so it lands in the ppa_history
     # wns_ns column (it has always been NULL) and so a LOUD sta_error (STA ran
     # for a block that has a netlist but produced no parseable timing) is
@@ -3617,6 +3627,7 @@ def _evaluate_ppa_gate(
         mf = run_maxfanout_buffered_sta(
             rtl_path, _liberty_p, block_name, _mf_period, _clk,
             timeout_s=_synth_timeout, extra_sources=_mem_lib_srcs,
+            report_dir=_sta_dir,
         )
         if mf is not None:
             _meta["wns_ns_base_unbuffered"] = _eff_wns
@@ -4569,6 +4580,7 @@ async def synthesize_node(state: BlockState) -> dict:
         cells=(result or {}).get("gate_count"),
         area_um2=(result or {}).get("chip_area_um2"),
         wns_ns=ppa_meta.get("wns_ns"),
+        tns_ns=ppa_meta.get("tns_ns"),
         ppa_ok=ppa_ok, reasons=ppa_reasons or None,
         report_path=(result or {}).get("report_path", ""),
     )

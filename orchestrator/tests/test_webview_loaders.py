@@ -18,7 +18,6 @@ import importlib.util
 import json
 import os
 import sqlite3
-import sys
 import time
 from http.server import HTTPServer
 from pathlib import Path
