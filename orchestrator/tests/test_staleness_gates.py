@@ -17,10 +17,6 @@ assemble (truncation adapters would destroy the amended semantics).
 
 import json
 
-from orchestrator.langgraph.pipeline_helpers import (
-    block_contract_sha1,
-    stale_uarch_spec_blocks,
-)
 
 
 def _write_contracts(root, contracts):
@@ -319,24 +315,3 @@ endmodule
         assert errors == [], errors
 
 
-class TestStaleUarchSpecBlocks:
-    def test_no_sidecar_never_flagged(self, tmp_path):
-        _write_contracts(tmp_path, [_edge("a", "b", 8)])
-        assert stale_uarch_spec_blocks(tmp_path, ["a", "b"]) == []
-
-    def test_matching_stamp_not_stale(self, tmp_path):
-        _write_contracts(tmp_path, [_edge("a", "b", 8)])
-        _stamp(tmp_path, "a", block_contract_sha1(tmp_path, "a"))
-        assert stale_uarch_spec_blocks(tmp_path, ["a"]) == []
-
-    def test_contract_amendment_flags_only_stale_participants(self, tmp_path):
-        # bitstream_reader case: spec stamped pre-amendment; the contract is
-        # then widened (8 -> 9 bit bit_req). The stale block is flagged; a
-        # block stamped AFTER the amendment is not.
-        _write_contracts(tmp_path, [_edge("hp", "br", 8), _edge("x", "y", 4)])
-        _stamp(tmp_path, "br", block_contract_sha1(tmp_path, "br"))
-        _stamp(tmp_path, "y", block_contract_sha1(tmp_path, "y"))
-        _write_contracts(tmp_path, [_edge("hp", "br", 9), _edge("x", "y", 4)])
-        stale = stale_uarch_spec_blocks(tmp_path, ["br", "y", "hp"])
-        assert [s["block"] for s in stale] == ["br"]
-        assert stale[0]["recorded"] != stale[0]["current"]

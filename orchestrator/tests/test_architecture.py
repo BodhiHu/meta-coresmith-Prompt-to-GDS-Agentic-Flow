@@ -799,7 +799,7 @@ class TestInterfaceDefinition:
         assert "Single-block" in result["result"]["design_summary"]
         # No file written for a no-op design.
         from pathlib import Path
-        assert not (Path(tmp_project) / ".coresmith" / "interface_contracts.json").exists()
+        assert not (Path(tmp_project) / ".coresmith" / "drafts" / "interface_contracts.json").exists()
 
     @pytest.mark.asyncio
     async def test_specialist_persists_contracts_to_disk(self, tmp_project):
@@ -839,7 +839,7 @@ class TestInterfaceDefinition:
             "open_questions": [],
         }
         import json as _json
-        target = Path(tmp_project) / ".coresmith" / "interface_contracts.json"
+        target = Path(tmp_project) / ".coresmith" / "drafts" / "interface_contracts.json"
 
         async def _fake_call(*args, **kwargs):
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -933,7 +933,7 @@ class TestInterfaceDefinition:
 
         monkeypatch.delenv("CORESMITH_INTERFACE_FAMILY_PROPAGATION", raising=False)
         monkeypatch.delenv("CORESMITH_INTERFACE_FAMILY_GATE", raising=False)
-        target = Path(tmp_project) / ".coresmith" / "interface_contracts.json"
+        target = Path(tmp_project) / ".coresmith" / "drafts" / "interface_contracts.json"
         diagram, fake_call = self._completion_mislabel_bundle(target)
 
         with patch("orchestrator.langchain.agents.coresmith_llm.ClaudeLLM") as MockLLM:
@@ -981,7 +981,7 @@ class TestInterfaceDefinition:
 
         monkeypatch.setenv("CORESMITH_INTERFACE_FAMILY_PROPAGATION", "0")
         monkeypatch.delenv("CORESMITH_INTERFACE_FAMILY_GATE", raising=False)
-        target = Path(tmp_project) / ".coresmith" / "interface_contracts.json"
+        target = Path(tmp_project) / ".coresmith" / "drafts" / "interface_contracts.json"
         diagram, fake_call = self._completion_mislabel_bundle(target)
 
         with patch("orchestrator.langchain.agents.coresmith_llm.ClaudeLLM") as MockLLM:
@@ -1032,7 +1032,7 @@ class TestInterfaceDefinition:
             "open_questions": [],
         }
         import json as _json
-        target = Path(tmp_project) / ".coresmith" / "interface_contracts.json"
+        target = Path(tmp_project) / ".coresmith" / "drafts" / "interface_contracts.json"
 
         async def _fake_call(*args, **kwargs):
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -1081,7 +1081,7 @@ class TestInterfaceDefinition:
             "open_questions": [],
         }
         import json as _json
-        target = Path(tmp_project) / ".coresmith" / "interface_contracts.json"
+        target = Path(tmp_project) / ".coresmith" / "drafts" / "interface_contracts.json"
 
         async def _fake_call(*args, **kwargs):
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -1151,7 +1151,7 @@ class TestInterfaceDefinition:
             "open_questions": [],
         }
         import json as _json
-        target = Path(tmp_project) / ".coresmith" / "interface_contracts.json"
+        target = Path(tmp_project) / ".coresmith" / "drafts" / "interface_contracts.json"
 
         async def _fake_call(*args, **kwargs):
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -1212,7 +1212,7 @@ class TestInterfaceDefinition:
             "open_questions": [],
         }
         import json as _json
-        target = Path(tmp_project) / ".coresmith" / "interface_contracts.json"
+        target = Path(tmp_project) / ".coresmith" / "drafts" / "interface_contracts.json"
 
         async def _fake_call(*args, **kwargs):
             target.parent.mkdir(parents=True, exist_ok=True)

@@ -930,17 +930,12 @@ async def run_restart_node(req: RestartNodeRequest):
         # re-entering integration, so the staleness preflight does not force a
         # mass-regen of already-passing blocks.
         try:
-            import json as _json
-
-            from orchestrator.langgraph.pipeline_helpers import (
-                refresh_current_sidecars,
-            )
-            bq = os.path.join(_PROJECT_ROOT, ".coresmith", "block_queue.json")
-            names = []
-            if os.path.exists(bq):
-                data = _json.loads(open(bq).read())
-                names = [b.get("name") for b in data if b.get("name")]
-            refreshed = refresh_current_sidecars(_PROJECT_ROOT, names)
+            from orchestrator.state_store.project_db import open_project as _open_project
+            _pdb = _open_project(_PROJECT_ROOT)
+            for _name in _pdb.block_names():
+                if _pdb.block_contract_version(_name):
+                    _pdb.stamp_block_spec(_name)
+                    refreshed.append(_name)
         except Exception:
             log.warning("restart-node: sidecar refresh failed", exc_info=True)
     result = await _pipeline.restart_from_node(req.node)
@@ -1317,9 +1312,9 @@ def _load_block_queue(blocks_file: str) -> list[dict]:
         os.environ.pop("CORESMITH_BLOCKS_FILE", None)
 
     block_queue: list[dict] = []
-    specs_path = Path(_PROJECT_ROOT) / ".coresmith" / "block_specs.json"
-    if not blocks_file and specs_path.exists():
-        block_queue = json.loads(specs_path.read_text())
+    if not blocks_file:
+        from orchestrator.state_store.project_db import open_project as _open_project
+        block_queue = _open_project(_PROJECT_ROOT).block_specs()
 
     if not block_queue:
         config = load_config()

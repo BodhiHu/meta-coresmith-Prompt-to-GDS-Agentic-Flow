@@ -142,15 +142,18 @@ def _chip_throughput(project_root: str) -> dict:
 def _engine_provenance(project_root: str) -> dict:
     """Engine git SHA stamped at run start (+ mid-run-change flag). Section 7a.
 
-    Prefers the run-stamped ``.coresmith/engine_sha.json`` (what the run ACTUALLY
+    Prefers the run-stamped engine SHA in the project database (what the run ACTUALLY
     executed); falls back to the live engine SHA when no stamp exists.
     """
     try:
-        p = Path(project_root) / ".coresmith" / "engine_sha.json"
-        if p.exists():
-            d = json.loads(p.read_text())
-            if isinstance(d, dict):
-                return d
+        from orchestrator.state_store.project_db import ProjectDB
+        db = ProjectDB(project_root)
+        if db.exists():
+            sha = db.get_setting("engine_sha")
+            if sha is not None:
+                changes = json.loads(db.get_setting("engine_sha_changes", "[]") or "[]")
+                return {"sha": sha, "changed": bool(changes), "changes": changes,
+                        "first_seen": db.get_setting("engine_sha_first_seen")}
     except Exception:  # noqa: BLE001
         pass
     try:

@@ -2843,13 +2843,13 @@ class TestFeasibilityOverrideScope:
         return bdir
 
     def _write_contract(self, root, name="blk"):
-        """A real contract slice so _block_contract_sha1 hashes to something."""
-        (root / ".coresmith").mkdir(parents=True, exist_ok=True)
-        (root / ".coresmith" / "interface_contracts.json").write_text(
-            json.dumps({"contracts": [
-                {"producer_block": name, "consumer_block": "sink",
-                 "width": 32, "name": "e0"}]}))
-        return pipeline_graph._block_contract_sha1(str(root), name)
+        """A real contract edge so the block has a contract version."""
+        from orchestrator.state_store.project_db import open_project
+        db = open_project(root)
+        db.import_contracts({"contracts": [
+            {"edge_id": "e0", "producer_block": name, "consumer_block": "sink",
+             "width": 32, "name": "e0"}]})
+        return db.block_contract_version(name)
 
     def _marker(self, bdir, **fields):
         (bdir / "uarch_feasibility_override").write_text(json.dumps(fields))
@@ -2906,24 +2906,24 @@ class TestFeasibilityOverrideScope:
         bdir = self._block(tmp_path)
         self._write_contract(tmp_path)
         self._marker(bdir, gate="uarch_feasibility", categories=["area"],
-                     contract_sha1="deadbeef" * 5)
+                     contract_version=999)
         assert pipeline_graph._feas_override_scope(str(tmp_path), "blk") is None
         assert self._deferred(tmp_path) is False
 
     def test_matching_contract_sha1_keeps_the_override(self, tmp_path):
         bdir = self._block(tmp_path)
-        sha = self._write_contract(tmp_path)
-        assert sha, "fixture must produce a hashable contract slice"
+        ver = self._write_contract(tmp_path)
+        assert ver, "fixture must produce a contract version"
         self._marker(bdir, gate="uarch_feasibility", categories=["area"],
-                     contract_sha1=sha)
+                     contract_version=ver)
         assert self._deferred(tmp_path) is True
 
     def test_unhashable_contract_does_not_revoke_the_override(self, tmp_path):
-        # No interface_contracts.json -> _block_contract_sha1 is ''; a missing
+        # No contracts -> the block's contract version is 0; a missing
         # provenance axis must not silently revoke a granted override.
         bdir = self._block(tmp_path)
         self._marker(bdir, gate="uarch_feasibility", categories=["area"],
-                     contract_sha1="deadbeef" * 5)
+                     contract_version=999)
         assert self._deferred(tmp_path) is True
 
     # -- the post-synth budget gate is scoped the same way ------------------
@@ -2939,7 +2939,7 @@ class TestFeasibilityOverrideScope:
     # -- what the override site writes -------------------------------------
     def test_override_marker_is_written_as_a_scope(self, tmp_path, monkeypatch):
         bdir = self._block(tmp_path)
-        sha = self._write_contract(tmp_path)
+        ver = self._write_contract(tmp_path)
         blocking = ["[interface] port too narrow", "[area] over budget"]
         monkeypatch.setattr(pipeline_graph, "interrupt",
                             lambda payload: {"action": "override"})
@@ -2947,14 +2947,13 @@ class TestFeasibilityOverrideScope:
         (bdir / "uarch_feasibility_override").write_text(json.dumps({
             "gate": "uarch_feasibility",
             "categories": pipeline_graph._feas_issue_categories(blocking),
-            "contract_sha1": pipeline_graph._block_contract_sha1(
-                str(tmp_path), "blk"),
+            "contract_version": pipeline_graph._db(str(tmp_path)).block_contract_version("blk"),
             "ts": 0.0,
         }))
         scope = pipeline_graph._feas_override_scope(str(tmp_path), "blk")
         assert scope["gate"] == "uarch_feasibility"
         assert scope["categories"] == ["interface", "area"]
-        assert scope["contract_sha1"] == sha
+        assert scope["contract_version"] == ver
 
 
 class TestTbGenerationParkOffersRevise:

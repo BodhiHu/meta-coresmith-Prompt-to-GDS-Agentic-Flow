@@ -880,15 +880,9 @@ async def generate_uarch_spec(
     # emitted 9-bit; the Lead then bridged it with a semantics-destroying
     # truncation adapter).
     try:
-        _bd = PROJECT_ROOT / ".coresmith" / "blocks" / block["name"]
-        _bd.mkdir(parents=True, exist_ok=True)
-        _ct = block_contract_sha1(str(PROJECT_ROOT), block["name"])
-        if _ct:
-            (_bd / "uarch_spec_contract_sha1").write_text(_ct, encoding="utf-8")
-            # The spec now matches the LIVE contract -- retire any eager
-            # staleness marker a contract amendment left behind for this block.
-            (_bd / CONTRACT_STALE_MARKER).unlink(missing_ok=True)
-    except OSError:
+        from orchestrator.state_store.project_db import open_project as _open_project
+        _open_project(str(PROJECT_ROOT)).stamp_block_spec(block["name"])
+    except Exception:  # noqa: BLE001 - provenance is best-effort
         pass
 
     return result
@@ -897,73 +891,6 @@ async def generate_uarch_spec(
 # Eager staleness marker written next to a block whose interface-contract
 # slice moved under it (see :func:`write_amended_contract`). Disk-first, so a
 # future preflight can read it without replaying the amendment.
-CONTRACT_STALE_MARKER = "contract_stale"
-
-
-def recorded_contract_sha1(project_root, block_name: str,
-                           sidecar: str) -> str:
-    """Contract sha1 an on-disk artifact was generated against ('' when the
-    ``.coresmith/blocks/<b>/<sidecar>`` provenance file is absent/unreadable).
-
-    ``sidecar`` is ``uarch_spec_contract_sha1`` (spec) or
-    ``block_model_contract_sha1`` (block model).
-    """
-    try:
-        path = (Path(project_root) / ".coresmith" / "blocks" / block_name
-                / sidecar)
-        if not path.exists():
-            return ""
-        return path.read_text(encoding="utf-8").strip()
-    except OSError:
-        return ""
-
-
-def contract_block_names(contract_doc: dict) -> list:
-    """Every block participating in an ``interface_contracts.json`` document
-    (sorted, deduped). Tolerant of missing fields."""
-    names: set = set()
-    for c in (contract_doc or {}).get("contracts") or []:
-        if not isinstance(c, dict):
-            continue
-        for key in ("producer_block", "consumer_block"):
-            nm = str(c.get(key, "") or "").strip()
-            if nm:
-                names.add(nm)
-    return sorted(names)
-
-
-def write_amended_contract(project_root, contract_doc: dict) -> list:
-    """Persist an amended ``interface_contracts.json`` and EAGERLY flag every
-    block whose contract slice moved. Returns the changed block names.
-
-    Why eager (C5(c)): the gap resolver amends the contract for ONE block, but
-    an amendment lands on an EDGE -- so the partner block's slice changes too.
-    The old code left a note saying partners "may be invalidated ... on their
-    next entry", and the lazy check never fired because the gate-scoped reuse
-    shortcut returned before it. Live consequence: 10/12 specs and 9/12 models
-    entering the composition gate had been generated against a superseded
-    contract. Here we diff the per-block ``block_contract_sha1`` across the
-    write and drop a ``contract_stale`` marker on every block that moved, so
-    the staleness is a fact on disk rather than an inference.
-    """
-    root = Path(project_root)
-    path = root / ".coresmith" / "interface_contracts.json"
-    names = contract_block_names(contract_doc)
-    before = {b: block_contract_sha1(str(root), b) for b in names}
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(contract_doc, indent=2), encoding="utf-8")
-    after = {b: block_contract_sha1(str(root), b) for b in names}
-    changed = [b for b in names if before[b] != after[b]]
-    for b in changed:
-        try:
-            bd = root / ".coresmith" / "blocks" / b
-            bd.mkdir(parents=True, exist_ok=True)
-            (bd / CONTRACT_STALE_MARKER).write_text(
-                f"{before[b] or 'none'} -> {after[b] or 'none'}\n",
-                encoding="utf-8")
-        except OSError:
-            pass
-    return changed
 
 
 # C6: markers a generated block model uses to declare it CANNOT realize the
@@ -990,100 +917,6 @@ def _gap_resolution_rounds_cap() -> int:
             "CORESMITH_GAP_RESOLUTION_ROUNDS", "3")))
     except ValueError:
         return 3
-
-
-def stale_uarch_spec_blocks(project_root, block_names) -> list:
-    """C7(b): blocks whose uarch spec was generated against an OLDER interface
-    contract than the live one (recorded ``uarch_spec_contract_sha1`` sidecar
-    != current contract hash). Returns ``[{"block", "recorded", "current"}]``.
-    Blocks with no sidecar (older runs) are never flagged."""
-    out = []
-    for name in block_names:
-        p = (Path(project_root) / ".coresmith" / "blocks" / name
-             / "uarch_spec_contract_sha1")
-        if not p.exists():
-            continue
-        try:
-            rec = p.read_text(encoding="utf-8").strip()
-        except OSError:
-            continue
-        cur = block_contract_sha1(project_root, name)
-        if rec and cur and rec != cur:
-            out.append({"block": name, "recorded": rec, "current": cur})
-    return out
-
-
-def refresh_current_sidecars(project_root, block_names,
-                             changed_edge_substrings=None) -> list:
-    """Engine follow-up #6: re-sync the ``uarch_spec_contract_sha1`` sidecar (+
-    ``best_result.contract_sha1``) to the LIVE per-block contract hash for
-    blocks whose passing RTL is still intact -- WITHOUT regenerating them.
-
-    The staleness pileup: a ``--force`` regen wave (or a mid-run contract edit)
-    touches many blocks' recorded provenance, and blocks regenerated BEFORE a
-    later edit re-stale at the next integration preflight, forcing an
-    all-blocks mass-regen decision. This is the safe automation of the manual
-    per-block resync: a block is refreshed ONLY when its ``best_result`` is
-    ``sim_passed`` AND the on-disk RTL still hashes to the recorded
-    ``rtl_sha1`` (the passing RTL is present, not overwritten). integration_dv
-    + validation_dv (byte-exact) remain the backstop for any block wrongly
-    refreshed. When ``changed_edge_substrings`` is given, a block that
-    participates in an edge matching any substring is SKIPPED (its slice may
-    have genuinely changed -- let it regenerate). Returns the refreshed block
-    names. Never raises."""
-    refreshed: list = []
-    changed = list(changed_edge_substrings or [])
-    for name in block_names:
-        try:
-            bd = Path(project_root) / ".coresmith" / "blocks" / name
-            brj = bd / "best_result.json"
-            if not brj.exists():
-                continue
-            best = json.loads(brj.read_text(encoding="utf-8"))
-            if not best.get("sim_passed"):
-                continue
-            # passing RTL must still be on disk (hash intact)
-            rec_rtl = best.get("rtl_sha1")
-            if rec_rtl:
-                # locate the block's rtl_target via best_result or skip the check
-                rtl_rel = best.get("rtl_target") or ""
-                if rtl_rel:
-                    import hashlib as _hl
-                    try:
-                        cur = _hl.sha1(
-                            (Path(project_root) / rtl_rel).read_bytes()
-                        ).hexdigest()
-                    except OSError:
-                        cur = ""
-                    if cur and cur != rec_rtl:
-                        continue  # RTL was overwritten -- do NOT vouch for it
-            # skip blocks touching a genuinely-changed edge
-            if changed:
-                try:
-                    from orchestrator.langchain.agents.contract_lookup import (
-                        load_block_contracts,
-                    )
-                    view = load_block_contracts(str(project_root), name) or {}
-                    # load_block_contracts returns {"defaults":..., "edges":[...]};
-                    # iterating the view itself yields its KEYS, never edge ids.
-                    edges = (view.get("edges") if isinstance(view, dict)
-                             else view) or []
-                    eids = [e.get("edge_id", "") if isinstance(e, dict) else str(e)
-                            for e in edges]
-                    if any(any(s in eid for s in changed) for eid in eids):
-                        continue
-                except Exception:  # noqa: BLE001
-                    pass
-            live = block_contract_sha1(str(project_root), name)
-            if not live:
-                continue
-            (bd / "uarch_spec_contract_sha1").write_text(live, encoding="utf-8")
-            best["contract_sha1"] = live
-            brj.write_text(json.dumps(best, indent=2))
-            refreshed.append(name)
-        except (OSError, json.JSONDecodeError):
-            continue
-    return refreshed
 
 
 def check_rtl_contract_ports(project_root, block_name: str,
@@ -1198,35 +1031,6 @@ def check_rtl_contract_ports(project_root, block_name: str,
     except Exception:  # noqa: BLE001 - deterministic gate must never crash
         return []
     return errors
-
-
-def block_contract_sha1(project_root, block_name: str) -> str:
-    """sha1 of THIS block's frozen interface-contract slice ('' on any error).
-
-    Single source of truth for contract-provenance hashing (C5): used by the
-    sim-pass provenance in pipeline_graph AND the block-model sidecar below.
-    Hashing the block's OWN slice (not the whole interface_contracts.json)
-    keeps a chip-lead edit to one block's contract from invalidating every
-    other block's recorded provenance.
-    """
-    try:
-        import hashlib
-
-        from orchestrator.langchain.agents.contract_lookup import (
-            load_block_contracts,
-        )
-
-        contract = load_block_contracts(str(project_root), block_name)
-        # No edges -> this block has no contract participation; return "" so
-        # the provenance axis is simply not recorded (load_block_contracts
-        # returns a truthy empty view when the file is missing).
-        if not contract or not contract.get("edges"):
-            return ""
-        return hashlib.sha1(
-            json.dumps(contract, sort_keys=True).encode("utf-8")
-        ).hexdigest()
-    except Exception:  # noqa: BLE001 - provenance is best-effort
-        return ""
 
 
 def _recover_codex_call_artifact(

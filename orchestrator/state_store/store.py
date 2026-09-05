@@ -2,7 +2,7 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""``Scoreboard`` -- a SQLite record of per-block DV / PPA / coverage results.
+"""``Scoreboard`` -- the DV / PPA / coverage result tables of the project database.
 
 Design constraints (from the Package B plan):
 
@@ -101,11 +101,12 @@ def _json(x: Any) -> str | None:
 
 
 class Scoreboard:
-    """Best-effort SQLite scoreboard over ``<project_root>/.coresmith/scoreboard.db``."""
+    """Best-effort SQLite scoreboard over ``<project_root>/.coresmith/project.sqlite``."""
 
     def __init__(self, project_root: str | Path):
         self.project_root = Path(project_root)
-        self.db_path = self.project_root / ".coresmith" / "scoreboard.db"
+        # Shares the canonical project database (see project_db.py).
+        self.db_path = self.project_root / ".coresmith" / "project.sqlite"
 
     # ------------------------------------------------------------------
     # Connections

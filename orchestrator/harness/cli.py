@@ -63,13 +63,15 @@ def cmd_dv_status(args) -> int:
     block = getattr(args, "block", None)
     sb = Scoreboard(root)
 
-    if sb.exists():
-        rows = sb.latest_dv(block=block)
+    from orchestrator.state_store.project_db import open_project
+    _pdb = open_project(root)
+    rows = sb.latest_dv(block=block) if sb.exists() else []
+    if rows:
         for r in rows:
-            bp = root / ".coresmith" / "blocks" / str(r.get("block")) / "best_result.json"
             try:
-                r["stale"] = bp.exists() and bp.stat().st_mtime > (r.get("ts") or 0)
-            except OSError:
+                best = [x for x in _pdb.results(str(r.get("block"))) if x["kind"] == "best"]
+                r["stale"] = bool(best) and (best[0]["ts"] or 0) > (r.get("ts") or 0)
+            except Exception:  # noqa: BLE001
                 r["stale"] = False
         payload = {"source": "scoreboard", "block": block, "rows": rows}
         human_lines = [
@@ -83,33 +85,29 @@ def cmd_dv_status(args) -> int:
         _emit(args, payload, "\n".join(human_lines))
         return EXIT_PASS
 
-    # Disk fallback: blocks/<b>/best_result.json
+    # Fallback: the best results recorded in the project database
     rows = []
-    blocks_dir = root / ".coresmith" / "blocks"
-    names = [block] if block else sorted(
-        p.name for p in blocks_dir.glob("*") if p.is_dir()
-    ) if blocks_dir.is_dir() else []
-    for name in names:
-        bp = blocks_dir / name / "best_result.json"
-        if bp.exists():
-            try:
-                data = json.loads(bp.read_text())
-            except Exception:  # noqa: BLE001
+    try:
+        for item in _pdb.results(block or None):
+            if item["kind"] != "best":
                 continue
+            data = item["value"]
             rows.append({
-                "block": name, "scope": "rtl", "source": "disk",
+                "block": item["block"], "scope": "rtl", "source": "results",
                 "passed": bool(data.get("sim_passed")),
                 "attempt": data.get("attempt"),
                 "tests_passed": data.get("tests_passed"),
                 "tests_total": data.get("tests_total"),
             })
-    payload = {"source": "disk", "block": block, "rows": rows}
+    except Exception:  # noqa: BLE001
+        rows = []
+    payload = {"source": "results", "block": block, "rows": rows}
     human = "\n".join(
         f"{r['block']:<22} rtl        "
-        f"{'PASS' if r['passed'] else 'FAIL'} (disk best_result.json) "
+        f"{'PASS' if r['passed'] else 'FAIL'} (best result) "
         f"tests={r.get('tests_passed')}/{r.get('tests_total')}"
         for r in rows
-    ) or "(no scoreboard.db and no best_result.json found)"
+    ) or "(no DV rows or best results recorded)"
     _emit(args, payload, human)
     return EXIT_PASS
 
@@ -334,9 +332,111 @@ def _add_json(p) -> None:
     p.add_argument("--json", action="store_true", help="machine-readable output")
 
 
+def _state_db(args):
+    from orchestrator.state_store.project_db import open_project
+    return open_project(_bootstrap(args))
+
+
+def cmd_blocks(args) -> int:
+    """The block queue from the project database."""
+    db = _state_db(args)
+    rows = db.blocks()
+    _emit(args, {"blocks": rows}, "\n".join(
+        f"{b.get('name'):<28} tier={b.get('tier')} rtl={b.get('rtl_target', '')}" for b in rows
+    ) or "(no blocks recorded; run the architecture phase or import block specs)")
+    return EXIT_PASS
+
+
+def cmd_block(args) -> int:
+    """One block: registry entry, contracts, constraints, attempts, results."""
+    db = _state_db(args)
+    b = db.block(args.block)
+    if b is None:
+        print(f"unknown block: {args.block}", file=sys.stderr)
+        return EXIT_USAGE
+    payload = {"block": b, "contract_edges": db.contract_edges_for_block(args.block),
+               "constraints": db.constraints(args.block),
+               "attempts": db.attempt_history(args.block),
+               "diagnosis": db.diagnosis(args.block),
+               "results": db.results(args.block)}
+    human = (f"{args.block}: tier={b.get('tier')} rtl={b.get('rtl_target', '')} "
+             f"edges={len(payload['contract_edges'])} constraints={len(payload['constraints'])} "
+             f"attempts={len(payload['attempts'])} results={[r['kind'] for r in payload['results']]}")
+    _emit(args, payload, human)
+    return EXIT_PASS
+
+
+def cmd_attempts(args) -> int:
+    db = _state_db(args)
+    rows = db.attempt_history(args.block)
+    _emit(args, {"block": args.block, "attempts": rows}, "\n".join(
+        f"attempt {r.get('attempt')}: {r.get('category')} -- {str(r.get('error', ''))[:100]}" for r in rows
+    ) or "(no attempts recorded)")
+    return EXIT_PASS
+
+
+def cmd_constraints(args) -> int:
+    db = _state_db(args)
+    if getattr(args, "add", None):
+        db.add_constraint(args.block, args.add, source="human")
+    rows = db.constraints(args.block)
+    _emit(args, {"block": args.block, "constraints": rows}, "\n".join(
+        f"[{r.get('source')}] {r.get('rule')}" for r in rows) or "(no constraints)")
+    return EXIT_PASS
+
+
+def cmd_results(args) -> int:
+    db = _state_db(args)
+    rows = db.results(getattr(args, "block", None) or None)
+    _emit(args, {"results": rows}, "\n".join(
+        f"{r['block']:<28} {r['kind']:<14} {json.dumps(r['value'])[:100]}" for r in rows
+    ) or "(no results recorded)")
+    return EXIT_PASS
+
+
+def cmd_settings(args) -> int:
+    db = _state_db(args)
+    if getattr(args, "set", None):
+        name, _, value = args.set.partition("=")
+        db.set_setting(name.strip(), value)
+    _emit(args, {"settings": db.settings()}, "\n".join(
+        f"{k}={v}" for k, v in db.settings().items()) or "(no settings)")
+    return EXIT_PASS
+
+
+def _register_state(sub) -> None:
+    """Read (and a few write) commands over the project database."""
+    for name, handler, help_ in (
+        ("blocks", cmd_blocks, "the block queue (project database)"),
+        ("results", cmd_results, "recorded gate results per block"),
+        ("settings", cmd_settings, "run settings (engine SHA, contract version, ...)"),
+    ):
+        p = sub.add_parser(name, help=help_)
+        _add_project_root(p)
+        _add_json(p)
+        if name == "results":
+            p.add_argument("block", nargs="?", default="")
+        if name == "settings":
+            p.add_argument("--set", default=None, help="NAME=VALUE")
+        p.set_defaults(func=_run(handler))
+    for name, handler, help_ in (
+        ("block", cmd_block, "everything recorded for one block"),
+        ("attempts", cmd_attempts, "a block's attempt history"),
+        ("constraints", cmd_constraints, "a block's constraint ledger (--add RULE appends)"),
+    ):
+        p = sub.add_parser(name, help=help_)
+        _add_project_root(p)
+        _add_json(p)
+        p.add_argument("block")
+        if name == "constraints":
+            p.add_argument("--add", default=None)
+        p.set_defaults(func=_run(handler))
+
+
 def register_subcommands(sub) -> None:
     """Register harness subcommands on the ``bin/coresmith`` subparser action."""
     _register_verify(sub)
+    _register_state(sub)
     _register_queries(sub)
 
 

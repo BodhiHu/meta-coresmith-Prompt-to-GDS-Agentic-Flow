@@ -210,10 +210,10 @@ class BlockState(TypedDict):
     logs) lives on disk.  Specialist agents read/write files directly
     via tool use (claude CLI with Read/Write/Edit tools enabled).
 
-    Per-block transient state on disk:
-      .coresmith/blocks/<block>/constraints.json    -- accumulated constraints
-      .coresmith/blocks/<block>/diagnosis.json      -- latest debug diagnosis
-      .coresmith/blocks/<block>/attempt_history.json -- attempt history
+    Per-block lifecycle state (constraints, diagnoses, attempt history, best
+    result) lives in the project database (.coresmith/project.sqlite), which
+    regenerates read-only JSON views of it under .coresmith/blocks/<block>/.
+    The latest error context stays a plain file the agents read:
       .coresmith/blocks/<block>/previous_error.txt  -- latest error context
 
     Existing artifact locations (unchanged):
@@ -417,51 +417,6 @@ def _record_coverage_row(project_root: str, **kw) -> None:
             sb.record_coverage(**kw)
         except Exception:  # noqa: BLE001
             pass
-
-
-def _stamp_engine_sha(project_root: str) -> None:
-    """Stamp the engine git SHA into run state (Section 7a) + WARN on a mid-run
-    change. Records ``.coresmith/engine_sha.json`` {sha, first_seen, ...} on the
-    first call; on re-entry, if the LIVE engine SHA differs from the recorded
-    one, a mid-run code hot-swap happened -- log a LOUD warning (it reaches the
-    daemon log) and record the change so the final report surfaces it. Never
-    raises."""
-    try:
-        from orchestrator.utils import engine_git_sha
-        live = engine_git_sha()
-        p = Path(project_root) / ".coresmith" / "engine_sha.json"
-        rec = {}
-        if p.exists():
-            try:
-                rec = json.loads(p.read_text())
-            except Exception:  # noqa: BLE001
-                rec = {}
-        import time as _t
-        if not rec:
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(json.dumps({
-                "sha": live, "first_seen": _t.time(), "changed": False,
-                "changes": [],
-            }, indent=2))
-            log(f"  [ENGINE] git SHA {live or '(unknown)'} stamped for this run",
-                CYAN)
-            return
-        if live and rec.get("sha") and live != rec.get("sha") and not any(
-                c.get("to") == live for c in rec.get("changes", [])):
-            log(f"\n{'!'*60}\n  [ENGINE] WARNING: engine git SHA CHANGED MID-RUN "
-                f"{rec.get('sha')} -> {live} (code hot-swap). Behavior may have "
-                f"shifted under the running pipeline -- results before/after this "
-                f"point are NOT from the same build.\n{'!'*60}\n", RED)
-            rec["changed"] = True
-            rec.setdefault("changes", []).append(
-                {"from": rec.get("sha"), "to": live, "at": _t.time()})
-            rec["sha"] = live
-            try:
-                p.write_text(json.dumps(rec, indent=2))
-            except OSError:
-                pass
-    except Exception:  # noqa: BLE001 - provenance is best-effort, never blocks
-        pass
 
 
 def _carried_forward_defects_path(project_root: str) -> Path:
@@ -725,18 +680,77 @@ def _park_conformance_unrepairable(state: BlockState, block_name: str,
 _PERSISTENT_CONSTRAINT_SOURCES = ("chip_dv_revise", "chip_dv_fix", "human")
 
 
-def _prune_block_constraints(cpath: Path) -> None:
-    """Drop per-lifecycle constraints, keeping the regeneration-proof pins."""
+from orchestrator.state_store.project_db import open_project as _open_project
+
+_PROJECT_DBS: dict = {}
+
+
+def _db(project_root):
+    """The project database for ``project_root`` (opened once per process)."""
+    root = str(project_root)
+    db = _PROJECT_DBS.get(root)
+    if db is None:
+        db = _open_project(root)
+        _PROJECT_DBS[root] = db
+    return db
+
+
+def _stamp_engine_sha(project_root: str) -> None:
+    """Stamp the engine git SHA into the project settings at run start and warn
+    loudly on a mid-run change (a code hot-swap under the run). Never raises."""
     try:
-        cur = json.loads(cpath.read_text()) if cpath.exists() else []
-    except (json.JSONDecodeError, OSError):
-        cur = []
-    kept = [c for c in cur if isinstance(c, dict)
-            and c.get("source") in _PERSISTENT_CONSTRAINT_SOURCES]
-    try:
-        cpath.write_text(json.dumps(kept, indent=2) if kept else "[]")
-    except OSError:
+        from orchestrator.utils import engine_git_sha
+        live = engine_git_sha()
+        db = _db(project_root)
+        rec = db.get_setting("engine_sha") or ""
+        if not rec:
+            db.set_setting("engine_sha", live or "")
+            db.set_setting("engine_sha_first_seen", str(_time.time()))
+            log(f"  [ENGINE] git SHA {live or '(unknown)'} stamped for this run", CYAN)
+            return
+        if live and live != rec:
+            log(f"  [ENGINE] !!! engine git SHA CHANGED mid-run: {rec} -> {live} "
+                f"(a code hot-swap under this run; the final report records it)", RED)
+            changes = json.loads(db.get_setting("engine_sha_changes", "[]") or "[]")
+            changes.append({"from": rec, "to": live, "ts": _time.time()})
+            db.set_setting("engine_sha_changes", json.dumps(changes))
+            db.set_setting("engine_sha", live)
+    except Exception:  # noqa: BLE001 - provenance is best-effort
         pass
+
+
+def _persist_chip_fix_constraint(pr: str, action: str, fix_desc: str,
+                                 response: dict, contract_audit: dict) -> None:
+    """Persist a chip-level fix into the affected blocks' constraints so
+    regeneration cannot silently resurrect the fixed bug."""
+    blocks = (response.get("affected_blocks")
+              or contract_audit.get("affected_blocks") or [])
+    for name in blocks:
+        try:
+            _db(pr).add_constraint(
+                name,
+                f"Chip-level {action} applied during DV -- this behavior MUST be "
+                f"preserved on any regeneration: {fix_desc}",
+                source="chip_dv_fix", attempt=0)
+        except Exception:  # noqa: BLE001
+            continue
+
+
+def _load_constraints_safe(project_root, block_name: str) -> list:
+    """A block's accumulated constraints from the project database (never raises)."""
+    try:
+        return _db(project_root).constraints(block_name)
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _stale_specs(project_root, block_names) -> list:
+    """Blocks whose uArch spec predates a change to their contract edges."""
+    try:
+        return [{"block": b, "reason": "interface contract revised after the spec"}
+                for b in _db(project_root).stale_spec_blocks(list(block_names))]
+    except Exception:  # noqa: BLE001
+        return []
 
 
 def _callbacks(state: BlockState) -> list:
@@ -777,21 +791,18 @@ async def init_block_node(state: BlockState) -> dict:
         "block": block_name,
     })
 
-    # Initialize per-block disk state directory
+    # Per-block working directory (logs, previous_error.txt and other agent-facing
+    # artifacts). Lifecycle state lives in the project database.
     block_dir = Path(_pr(state)) / ".coresmith" / "blocks" / block_name
     block_dir.mkdir(parents=True, exist_ok=True)
-    # Reset transient files for a fresh block lifecycle
-    for fname in ("diagnosis.json", "attempt_history.json", "previous_error.txt"):
-        fpath = block_dir / fname
-        if fname.endswith(".json"):
-            fpath.write_text("[]" if "history" in fname else "{}")
-        else:
-            fpath.write_text("")
-    # constraints.json is an accumulating ledger, not a transient file: the
-    # chip-level revise/fix pins and operator-added rules are regeneration-
-    # proof by contract (Arm-U audit CRITICAL #2/#3), so only the per-lifecycle
-    # (debug-agent) entries are dropped here.
-    _prune_block_constraints(block_dir / "constraints.json")
+    (block_dir / "previous_error.txt").write_text("")
+    _bdb = _db(_pr(state))
+    _bdb.clear_diagnosis(block_name)
+    _bdb.clear_attempts(block_name)
+    # Constraints are an accumulating ledger: chip-level revise/fix pins and
+    # operator rules survive a fresh lifecycle; per-lifecycle (debug-agent)
+    # entries are dropped.
+    _bdb.prune_constraints(block_name, _PERSISTENT_CONSTRAINT_SOURCES)
 
     return {
         "attempt": 1,
@@ -1010,58 +1021,19 @@ def _apply_revise_uarch(pr: str, response: dict, contract_audit: dict,
                 )
         except OSError:
             continue
-        (Path(pr) / ".coresmith" / "blocks" / name
-         / "best_result.json").unlink(missing_ok=True)
+        _db(pr).clear_result(name, "best")
         # Arm-U audit CRITICAL #2/#3: spec appends are destroyed by the
         # per-tier re-spec, so a correctly-fixed bug regressed 4h later.
         # constraints.json survives regeneration and is read by the spec/RTL/
         # TB generators -- pin the revision there too.
         try:
-            bdir = Path(pr) / ".coresmith" / "blocks" / name
-            bdir.mkdir(parents=True, exist_ok=True)
-            cpath = bdir / "constraints.json"
-            try:
-                cur = json.loads(cpath.read_text()) if cpath.exists() else []
-            except (json.JSONDecodeError, OSError):
-                cur = []
-            cur.append({
-                "rule": (f"{stage.upper()} REVISION (regeneration-proof): "
-                         f"{feedback[:1500]}"),
-                "source": "chip_dv_revise",
-                "attempt": 0,
-            })
-            cpath.write_text(json.dumps(cur, indent=2))
-        except OSError:
+            _db(pr).add_constraint(
+                name, f"{stage.upper()} REVISION (regeneration-proof): {feedback[:1500]}",
+                source="chip_dv_revise", attempt=0)
+        except Exception:  # noqa: BLE001
             pass
         applied.append(name)
     return applied
-
-
-def _persist_chip_fix_constraint(pr: str, action: str, fix_desc: str,
-                                 response: dict, contract_audit: dict) -> None:
-    """Persist a chip-level fix into the affected blocks' constraints.json so
-    regeneration cannot silently resurrect the fixed bug."""
-    blocks = (response.get("affected_blocks")
-              or contract_audit.get("affected_blocks") or [])
-    for name in blocks:
-        bdir = Path(pr) / ".coresmith" / "blocks" / name
-        try:
-            bdir.mkdir(parents=True, exist_ok=True)
-            cpath = bdir / "constraints.json"
-            try:
-                cur = json.loads(cpath.read_text()) if cpath.exists() else []
-            except (json.JSONDecodeError, OSError):
-                cur = []
-            cur.append({
-                "rule": (f"Chip-level {action} applied during DV -- this "
-                         f"behavior MUST be preserved on any regeneration: "
-                         f"{fix_desc}"),
-                "source": "chip_dv_fix",
-                "attempt": 0,
-            })
-            cpath.write_text(json.dumps(cur, indent=2))
-        except OSError:
-            continue
 
 
 def _spec_pins_ignored() -> bool:
@@ -1379,12 +1351,11 @@ def _feas_override_scope(project_root, block_name: str) -> dict | None:
         str(c).strip().lower()
         for c in (scope.get("categories") or []) if str(c).strip()
     ]
-    sha = str(scope.get("contract_sha1") or "")
-    if sha:
-        # Only a KNOWN, DIFFERENT contract expires the override; an unhashable
-        # or absent contract ('' from the helper) must not silently revoke it.
-        current = _block_contract_sha1(project_root, block_name)
-        if current and current != sha:
+    ver = scope.get("contract_version")
+    if ver:
+        # Only a KNOWN, DIFFERENT contract version expires the override.
+        current = _db(project_root).block_contract_version(block_name)
+        if current and current != int(ver):
             return None
     return scope
 
@@ -1748,8 +1719,8 @@ async def review_uarch_spec_node(state: BlockState) -> dict:
                     json.dumps({
                         "gate": "uarch_feasibility",
                         "categories": _feas_issue_categories(blocking_issues),
-                        "contract_sha1": _block_contract_sha1(
-                            _pr(state), block_name),
+                        "contract_version": _db(_pr(state)).block_contract_version(
+                            block_name),
                         "ts": _time.time(),
                     }, indent=2),
                     encoding="utf-8")
@@ -1921,44 +1892,6 @@ _DETERMINISTIC_GATE_MARKERS = (
 )
 
 
-def _load_constraints_safe(constr_path) -> list:
-    """Load a block's accumulated ``constraints.json`` -- NEVER crash on it.
-
-    C21: a malformed constraints.json (observed on a regression sweep: a
-    concatenated ``[]`` + array producing ``JSONDecodeError: Extra data``)
-    must not terminate the RTL tier via an unguarded ``json.loads`` in
-    block_done_node. The learned-constraints cache is best-effort context, not
-    a correctness artifact -- fall back to no learned constraints (and try to
-    recover the trailing valid array if the file is a concatenation) rather
-    than crashing the whole pipeline. Pre-existing loader hardening, exposed by
-    the sweep's extra block-failure traffic.
-    """
-    import json as _j
-    try:
-        p = Path(constr_path)
-        if not p.exists():
-            return []
-        text = p.read_text()
-        try:
-            val = _j.loads(text)
-            return val if isinstance(val, list) else []
-        except _j.JSONDecodeError:
-            # Best-effort recovery: the writer concatenated documents; take the
-            # LAST valid top-level JSON array in the file if there is one.
-            import re as _re
-            arrays = _re.findall(r"\[.*?\]", text, _re.DOTALL)
-            for chunk in reversed(arrays):
-                try:
-                    v = _j.loads(chunk)
-                    if isinstance(v, list) and v:
-                        return v
-                except _j.JSONDecodeError:
-                    continue
-            return []
-    except OSError:
-        return []
-
-
 def _rtl_sha1(rtl_path) -> str:
     """sha1 of the RTL file bytes ('' on any error) -- sim-pass provenance.
 
@@ -1969,21 +1902,6 @@ def _rtl_sha1(rtl_path) -> str:
         import hashlib
 
         return hashlib.sha1(Path(rtl_path).read_bytes()).hexdigest()
-    except Exception:  # noqa: BLE001 - provenance is best-effort
-        return ""
-
-
-def _block_contract_sha1(project_root, block_name: str) -> str:
-    """sha1 of THIS block's frozen interface-contract slice ('' on any error).
-
-    C5: a sim-pass is provenance for the contract it was earned against, not
-    just the RTL bytes. Delegates to the canonical helper in pipeline_helpers
-    (single hashing scheme, shared with the block-model sidecar).
-    """
-    try:
-        from orchestrator.langgraph.pipeline_helpers import block_contract_sha1
-
-        return block_contract_sha1(project_root, block_name)
     except Exception:  # noqa: BLE001 - provenance is best-effort
         return ""
 
@@ -2003,7 +1921,7 @@ def _pass_provenance(project_root, block_name: str, rtl_path, tb_path) -> dict:
     prov = {
         "rtl_sha1": _rtl_sha1(rtl_path),
         "tb_sha1": _rtl_sha1(tb_path) if tb_path else "",
-        "contract_sha1": _block_contract_sha1(project_root, block_name),
+        "contract_version": _db(project_root).block_contract_version(block_name) or "",
     }
     return {k: v for k, v in prov.items() if v}
 
@@ -2053,14 +1971,12 @@ def _gate_retry_bypass(
         backup.write_text(rtl_path_obj.read_text())
     except OSError:
         backup = None
-    best_path = block_dir / "best_result.json"
     try:
-        best = json.loads(best_path.read_text()) if best_path.exists() else {}
+        _upd = {f"{kind}_retry_attempt": attempt}
         if backup is not None:
-            best[f"{kind}_bypass_backup"] = str(backup)
-        best[f"{kind}_retry_attempt"] = attempt
-        best_path.write_text(json.dumps(best))
-    except (OSError, json.JSONDecodeError):
+            _upd[f"{kind}_bypass_backup"] = str(backup)
+        _db(pr).update_result(block_name, "best", **_upd)
+    except Exception:  # noqa: BLE001
         pass
     # Invalidate sim caches (no netlist cache exists -- synth runs fresh).
     import shutil as _sh
@@ -2131,13 +2047,11 @@ def _snapshot_passing_block(
                 dst = snap / tb_obj.name
                 dst.write_text(tb_obj.read_text())
                 saved["tb"] = str(dst)
-        best_path = block_dir / "best_result.json"
-        if best_path.exists() and saved:
-            best = json.loads(best_path.read_text())
-            hist = best.get("passing_snapshots", [])
+        best = _db(pr).result(block_name, "best")
+        if best and saved:
+            hist = list(best.get("passing_snapshots", []))
             hist.append({"attempt": attempt, "reason": reason, **saved})
-            best["passing_snapshots"] = hist
-            best_path.write_text(json.dumps(best))
+            _db(pr).update_result(block_name, "best", passing_snapshots=hist)
         log(f"  [RTL] snapshot before regen: {block_name} passing artifacts "
             f"saved to {snap} ({reason}) -- recoverable if the regen is worse",
             YELLOW)
@@ -2170,9 +2084,7 @@ async def generate_rtl_node(state: BlockState) -> dict:
         "block": block_name, "attempt": attempt,
     })
 
-    best_result_path = (
-        Path(_pr(state)) / ".coresmith" / "blocks" / block_name / "best_result.json"
-    )
+    _best_prev = _db(_pr(state)).result(block_name, "best") or {}
 
     with _tracer.start_as_current_span(
         f"Generate RTL [{block_name}] attempt {attempt}"
@@ -2186,9 +2098,9 @@ async def generate_rtl_node(state: BlockState) -> dict:
         # PPA forever (deadlock). Keyed on live state.ppa_ok (not best_result), so
         # a non-PPA re-entry (ppa_ok None/True) still reuses the passing RTL.
         ppa_retry = state.get("ppa_ok") is False
-        if attempt > 1 and rtl_path_obj.exists() and best_result_path.exists():
+        if attempt > 1 and rtl_path_obj.exists() and _best_prev:
             try:
-                best = json.loads(best_result_path.read_text())
+                best = dict(_best_prev)
                 # dv-hardening-10: a sim-pass is provenance for the RTL it
                 # passed WITH. If the on-disk RTL hash differs from the
                 # recorded one, the pass is stale -- do not reuse it (the
@@ -2222,10 +2134,10 @@ async def generate_rtl_node(state: BlockState) -> dict:
                             _pr(state), block_name, block, rtl_path_obj,
                             attempt, "tb_sha1_stale")
                         best["sim_passed"] = False
-                _rec_ct = best.get("contract_sha1")
+                _rec_ct = best.get("contract_version")
                 if best.get("sim_passed") and _rec_ct:
-                    _cur_ct = _block_contract_sha1(_pr(state), block_name)
-                    if _cur_ct and _cur_ct != _rec_ct:
+                    _cur_ct = _db(_pr(state)).block_contract_version(block_name)
+                    if _cur_ct and _cur_ct != int(_rec_ct):
                         log(f"  [RTL] best_result sim-pass predates a revision "
                             f"of this block's interface contract -- ignoring "
                             f"stale pass, regenerating {block_name}", YELLOW)
@@ -2237,7 +2149,8 @@ async def generate_rtl_node(state: BlockState) -> dict:
                 # rejection (stage/storage/ifdef lint)? Reusing the same
                 # sim-passing RTL re-fails that gate forever -- the skip_regen
                 # livelock. Detected from the block's previous_error.txt.
-                det_gate_retry = _deterministic_gate_retry(best_result_path.parent)
+                det_gate_retry = _deterministic_gate_retry(
+                    Path(_pr(state)) / ".coresmith" / "blocks" / block_name)
                 if best.get("sim_passed") and ppa_retry:
                     # PPA-retry deadlock bypass: back up the passing RTL +
                     # invalidate sim caches, then fall through to REGENERATE.
@@ -2278,7 +2191,7 @@ async def generate_rtl_node(state: BlockState) -> dict:
                         "lint_clean": True,
                         "force_regen_tb": force_tb,
                     }
-            except (json.JSONDecodeError, OSError):
+            except Exception:  # noqa: BLE001
                 pass
 
         if (attempt == 1 and rtl_path_obj.exists()
@@ -2666,7 +2579,7 @@ async def _maybe_squeeze_throughput(state, block, block_name, rtl_path, tb_path,
                     # keep best_result.json + throughput fact in sync with the
                     # kept RTL (rtl_sha1 gates the reuse-skip logic).
                     try:
-                        (block_dir / "best_result.json").write_text(json.dumps({
+                        _db(_pr(state)).set_result(block_name, "best", {
                             "sim_passed": True, "attempt": attempt,
                             "tests_passed": new_sim.get("tests_passed", 0),
                             "tests_total": new_sim.get("tests_total", 0),
@@ -2676,8 +2589,8 @@ async def _maybe_squeeze_throughput(state, block, block_name, rtl_path, tb_path,
                             # (RTL + TB + contract), same as the sim node.
                             **_pass_provenance(
                                 _pr(state), block_name, rtl_path, tb_path),
-                        }))
-                    except OSError:
+                        })
+                    except Exception:  # noqa: BLE001
                         pass
             write_graph_event(_pr(state), "Throughput Squeeze", "llm_end", {
                 "block": block_name, "round": rnd, "improved": improved,
@@ -2993,8 +2906,7 @@ async def generate_testbench_node(state: BlockState) -> dict:
                 span.set_attribute("passed", True)
                 span.set_attribute("tb_fixes", sim_attempt)
 
-                best_path = block_dir / "best_result.json"
-                best_path.write_text(json.dumps({
+                _db(_pr(state)).set_result(block_name, "best", {
                     "sim_passed": True,
                     "attempt": attempt,
                     "tests_passed": sim_result.get("tests_passed", 0),
@@ -3010,7 +2922,7 @@ async def generate_testbench_node(state: BlockState) -> dict:
                     # burned attempts against changed RTL that never re-ran;
                     # a contract widening left a stale-era pass honored forever).
                     **_pass_provenance(_pr(state), block_name, rtl_path, tb_path),
-                }))
+                })
                 break
 
             sim_log = sim_result.get("log", "")
@@ -4038,9 +3950,9 @@ def _container_leaf_map(project_root: str, block_names: list) -> dict:
     out: dict = {}
     for name in block_names:
         try:
-            br = json.loads(
-                (Path(project_root) / ".coresmith" / "blocks" / name
-                 / "best_result.json").read_text())
+            br = _db(project_root).result(name, "best")
+            if not br:
+                continue
             # Resolve the block's measured RTL: rtl_target when recorded;
             # otherwise glob rtl/**/<name>.v and prefer the file whose sha1
             # matches best_result.rtl_sha1 (older runs record the hash but
@@ -4790,7 +4702,6 @@ async def diagnose_node(state: BlockState) -> dict:
     # instead of looping -- the diagnose node had already flagged needs_human.
     _wall_budget = float(os.environ.get("CORESMITH_BLOCK_WALL_BUDGET_S", "0") or 0)
     if _wall_budget > 0:
-        import json as _jw
         import time as _time
         _seen = block_dir / "_first_seen.txt"
         if not _seen.exists():
@@ -4819,7 +4730,7 @@ async def diagnose_node(state: BlockState) -> dict:
                     "is_testbench_bug": False, "local_fix_possible": False,
                     "constraints": [], "affected_blocks": [block_name],
                 }
-                (block_dir / "diagnosis.json").write_text(_jw.dumps(_wb, indent=2))
+                _db(_pr(state)).set_diagnosis(block_name, _wb, attempt=state["attempt"])
                 write_graph_event(_pr(state), "Diagnose Failure",
                                   "graph_node_exit", {
                     "block": block_name, "category": "WALL_BUDGET_EXCEEDED",
@@ -4852,14 +4763,12 @@ async def diagnose_node(state: BlockState) -> dict:
             "constraints": [],
             "affected_blocks": [],
         }
-        _ah_path = block_dir / "attempt_history.json"
-        _hist = _json.loads(_ah_path.read_text()) if _ah_path.exists() else []
-        _hist.append({
+        _db(_pr(state)).record_attempt(block_name, {
             "attempt": state["attempt"],
             "error": error_log[:500],
             "category": "SIM_TIMEOUT",
         })
-        _ah_path.write_text(_json.dumps(_hist, indent=2))
+        _hist = _db(_pr(state)).attempt_history(block_name)
         # Bounded exactly like _route_decision's Rule -1: this short-circuit
         # returns before the router ever sees the category, so the cap has to
         # be enforced here or a genuinely-hung block retries forever (the sim
@@ -4879,7 +4788,7 @@ async def diagnose_node(state: BlockState) -> dict:
             _to_diag["diagnosis"] += (
                 f" Retried {_to_count} time(s) with an extended cap without "
                 f"producing a verdict -- the block is hung or far too slow.")
-        (block_dir / "diagnosis.json").write_text(_json.dumps(_to_diag, indent=2))
+        _db(_pr(state)).set_diagnosis(block_name, _to_diag, attempt=state["attempt"])
         write_graph_event(_pr(state), "Diagnose Failure", "graph_node_exit", {
             "block": block_name, "category": "SIM_TIMEOUT",
             "confidence": 0.0, "needs_human": False,
@@ -4909,15 +4818,13 @@ async def diagnose_node(state: BlockState) -> dict:
             "affected_blocks": [],
         }
         import json as _json
-        _ah_path = block_dir / "attempt_history.json"
-        history = _json.loads(_ah_path.read_text()) if _ah_path.exists() else []
-        history.append({
+        _db(_pr(state)).record_attempt(block_name, {
             "attempt": state["attempt"],
             "error": error_log[:500],
             "category": "INFRASTRUCTURE_ERROR",
         })
-        _ah_path.write_text(_json.dumps(history, indent=2))
-        (block_dir / "diagnosis.json").write_text(_json.dumps(infra_diag, indent=2))
+        history = _db(_pr(state)).attempt_history(block_name)
+        _db(_pr(state)).set_diagnosis(block_name, infra_diag, attempt=state["attempt"])
         write_graph_event(_pr(state), "Diagnose Failure", "graph_node_exit", {
             "block": block_name, "category": "INFRASTRUCTURE_ERROR",
             "confidence": 0.0, "needs_human": False,
@@ -4970,7 +4877,7 @@ async def diagnose_node(state: BlockState) -> dict:
                 "is_testbench_bug": False, "local_fix_possible": False,
                 "constraints": [], "affected_blocks": [block_name],
             }
-            (block_dir / "diagnosis.json").write_text(_json.dumps(_sig_diag, indent=2))
+            _db(_pr(state)).set_diagnosis(block_name, _sig_diag, attempt=state["attempt"])
             write_graph_event(_pr(state), "Diagnose Failure", "graph_node_exit", {
                 "block": block_name, "category": "UARCH_SPEC_ERROR",
                 "confidence": 1.0, "needs_human": True,
@@ -5037,15 +4944,13 @@ async def diagnose_node(state: BlockState) -> dict:
         log(f"  [DIAGNOSE] Fast-path: {_fast_diag['category']} "
             f"(skipped opus LLM call)", GREEN)
         import json as _json
-        _ah_path = block_dir / "attempt_history.json"
-        history = _json.loads(_ah_path.read_text()) if _ah_path.exists() else []
-        history.append({
+        _db(_pr(state)).record_attempt(block_name, {
             "attempt": state["attempt"],
             "error": error_log[:500],
             "category": _fast_diag["category"],
         })
-        _ah_path.write_text(_json.dumps(history, indent=2))
-        (block_dir / "diagnosis.json").write_text(_json.dumps(_fast_diag, indent=2))
+        history = _db(_pr(state)).attempt_history(block_name)
+        _db(_pr(state)).set_diagnosis(block_name, _fast_diag, attempt=state["attempt"])
         fast_action = "retry_tb" if _fast_diag.get("is_testbench_bug") else "retry_rtl"
         write_graph_event(_pr(state), "Diagnose Failure", "graph_node_exit", {
             "block": block_name, "category": _fast_diag["category"],
@@ -5071,7 +4976,7 @@ async def diagnose_node(state: BlockState) -> dict:
 
     import json as _json
 
-    (block_dir / "diagnosis.json").write_text(_json.dumps(diag, indent=2))
+    _db(_pr(state)).set_diagnosis(block_name, diag, attempt=state["attempt"])
 
     # Route the structured diagnosis into previous_error.txt so the REGEN
     # (rtl_generator reads previous_error.txt, not diagnosis.json) gets the
@@ -5080,15 +4985,13 @@ async def diagnose_node(state: BlockState) -> dict:
     if _route_diagnosis_to_previous_error(block_dir, diag, error_log):
         log("  [DIAGNOSE] Routed actionable diagnosis -> previous_error.txt", GREEN)
 
-    _ah_path = block_dir / "attempt_history.json"
-    history = _json.loads(_ah_path.read_text()) if _ah_path.exists() else []
-    history.append({
+    _db(_pr(state)).record_attempt(block_name, {
         "attempt": state["attempt"],
         "phase": phase,
         "error": error_log[:500],
         "category": category,
     })
-    _ah_path.write_text(_json.dumps(history, indent=2))
+    history = _db(_pr(state)).attempt_history(block_name)
 
     action = _route_decision(
         debug_result=diag,
@@ -5248,10 +5151,8 @@ async def decide_node(state: BlockState) -> dict:
             # exhausting attempts on repeated timeouts.
             _diag_cat = None
             try:
-                _dp = Path(_pr(state)) / ".coresmith" / "blocks" / block_name / "diagnosis.json"
-                if _dp.exists():
-                    _diag_cat = json.loads(_dp.read_text()).get("category")
-            except (json.JSONDecodeError, OSError):
+                _diag_cat = (_db(_pr(state)).diagnosis(block_name) or {}).get("category")
+            except Exception:  # noqa: BLE001
                 _diag_cat = None
             if _diag_cat == "SIM_TIMEOUT":
                 log(f"  [RETRY] SIM_TIMEOUT -- re-running attempt {state['attempt']} "
@@ -5273,17 +5174,11 @@ async def decide_node(state: BlockState) -> dict:
                 update["attempt"] = new_attempt
                 log(f"  [RETRY] Attempt {new_attempt}/{state['max_attempts']}", YELLOW)
 
-                block_dir = Path(_pr(state)) / ".coresmith" / "blocks" / block_name
-                diag_path = block_dir / "diagnosis.json"
-                if diag_path.exists():
-                    try:
-                        diag = json.loads(diag_path.read_text())
-                        if diag.get("category") == "INFRASTRUCTURE_ERROR":
-                            backoff_s = min(30 * (2 ** (new_attempt - 1)), 120)
-                            log(f"  [RETRY] Backing off {backoff_s}s after infra failure", YELLOW)
-                            await asyncio.sleep(backoff_s)
-                    except (json.JSONDecodeError, OSError):
-                        pass
+                diag = _db(_pr(state)).diagnosis(block_name) or {}
+                if diag.get("category") == "INFRASTRUCTURE_ERROR":
+                    backoff_s = min(30 * (2 ** (new_attempt - 1)), 120)
+                    log(f"  [RETRY] Backing off {backoff_s}s after infra failure", YELLOW)
+                    await asyncio.sleep(backoff_s)
 
         span.set_attribute("final_decision", action)
 
@@ -5322,17 +5217,13 @@ async def ask_human_node(state: BlockState) -> dict:
     block_dir = Path(_pr(state)) / ".coresmith" / "blocks" / block_name
     block_dir.mkdir(parents=True, exist_ok=True)
 
-    diag_path = block_dir / "diagnosis.json"
-    diag = _json.loads(diag_path.read_text()) if diag_path.exists() else {}
-
-    ah_path = block_dir / "attempt_history.json"
-    attempt_history = _json.loads(ah_path.read_text()) if ah_path.exists() else []
+    diag = _db(_pr(state)).diagnosis(block_name) or {}
+    attempt_history = _db(_pr(state)).attempt_history(block_name)
 
     error_path = block_dir / "previous_error.txt"
     error_text = error_path.read_text() if error_path.exists() else ""
 
-    constr_path = block_dir / "constraints.json"
-    constraints = _load_constraints_safe(constr_path)
+    constraints = _load_constraints_safe(_pr(state), block_name)
 
     category_counts: dict[str, int] = {}
     for entry in attempt_history:
@@ -5432,20 +5323,13 @@ async def ask_human_node(state: BlockState) -> dict:
     updated: dict = {"human_response": response}
 
     if action == "add_constraint" and response.get("constraint"):
-        constraints.append({
-            "rule": response["constraint"],
-            "source": "human",
-            "attempt": state["attempt"],
-        })
-        constr_path.write_text(_json.dumps(constraints, indent=2))
+        _db(_pr(state)).add_constraint(
+            block_name, response["constraint"], source="human", attempt=state["attempt"])
 
     if action == "fix_rtl" and response.get("description"):
-        constraints.append({
-            "rule": f"Outer-agent RTL fix applied: {response['description']}",
-            "source": "human",
-            "attempt": state["attempt"],
-        })
-        constr_path.write_text(_json.dumps(constraints, indent=2))
+        _db(_pr(state)).add_constraint(
+            block_name, f"Outer-agent RTL fix applied: {response['description']}",
+            source="human", attempt=state["attempt"])
 
     return updated
 
@@ -5481,8 +5365,7 @@ async def block_done_node(state: BlockState) -> dict:
     step_log_paths = dict(state.get("step_log_paths") or {})
 
     block_dir = Path(_pr(state)) / ".coresmith" / "blocks" / block_name
-    constr_path = block_dir / "constraints.json"
-    constraints = _load_constraints_safe(constr_path)
+    constraints = _load_constraints_safe(_pr(state), block_name)
 
     # When this completion event happened. `completed_blocks` is append-only, so
     # membership alone cannot tell a LEFTOVER interrupt (the graph moved past it
@@ -6641,12 +6524,9 @@ async def integration_check_node(state: OrchestratorState) -> dict:
             "CORESMITH_INTEGRATION_STALENESS_GATE", ""
         ).strip().lower() not in {"0", "false", "no", "off"}
         if _stale_gate_on:
-            from orchestrator.langgraph.pipeline_helpers import (
-                stale_uarch_spec_blocks,
-            )
             _passed_names = [b.get("name", "") for b in passed_blocks
                              if b.get("name")]
-            _stale = stale_uarch_spec_blocks(pr, _passed_names)
+            _stale = _stale_specs(pr, _passed_names)
             if _stale:
                 _stale_names = [s["block"] for s in _stale]
                 log(f"  [INTEGRATION] STALE uarch specs: {_stale_names} -- "
@@ -6697,7 +6577,7 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                                       "graph_node_exit", result)
                     return {"integration_result": result}
                 else:  # retry (after out-of-band re-spec) -> re-check NOW
-                    _stale2 = stale_uarch_spec_blocks(pr, _passed_names)
+                    _stale2 = _stale_specs(pr, _passed_names)
                     if _stale2:
                         _s2 = [s["block"] for s in _stale2]
                         # Arm-F live finding: a retry cannot refresh stamps,
@@ -7910,10 +7790,9 @@ def _route_uarch_patch_on_retry(project_root: str, block_names: list[str]) -> li
     for name in block_names:
         try:
             block_dir = Path(project_root) / ".coresmith" / "blocks" / name
-            diag_path = block_dir / "diagnosis.json"
-            if not diag_path.exists():
+            diag = _db(project_root).diagnosis(name)
+            if not diag:
                 continue
-            diag = json.loads(diag_path.read_text())
             uarch_patch = diag.get("uarch_patch")
             if not isinstance(uarch_patch, dict) or not uarch_patch.get(
                     "sections_to_replace"):
@@ -7956,15 +7835,11 @@ def _route_uarch_patch_on_retry(project_root: str, block_names: list[str]) -> li
             # the skip-regen fast path would reuse the now-stale RTL against the
             # revised µarch. Invalidate the recorded sim-pass so the re-validate
             # pass REGENERATES the RTL from the revised spec.
-            best_path = block_dir / "best_result.json"
             try:
-                if best_path.exists():
-                    _best = json.loads(best_path.read_text())
-                    if isinstance(_best, dict):
-                        _best["sim_passed"] = False
-                        _best["uarch_patch_invalidated"] = True
-                        best_path.write_text(json.dumps(_best, indent=2))
-            except (json.JSONDecodeError, OSError):
+                if _db(project_root).result(name, "best"):
+                    _db(project_root).update_result(
+                        name, "best", sim_passed=False, uarch_patch_invalidated=True)
+            except Exception:  # noqa: BLE001
                 pass
             marker.write_text(f"confidence={conf:g}; sections_applied={n_applied}\n")
             patched.append(name)
@@ -8156,8 +8031,11 @@ def _declared_dimensions(project_root: str) -> dict:
     except Exception:  # noqa: BLE001
         pass
     try:
-        for fname in ("ers_spec.json", "prd_spec.json", "block_specs.json",
-                      "block_queue.json"):
+        try:
+            _collect_declared_dims(_db(project_root).block_specs(), dims)
+        except Exception:  # noqa: BLE001
+            pass
+        for fname in ("ers_spec.json", "prd_spec.json"):
             p = root / ".coresmith" / fname
             if p.exists():
                 try:

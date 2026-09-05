@@ -528,7 +528,7 @@ def _persist_block_diagram(project_root: str, bd_result: dict) -> None:
     """Write the block diagram to disk as JSON and Markdown.
 
     Files written:
-      .coresmith/block_diagram.json  -- structured block diagram for programmatic use
+      .coresmith/project.sqlite      -- the block registry (block_diagram.json is a view)
       arch/block_diagram.md     -- human-readable Markdown
     """
     coresmith_dir = Path(project_root) / ".coresmith"
@@ -536,9 +536,12 @@ def _persist_block_diagram(project_root: str, bd_result: dict) -> None:
     arch_dir = Path(project_root) / ARCH_DOC_DIR
     arch_dir.mkdir(parents=True, exist_ok=True)
 
+    from orchestrator.state_store.project_db import open_project
     from orchestrator.utils import atomic_write
 
-    atomic_write(coresmith_dir / "block_diagram.json", json.dumps(bd_result, indent=2, default=str))
+    # The database is canonical; it regenerates the read-only
+    # .coresmith/block_diagram.json view.
+    open_project(project_root).import_block_diagram(bd_result)
 
     blocks = bd_result.get("blocks", [])
     connections = bd_result.get("connections", [])
@@ -1830,11 +1833,12 @@ async def finalize_node(state: ArchGraphState) -> dict:
         arch_state.block_specs = block_specs
         save_state(arch_state, project_root)
 
-        # Write block_specs.json for RTL pipeline handoff (atomic write)
-        from orchestrator.utils import atomic_write
+        # Record the block queue for the RTL pipeline handoff (the database
+        # regenerates the read-only block_specs.json view).
+        from orchestrator.state_store.project_db import open_project
 
+        open_project(project_root).import_block_specs(block_specs)
         specs_path = Path(project_root) / ".coresmith" / "block_specs.json"
-        atomic_write(specs_path, json.dumps(block_specs, indent=2))
 
         span.set_attribute("block_count", len(block_specs))
         span.set_attribute("specs_path", str(specs_path))
