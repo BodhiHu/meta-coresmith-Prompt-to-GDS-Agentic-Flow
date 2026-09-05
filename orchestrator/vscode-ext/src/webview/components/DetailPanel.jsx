@@ -960,7 +960,7 @@ function ResultSummaryCard({ metrics, index, total }) {
   );
 }
 
-function TrajectorySteps({ steps }) {
+function TrajectorySteps({ steps, onOpenCall }) {
   // Count for the N/total badge; combine LLM + tool but show them as a
   // single ordered list.
   const total = steps.length;
@@ -976,6 +976,7 @@ function TrajectorySteps({ steps }) {
         // llm_call / llm_call_streaming
         const call = {
           id: step._span?.id || `step-${i}`,
+          callId: step.call_id || null,
           model: step.model || 'LLM',
           runName: step.run_name || '',
           heartbeats: step.heartbeats || [],
@@ -992,7 +993,7 @@ function TrajectorySteps({ steps }) {
         };
         return call.streaming
           ? <StreamingLLMCard key={`stream-${i}`} call={call} />
-          : <LLMCallCard key={`llm-${i}`} call={call} index={i} total={total} />;
+          : <LLMCallCard key={`llm-${i}`} call={call} index={i} total={total} onOpenCall={onOpenCall} />;
       })}
     </div>
   );
@@ -1036,7 +1037,7 @@ function CodexTurn({ turn, index }) {
 
 /* ── LLM Call Card ───────────────────────────────────────── */
 
-function LLMCallCard({ call, index, total }) {
+function LLMCallCard({ call, index, total, onOpenCall }) {
   const statusSymbol =
     call.status === 'ok' ? '\u2713' : call.status === 'error' ? '\u2717' : '\u2014';
   const statusCls =
@@ -1071,6 +1072,16 @@ function LLMCallCard({ call, index, total }) {
           <span className={`llm-stat llm-stat-${statusCls}`}>
             {statusSymbol}
           </span>
+          {call.callId && onOpenCall && (
+            <button
+              type="button"
+              className="rv-btn rv-btn-small llm-open-verbose"
+              onClick={() => onOpenCall(call.callId)}
+              title="Open the verbose call viewer (full prompts, every command and file write)"
+            >
+              Verbose
+            </button>
+          )}
         </span>
       </div>
 
@@ -1662,15 +1673,39 @@ const DetailPanel = React.memo(function DetailPanel({
   onClose,
   width,
   flowLayout,
+  onOpenBlock,
+  onOpenCall,
 }) {
   const [activeTabKey, setActiveTabKey] = useState(null);
+  const [blockFilter, setBlockFilter] = useState(null);
   const scrollRef = useRef(null);
   const savedScrollRef = useRef(0);
 
   const isHITLNode = node?.uses_interrupt === true;
 
-  // Re-group traces by (block_name, attempt) for multi-block nodes
-  const tabGroups = React.useMemo(() => regroupTraces(traceData), [traceData]);
+  // Re-group traces by (block_name, attempt).  A graph node such as
+  // "Generate RTL" runs for every block, so the raw groups interleave
+  // blocks; the panel shows ONE block at a time (the clicked row's block,
+  // else the most recent one) with a selector to switch.
+  const allGroups = React.useMemo(() => regroupTraces(traceData), [traceData]);
+  const blockNames = React.useMemo(() => {
+    const names = [];
+    for (const g of allGroups) {
+      if (g.blockName && !names.includes(g.blockName)) names.push(g.blockName);
+    }
+    return names;
+  }, [allGroups]);
+  const effectiveBlock = React.useMemo(() => {
+    if (blockNames.length <= 1) return null;
+    if (blockFilter && blockNames.includes(blockFilter)) return blockFilter;
+    if (node?.block && blockNames.includes(node.block)) return node.block;
+    return blockNames[blockNames.length - 1];
+  }, [blockNames, blockFilter, node?.block]);
+  const tabGroups = React.useMemo(() => {
+    if (!effectiveBlock) return allGroups;
+    return allGroups.filter((g) => g.blockName === effectiveBlock);
+  }, [allGroups, effectiveBlock]);
+  useEffect(() => { setBlockFilter(null); }, [node?.id, node?.block]);
 
   // Save scroll position before data changes cause a re-render
   useLayoutEffect(() => {
@@ -1786,6 +1821,31 @@ const DetailPanel = React.memo(function DetailPanel({
         <div className="llm-description">{node.description}</div>
       )}
 
+      {/* One block at a time */}
+      {blockNames.length > 1 && (
+        <div className="detail-block-select">
+          <span>Block</span>
+          <select value={effectiveBlock || ''} onChange={(e) => setBlockFilter(e.target.value)}>
+            {blockNames.map((b) => (
+              <option key={b} value={b}>{b.replace(/_/g, ' ')}</option>
+            ))}
+          </select>
+          {onOpenBlock && effectiveBlock && (
+            <button type="button" className="rv-btn rv-btn-small" onClick={() => onOpenBlock(effectiveBlock, 'trajectory')} title="Open this block in the Blocks view">
+              Open block
+            </button>
+          )}
+        </div>
+      )}
+      {blockNames.length === 1 && onOpenBlock && (
+        <div className="detail-block-select">
+          <span>Block: {blockNames[0].replace(/_/g, ' ')}</span>
+          <button type="button" className="rv-btn rv-btn-small" onClick={() => onOpenBlock(blockNames[0], 'trajectory')} title="Open this block in the Blocks view">
+            Open block
+          </button>
+        </div>
+      )}
+
       {/* Trace section */}
       <div className="trace-section">
         {/* Loading */}
@@ -1893,7 +1953,7 @@ const DetailPanel = React.memo(function DetailPanel({
             {/* Steps (LLM calls + tool runs interleaved) */}
             <div className="trace-content" ref={scrollRef}>
               {activeGroup?.steps && activeGroup.steps.length > 0 ? (
-                <TrajectorySteps steps={activeGroup.steps} />
+                <TrajectorySteps steps={activeGroup.steps} onOpenCall={onOpenCall} />
               ) : llmCalls.length > 0 ? (
                 <div className="llm-call-list">
                   {llmCalls.map((call, i) => (

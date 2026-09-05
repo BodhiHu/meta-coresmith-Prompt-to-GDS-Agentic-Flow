@@ -7,8 +7,7 @@ var __hasOwnProp = Object.prototype.hasOwnProperty;
 var __require = /* @__PURE__ */ ((x) => typeof require !== "undefined" ? require : typeof Proxy !== "undefined" ? new Proxy(x, {
   get: (a, b) => (typeof require !== "undefined" ? require : a)[b]
 }) : x)(function(x) {
-  if (typeof require !== "undefined")
-    return require.apply(this, arguments);
+  if (typeof require !== "undefined") return require.apply(this, arguments);
   throw Error('Dynamic require of "' + x + '" is not supported');
 });
 var __commonJS = (cb, mod) => function __require2() {
@@ -1090,7 +1089,7 @@ var require_react_development = __commonJS({
           }
           return dispatcher.useContext(Context);
         }
-        function useState11(initialState2) {
+        function useState18(initialState2) {
           var dispatcher = resolveDispatcher();
           return dispatcher.useState(initialState2);
         }
@@ -1098,11 +1097,11 @@ var require_react_development = __commonJS({
           var dispatcher = resolveDispatcher();
           return dispatcher.useReducer(reducer, initialArg, init2);
         }
-        function useRef10(initialValue) {
+        function useRef15(initialValue) {
           var dispatcher = resolveDispatcher();
           return dispatcher.useRef(initialValue);
         }
-        function useEffect10(create2, deps) {
+        function useEffect16(create2, deps) {
           var dispatcher = resolveDispatcher();
           return dispatcher.useEffect(create2, deps);
         }
@@ -1114,11 +1113,11 @@ var require_react_development = __commonJS({
           var dispatcher = resolveDispatcher();
           return dispatcher.useLayoutEffect(create2, deps);
         }
-        function useCallback9(callback, deps) {
+        function useCallback14(callback, deps) {
           var dispatcher = resolveDispatcher();
           return dispatcher.useCallback(callback, deps);
         }
-        function useMemo7(create2, deps) {
+        function useMemo14(create2, deps) {
           var dispatcher = resolveDispatcher();
           return dispatcher.useMemo(create2, deps);
         }
@@ -1881,19 +1880,19 @@ var require_react_development = __commonJS({
         exports.memo = memo5;
         exports.startTransition = startTransition;
         exports.unstable_act = act;
-        exports.useCallback = useCallback9;
+        exports.useCallback = useCallback14;
         exports.useContext = useContext2;
         exports.useDebugValue = useDebugValue2;
         exports.useDeferredValue = useDeferredValue;
-        exports.useEffect = useEffect10;
+        exports.useEffect = useEffect16;
         exports.useId = useId;
         exports.useImperativeHandle = useImperativeHandle;
         exports.useInsertionEffect = useInsertionEffect;
         exports.useLayoutEffect = useLayoutEffect4;
-        exports.useMemo = useMemo7;
+        exports.useMemo = useMemo14;
         exports.useReducer = useReducer;
-        exports.useRef = useRef10;
-        exports.useState = useState11;
+        exports.useRef = useRef15;
+        exports.useState = useState18;
         exports.useSyncExternalStore = useSyncExternalStore;
         exports.useTransition = useTransition;
         exports.version = ReactVersion;
@@ -2389,9 +2388,9 @@ var require_react_dom_development = __commonJS({
         if (typeof __REACT_DEVTOOLS_GLOBAL_HOOK__ !== "undefined" && typeof __REACT_DEVTOOLS_GLOBAL_HOOK__.registerInternalModuleStart === "function") {
           __REACT_DEVTOOLS_GLOBAL_HOOK__.registerInternalModuleStart(new Error());
         }
-        var React23 = require_react();
+        var React31 = require_react();
         var Scheduler = require_scheduler();
-        var ReactSharedInternals = React23.__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED;
+        var ReactSharedInternals = React31.__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED;
         var suppressWarning = false;
         function setSuppressWarning(newSuppressWarning) {
           {
@@ -2440,7 +2439,7 @@ var require_react_dom_development = __commonJS({
         var HostPortal = 4;
         var HostComponent = 5;
         var HostText = 6;
-        var Fragment10 = 7;
+        var Fragment16 = 7;
         var Mode = 8;
         var ContextConsumer = 9;
         var ContextProvider = 10;
@@ -2611,6 +2610,7 @@ var require_react_dom_development = __commonJS({
           }
           switch (typeof value) {
             case "function":
+            // $FlowIssue symbol is perfectly valid here
             case "symbol":
               return true;
             case "boolean": {
@@ -3596,7 +3596,7 @@ var require_react_dom_development = __commonJS({
               return "DehydratedFragment";
             case ForwardRef:
               return getWrappedName$1(type, type.render, "ForwardRef");
-            case Fragment10:
+            case Fragment16:
               return "Fragment";
             case HostComponent:
               return type;
@@ -3625,6 +3625,7 @@ var require_react_dom_development = __commonJS({
               return "SuspenseList";
             case TracingMarkerComponent:
               return "TracingMarker";
+            // The display name for this tags come from the user-provided type:
             case ClassComponent:
             case FunctionComponent:
             case IncompleteClassComponent:
@@ -3996,7 +3997,7 @@ var require_react_dom_development = __commonJS({
           {
             if (props.value == null) {
               if (typeof props.children === "object" && props.children !== null) {
-                React23.Children.forEach(props.children, function(child) {
+                React31.Children.forEach(props.children, function(child) {
                   if (child == null) {
                     return;
                   }
@@ -4622,6 +4623,10 @@ var require_react_dom_development = __commonJS({
             return typeof props.is === "string";
           }
           switch (tagName) {
+            // These are reserved SVG and MathML elements.
+            // We don't mind this list too much because we expect it to never grow.
+            // The alternative is to track the namespace in a few places which is convoluted.
+            // https://w3c.github.io/webcomponents/spec/custom/#custom-elements-core-concepts
             case "annotation-xml":
             case "color-profile":
             case "font-face":
@@ -7451,6 +7456,7 @@ var require_react_dom_development = __commonJS({
         }
         function getEventPriority(domEventName) {
           switch (domEventName) {
+            // Used by SimpleEventPlugin:
             case "cancel":
             case "click":
             case "close":
@@ -7486,14 +7492,20 @@ var require_react_dom_development = __commonJS({
             case "touchend":
             case "touchstart":
             case "volumechange":
+            // Used by polyfills:
+            // eslint-disable-next-line no-fallthrough
             case "change":
             case "selectionchange":
             case "textInput":
             case "compositionstart":
             case "compositionend":
             case "compositionupdate":
+            // Only enableCreateEventHandleAPI:
+            // eslint-disable-next-line no-fallthrough
             case "beforeblur":
             case "afterblur":
+            // Not used by React but could be by user code:
+            // eslint-disable-next-line no-fallthrough
             case "beforeinput":
             case "blur":
             case "fullscreenchange":
@@ -7518,6 +7530,8 @@ var require_react_dom_development = __commonJS({
             case "toggle":
             case "touchmove":
             case "wheel":
+            // Not used by React but could be by user code:
+            // eslint-disable-next-line no-fallthrough
             case "mouseenter":
             case "mouseleave":
             case "pointerenter":
@@ -7749,8 +7763,7 @@ var require_react_dom_development = __commonJS({
           button: 0,
           buttons: 0,
           relatedTarget: function(event) {
-            if (event.relatedTarget === void 0)
-              return event.fromElement === event.srcElement ? event.toElement : event.fromElement;
+            if (event.relatedTarget === void 0) return event.fromElement === event.srcElement ? event.toElement : event.fromElement;
             return event.relatedTarget;
           },
           movementX: function(event) {
@@ -8466,43 +8479,42 @@ var require_react_dom_development = __commonJS({
           var indexWithinFocus = 0;
           var node = outerNode;
           var parentNode = null;
-          outer:
+          outer: while (true) {
+            var next = null;
             while (true) {
-              var next = null;
-              while (true) {
-                if (node === anchorNode && (anchorOffset === 0 || node.nodeType === TEXT_NODE)) {
-                  start2 = length + anchorOffset;
-                }
-                if (node === focusNode && (focusOffset === 0 || node.nodeType === TEXT_NODE)) {
-                  end = length + focusOffset;
-                }
-                if (node.nodeType === TEXT_NODE) {
-                  length += node.nodeValue.length;
-                }
-                if ((next = node.firstChild) === null) {
-                  break;
-                }
-                parentNode = node;
-                node = next;
+              if (node === anchorNode && (anchorOffset === 0 || node.nodeType === TEXT_NODE)) {
+                start2 = length + anchorOffset;
               }
-              while (true) {
-                if (node === outerNode) {
-                  break outer;
-                }
-                if (parentNode === anchorNode && ++indexWithinAnchor === anchorOffset) {
-                  start2 = length;
-                }
-                if (parentNode === focusNode && ++indexWithinFocus === focusOffset) {
-                  end = length;
-                }
-                if ((next = node.nextSibling) !== null) {
-                  break;
-                }
-                node = parentNode;
-                parentNode = node.parentNode;
+              if (node === focusNode && (focusOffset === 0 || node.nodeType === TEXT_NODE)) {
+                end = length + focusOffset;
               }
+              if (node.nodeType === TEXT_NODE) {
+                length += node.nodeValue.length;
+              }
+              if ((next = node.firstChild) === null) {
+                break;
+              }
+              parentNode = node;
               node = next;
             }
+            while (true) {
+              if (node === outerNode) {
+                break outer;
+              }
+              if (parentNode === anchorNode && ++indexWithinAnchor === anchorOffset) {
+                start2 = length;
+              }
+              if (parentNode === focusNode && ++indexWithinFocus === focusOffset) {
+                end = length;
+              }
+              if ((next = node.nextSibling) !== null) {
+                break;
+              }
+              node = parentNode;
+              parentNode = node.parentNode;
+            }
+            node = next;
+          }
           if (start2 === -1 || end === -1) {
             return null;
           }
@@ -8705,6 +8717,7 @@ var require_react_dom_development = __commonJS({
         function extractEvents$3(dispatchQueue, domEventName, targetInst, nativeEvent, nativeEventTarget, eventSystemFlags, targetContainer) {
           var targetNode = targetInst ? getNodeFromInstance(targetInst) : window;
           switch (domEventName) {
+            // Track the input node that has focus.
             case "focusin":
               if (isTextInputElement(targetNode) || targetNode.contentEditable === "true") {
                 activeElement$1 = targetNode;
@@ -8717,6 +8730,8 @@ var require_react_dom_development = __commonJS({
               activeElementInst$1 = null;
               lastSelection = null;
               break;
+            // Don't fire the event while the user is dragging. This matches the
+            // semantics of the native select event.
             case "mousedown":
               mouseDown = true;
               break;
@@ -8726,10 +8741,20 @@ var require_react_dom_development = __commonJS({
               mouseDown = false;
               constructSelectEvent(dispatchQueue, nativeEvent, nativeEventTarget);
               break;
+            // Chrome and IE fire non-standard event when selection is changed (and
+            // sometimes when it hasn't). IE's event fires out of order with respect
+            // to key and input events on deletion, so we discard it.
+            //
+            // Firefox doesn't support selectionchange, so check selection status
+            // after each key entry. The selection changes after keydown and before
+            // keyup, but we check on keydown as well in the case of holding down a
+            // key, when multiple keydown events are fired but only one keyup is.
+            // This is also our approach for IE handling, for the reason above.
             case "selectionchange":
               if (skipSelectionChangeEvent) {
                 break;
               }
+            // falls through
             case "keydown":
             case "keyup":
               constructSelectEvent(dispatchQueue, nativeEvent, nativeEventTarget);
@@ -8812,6 +8837,7 @@ var require_react_dom_development = __commonJS({
               if (getEventCharCode(nativeEvent) === 0) {
                 return;
               }
+            /* falls through */
             case "keydown":
             case "keyup":
               SyntheticEventCtor = SyntheticKeyboardEvent;
@@ -8832,11 +8858,14 @@ var require_react_dom_development = __commonJS({
               if (nativeEvent.button === 2) {
                 return;
               }
+            /* falls through */
             case "auxclick":
             case "dblclick":
             case "mousedown":
             case "mousemove":
             case "mouseup":
+            // TODO: Disabled elements should not respond to mouse events
+            /* falls through */
             case "mouseout":
             case "mouseover":
             case "contextmenu":
@@ -9044,45 +9073,44 @@ var require_react_dom_development = __commonJS({
             var targetContainerNode = targetContainer;
             if (targetInst !== null) {
               var node = targetInst;
-              mainLoop:
-                while (true) {
-                  if (node === null) {
-                    return;
-                  }
-                  var nodeTag = node.tag;
-                  if (nodeTag === HostRoot || nodeTag === HostPortal) {
-                    var container = node.stateNode.containerInfo;
-                    if (isMatchingRootContainer(container, targetContainerNode)) {
-                      break;
-                    }
-                    if (nodeTag === HostPortal) {
-                      var grandNode = node.return;
-                      while (grandNode !== null) {
-                        var grandTag = grandNode.tag;
-                        if (grandTag === HostRoot || grandTag === HostPortal) {
-                          var grandContainer = grandNode.stateNode.containerInfo;
-                          if (isMatchingRootContainer(grandContainer, targetContainerNode)) {
-                            return;
-                          }
-                        }
-                        grandNode = grandNode.return;
-                      }
-                    }
-                    while (container !== null) {
-                      var parentNode = getClosestInstanceFromNode(container);
-                      if (parentNode === null) {
-                        return;
-                      }
-                      var parentTag = parentNode.tag;
-                      if (parentTag === HostComponent || parentTag === HostText) {
-                        node = ancestorInst = parentNode;
-                        continue mainLoop;
-                      }
-                      container = container.parentNode;
-                    }
-                  }
-                  node = node.return;
+              mainLoop: while (true) {
+                if (node === null) {
+                  return;
                 }
+                var nodeTag = node.tag;
+                if (nodeTag === HostRoot || nodeTag === HostPortal) {
+                  var container = node.stateNode.containerInfo;
+                  if (isMatchingRootContainer(container, targetContainerNode)) {
+                    break;
+                  }
+                  if (nodeTag === HostPortal) {
+                    var grandNode = node.return;
+                    while (grandNode !== null) {
+                      var grandTag = grandNode.tag;
+                      if (grandTag === HostRoot || grandTag === HostPortal) {
+                        var grandContainer = grandNode.stateNode.containerInfo;
+                        if (isMatchingRootContainer(grandContainer, targetContainerNode)) {
+                          return;
+                        }
+                      }
+                      grandNode = grandNode.return;
+                    }
+                  }
+                  while (container !== null) {
+                    var parentNode = getClosestInstanceFromNode(container);
+                    if (parentNode === null) {
+                      return;
+                    }
+                    var parentTag = parentNode.tag;
+                    if (parentTag === HostComponent || parentTag === HostText) {
+                      node = ancestorInst = parentNode;
+                      continue mainLoop;
+                    }
+                    container = container.parentNode;
+                  }
+                }
+                node = node.return;
+              }
             }
           }
           batchedUpdates(function() {
@@ -9362,10 +9390,8 @@ var require_react_dom_development = __commonJS({
               } else if (typeof nextProp === "number") {
                 setTextContent(domElement, "" + nextProp);
               }
-            } else if (propKey === SUPPRESS_CONTENT_EDITABLE_WARNING || propKey === SUPPRESS_HYDRATION_WARNING)
-              ;
-            else if (propKey === AUTOFOCUS)
-              ;
+            } else if (propKey === SUPPRESS_CONTENT_EDITABLE_WARNING || propKey === SUPPRESS_HYDRATION_WARNING) ;
+            else if (propKey === AUTOFOCUS) ;
             else if (registrationNameDependencies.hasOwnProperty(propKey)) {
               if (nextProp != null) {
                 if (typeof nextProp !== "function") {
@@ -9581,12 +9607,9 @@ var require_react_dom_development = __commonJS({
                   styleUpdates[styleName] = "";
                 }
               }
-            } else if (propKey === DANGEROUSLY_SET_INNER_HTML || propKey === CHILDREN)
-              ;
-            else if (propKey === SUPPRESS_CONTENT_EDITABLE_WARNING || propKey === SUPPRESS_HYDRATION_WARNING)
-              ;
-            else if (propKey === AUTOFOCUS)
-              ;
+            } else if (propKey === DANGEROUSLY_SET_INNER_HTML || propKey === CHILDREN) ;
+            else if (propKey === SUPPRESS_CONTENT_EDITABLE_WARNING || propKey === SUPPRESS_HYDRATION_WARNING) ;
+            else if (propKey === AUTOFOCUS) ;
             else if (registrationNameDependencies.hasOwnProperty(propKey)) {
               if (!updatePayload) {
                 updatePayload = [];
@@ -9645,8 +9668,7 @@ var require_react_dom_development = __commonJS({
               if (typeof nextProp === "string" || typeof nextProp === "number") {
                 (updatePayload = updatePayload || []).push(propKey, "" + nextProp);
               }
-            } else if (propKey === SUPPRESS_CONTENT_EDITABLE_WARNING || propKey === SUPPRESS_HYDRATION_WARNING)
-              ;
+            } else if (propKey === SUPPRESS_CONTENT_EDITABLE_WARNING || propKey === SUPPRESS_HYDRATION_WARNING) ;
             else if (registrationNameDependencies.hasOwnProperty(propKey)) {
               if (nextProp != null) {
                 if (typeof nextProp !== "function") {
@@ -9757,6 +9779,8 @@ var require_react_dom_development = __commonJS({
             for (var _i = 0; _i < attributes.length; _i++) {
               var name = attributes[_i].name.toLowerCase();
               switch (name) {
+                // Controlled attributes are not validated
+                // TODO: Only ignore them on controlled tags.
                 case "value":
                   break;
                 case "checked":
@@ -9803,12 +9827,10 @@ var require_react_dom_development = __commonJS({
             typeof isCustomComponentTag === "boolean") {
               var serverValue = void 0;
               var propertyInfo = isCustomComponentTag && enableCustomElementPropertySupport ? null : getPropertyInfo(propKey);
-              if (rawProps[SUPPRESS_HYDRATION_WARNING] === true)
-                ;
+              if (rawProps[SUPPRESS_HYDRATION_WARNING] === true) ;
               else if (propKey === SUPPRESS_CONTENT_EDITABLE_WARNING || propKey === SUPPRESS_HYDRATION_WARNING || // Controlled attributes are not validated
               // TODO: Only ignore them on controlled tags.
-              propKey === "value" || propKey === "checked" || propKey === "selected")
-                ;
+              propKey === "value" || propKey === "checked" || propKey === "selected") ;
               else if (propKey === DANGEROUSLY_SET_INNER_HTML) {
                 var serverHTML = domElement.innerHTML;
                 var nextHtml = nextProp ? nextProp[HTML$1] : void 0;
@@ -10026,24 +10048,37 @@ var require_react_dom_development = __commonJS({
           };
           var isTagValidWithParent = function(tag, parentTag) {
             switch (parentTag) {
+              // https://html.spec.whatwg.org/multipage/syntax.html#parsing-main-inselect
               case "select":
                 return tag === "option" || tag === "optgroup" || tag === "#text";
               case "optgroup":
                 return tag === "option" || tag === "#text";
+              // Strictly speaking, seeing an <option> doesn't mean we're in a <select>
+              // but
               case "option":
                 return tag === "#text";
+              // https://html.spec.whatwg.org/multipage/syntax.html#parsing-main-intd
+              // https://html.spec.whatwg.org/multipage/syntax.html#parsing-main-incaption
+              // No special behavior since these rules fall back to "in body" mode for
+              // all except special table nodes which cause bad parsing behavior anyway.
+              // https://html.spec.whatwg.org/multipage/syntax.html#parsing-main-intr
               case "tr":
                 return tag === "th" || tag === "td" || tag === "style" || tag === "script" || tag === "template";
+              // https://html.spec.whatwg.org/multipage/syntax.html#parsing-main-intbody
               case "tbody":
               case "thead":
               case "tfoot":
                 return tag === "tr" || tag === "style" || tag === "script" || tag === "template";
+              // https://html.spec.whatwg.org/multipage/syntax.html#parsing-main-incolgroup
               case "colgroup":
                 return tag === "col" || tag === "template";
+              // https://html.spec.whatwg.org/multipage/syntax.html#parsing-main-intable
               case "table":
                 return tag === "caption" || tag === "colgroup" || tag === "tbody" || tag === "tfoot" || tag === "thead" || tag === "style" || tag === "script" || tag === "template";
+              // https://html.spec.whatwg.org/multipage/syntax.html#parsing-main-inhead
               case "head":
                 return tag === "base" || tag === "basefont" || tag === "bgsound" || tag === "link" || tag === "meta" || tag === "title" || tag === "noscript" || tag === "noframes" || tag === "style" || tag === "script" || tag === "template";
+              // https://html.spec.whatwg.org/multipage/semantics.html#the-html-element
               case "html":
                 return tag === "head" || tag === "body" || tag === "frameset";
               case "frameset":
@@ -10604,8 +10639,7 @@ var require_react_dom_development = __commonJS({
           {
             if (instance.nodeType === ELEMENT_NODE) {
               warnForDeletedHydratableElement(parentContainer, instance);
-            } else if (instance.nodeType === COMMENT_NODE)
-              ;
+            } else if (instance.nodeType === COMMENT_NODE) ;
             else {
               warnForDeletedHydratableText(parentContainer, instance);
             }
@@ -10617,8 +10651,7 @@ var require_react_dom_development = __commonJS({
             if (parentNode !== null) {
               if (instance.nodeType === ELEMENT_NODE) {
                 warnForDeletedHydratableElement(parentNode, instance);
-              } else if (instance.nodeType === COMMENT_NODE)
-                ;
+              } else if (instance.nodeType === COMMENT_NODE) ;
               else {
                 warnForDeletedHydratableText(parentNode, instance);
               }
@@ -10630,8 +10663,7 @@ var require_react_dom_development = __commonJS({
             if (isConcurrentMode || parentProps[SUPPRESS_HYDRATION_WARNING$1] !== true) {
               if (instance.nodeType === ELEMENT_NODE) {
                 warnForDeletedHydratableElement(parentInstance, instance);
-              } else if (instance.nodeType === COMMENT_NODE)
-                ;
+              } else if (instance.nodeType === COMMENT_NODE) ;
               else {
                 warnForDeletedHydratableText(parentInstance, instance);
               }
@@ -10651,15 +10683,13 @@ var require_react_dom_development = __commonJS({
         function didNotFindHydratableInstanceWithinSuspenseInstance(parentInstance, type, props) {
           {
             var parentNode = parentInstance.parentNode;
-            if (parentNode !== null)
-              warnForInsertedHydratedElement(parentNode, type);
+            if (parentNode !== null) warnForInsertedHydratedElement(parentNode, type);
           }
         }
         function didNotFindHydratableTextInstanceWithinSuspenseInstance(parentInstance, text) {
           {
             var parentNode = parentInstance.parentNode;
-            if (parentNode !== null)
-              warnForInsertedHydratedText(parentNode, text);
+            if (parentNode !== null) warnForInsertedHydratedText(parentNode, text);
           }
         }
         function didNotFindHydratableInstance(parentType, parentProps, parentInstance, type, props, isConcurrentMode) {
@@ -11246,8 +11276,7 @@ var require_react_dom_development = __commonJS({
               }
               case SuspenseComponent: {
                 var suspenseState = returnFiber.memoizedState;
-                if (suspenseState.dehydrated !== null)
-                  didNotHydrateInstanceWithinSuspenseInstance(suspenseState.dehydrated, instance);
+                if (suspenseState.dehydrated !== null) didNotHydrateInstanceWithinSuspenseInstance(suspenseState.dehydrated, instance);
                 break;
               }
             }
@@ -11326,18 +11355,17 @@ var require_react_dom_development = __commonJS({
               case SuspenseComponent: {
                 var suspenseState = returnFiber.memoizedState;
                 var _parentInstance = suspenseState.dehydrated;
-                if (_parentInstance !== null)
-                  switch (fiber.tag) {
-                    case HostComponent:
-                      var _type2 = fiber.type;
-                      var _props2 = fiber.pendingProps;
-                      didNotFindHydratableInstanceWithinSuspenseInstance(_parentInstance, _type2);
-                      break;
-                    case HostText:
-                      var _text2 = fiber.pendingProps;
-                      didNotFindHydratableTextInstanceWithinSuspenseInstance(_parentInstance, _text2);
-                      break;
-                  }
+                if (_parentInstance !== null) switch (fiber.tag) {
+                  case HostComponent:
+                    var _type2 = fiber.type;
+                    var _props2 = fiber.pendingProps;
+                    didNotFindHydratableInstanceWithinSuspenseInstance(_parentInstance, _type2);
+                    break;
+                  case HostText:
+                    var _text2 = fiber.pendingProps;
+                    didNotFindHydratableTextInstanceWithinSuspenseInstance(_parentInstance, _text2);
+                    break;
+                }
                 break;
               }
               default:
@@ -11997,7 +12025,7 @@ var require_react_dom_development = __commonJS({
             }
           }
           function updateFragment2(returnFiber, current2, fragment, lanes, key) {
-            if (current2 === null || current2.tag !== Fragment10) {
+            if (current2 === null || current2.tag !== Fragment16) {
               var created = createFiberFromFragment(fragment, returnFiber.mode, lanes, key);
               created.return = returnFiber;
               return created;
@@ -12400,7 +12428,7 @@ var require_react_dom_development = __commonJS({
               if (child.key === key) {
                 var elementType = element.type;
                 if (elementType === REACT_FRAGMENT_TYPE) {
-                  if (child.tag === Fragment10) {
+                  if (child.tag === Fragment16) {
                     deleteRemainingChildren(returnFiber, child.sibling);
                     var existing = useFiber(child, element.props.children);
                     existing.return = returnFiber;
@@ -12626,8 +12654,7 @@ var require_react_dom_development = __commonJS({
                     var update = createUpdate(NoTimestamp, lane);
                     update.tag = ForceUpdate;
                     var updateQueue = fiber.updateQueue;
-                    if (updateQueue === null)
-                      ;
+                    if (updateQueue === null) ;
                     else {
                       var sharedQueue = updateQueue.shared;
                       var pending = sharedQueue.pending;
@@ -12713,8 +12740,7 @@ var require_react_dom_development = __commonJS({
             }
           }
           var value = context._currentValue;
-          if (lastFullyObservedContext === context)
-            ;
+          if (lastFullyObservedContext === context) ;
           else {
             var contextItem = {
               context,
@@ -13011,6 +13037,7 @@ var require_react_dom_development = __commonJS({
             case CaptureUpdate: {
               workInProgress2.flags = workInProgress2.flags & ~ShouldCapture | DidCapture;
             }
+            // Intentional fallthrough
             case UpdateState: {
               var _payload = update.payload;
               var partialState;
@@ -17877,7 +17904,7 @@ var require_react_dom_development = __commonJS({
               var _resolvedProps2 = workInProgress2.elementType === type ? _unresolvedProps2 : resolveDefaultProps(type, _unresolvedProps2);
               return updateForwardRef(current2, workInProgress2, type, _resolvedProps2, renderLanes2);
             }
-            case Fragment10:
+            case Fragment16:
               return updateFragment(current2, workInProgress2, renderLanes2);
             case Mode:
               return updateMode(current2, workInProgress2, renderLanes2);
@@ -17948,8 +17975,7 @@ var require_react_dom_development = __commonJS({
             while (node !== null) {
               if (node.tag === HostComponent || node.tag === HostText) {
                 appendInitialChild(parent, node.stateNode);
-              } else if (node.tag === HostPortal)
-                ;
+              } else if (node.tag === HostPortal) ;
               else if (node.child !== null) {
                 node.child.return = node;
                 node = node.child;
@@ -18150,7 +18176,7 @@ var require_react_dom_development = __commonJS({
             case SimpleMemoComponent:
             case FunctionComponent:
             case ForwardRef:
-            case Fragment10:
+            case Fragment16:
             case Mode:
             case Profiler:
             case ContextConsumer:
@@ -18903,20 +18929,19 @@ var require_react_dom_development = __commonJS({
                     onPostCommit(id2, phase, passiveEffectDuration, commitTime2);
                   }
                   var parentFiber = finishedWork.return;
-                  outer:
-                    while (parentFiber !== null) {
-                      switch (parentFiber.tag) {
-                        case HostRoot:
-                          var root4 = parentFiber.stateNode;
-                          root4.passiveEffectDuration += passiveEffectDuration;
-                          break outer;
-                        case Profiler:
-                          var parentStateNode = parentFiber.stateNode;
-                          parentStateNode.passiveEffectDuration += passiveEffectDuration;
-                          break outer;
-                      }
-                      parentFiber = parentFiber.return;
+                  outer: while (parentFiber !== null) {
+                    switch (parentFiber.tag) {
+                      case HostRoot:
+                        var root4 = parentFiber.stateNode;
+                        root4.passiveEffectDuration += passiveEffectDuration;
+                        break outer;
+                      case Profiler:
+                        var parentStateNode = parentFiber.stateNode;
+                        parentStateNode.passiveEffectDuration += passiveEffectDuration;
+                        break outer;
                     }
+                    parentFiber = parentFiber.return;
+                  }
                   break;
                 }
               }
@@ -19063,20 +19088,19 @@ var require_react_dom_development = __commonJS({
                     }
                     enqueuePendingPassiveProfilerEffect(finishedWork);
                     var parentFiber = finishedWork.return;
-                    outer:
-                      while (parentFiber !== null) {
-                        switch (parentFiber.tag) {
-                          case HostRoot:
-                            var root4 = parentFiber.stateNode;
-                            root4.effectDuration += effectDuration;
-                            break outer;
-                          case Profiler:
-                            var parentStateNode = parentFiber.stateNode;
-                            parentStateNode.effectDuration += effectDuration;
-                            break outer;
-                        }
-                        parentFiber = parentFiber.return;
+                    outer: while (parentFiber !== null) {
+                      switch (parentFiber.tag) {
+                        case HostRoot:
+                          var root4 = parentFiber.stateNode;
+                          root4.effectDuration += effectDuration;
+                          break outer;
+                        case Profiler:
+                          var parentStateNode = parentFiber.stateNode;
+                          parentStateNode.effectDuration += effectDuration;
+                          break outer;
                       }
+                      parentFiber = parentFiber.return;
+                    }
                   }
                 }
                 break;
@@ -19168,8 +19192,7 @@ var require_react_dom_development = __commonJS({
                     captureCommitPhaseError(finishedWork, finishedWork.return, error2);
                   }
                 }
-              } else if ((node.tag === OffscreenComponent || node.tag === LegacyHiddenComponent) && node.memoizedState !== null && node !== finishedWork)
-                ;
+              } else if ((node.tag === OffscreenComponent || node.tag === LegacyHiddenComponent) && node.memoizedState !== null && node !== finishedWork) ;
               else if (node.child !== null) {
                 node.child.return = node;
                 node = node.child;
@@ -19287,31 +19310,30 @@ var require_react_dom_development = __commonJS({
         }
         function getHostSibling(fiber) {
           var node = fiber;
-          siblings:
-            while (true) {
-              while (node.sibling === null) {
-                if (node.return === null || isHostParent(node.return)) {
-                  return null;
-                }
-                node = node.return;
+          siblings: while (true) {
+            while (node.sibling === null) {
+              if (node.return === null || isHostParent(node.return)) {
+                return null;
               }
-              node.sibling.return = node.return;
-              node = node.sibling;
-              while (node.tag !== HostComponent && node.tag !== HostText && node.tag !== DehydratedFragment) {
-                if (node.flags & Placement) {
-                  continue siblings;
-                }
-                if (node.child === null || node.tag === HostPortal) {
-                  continue siblings;
-                } else {
-                  node.child.return = node;
-                  node = node.child;
-                }
+              node = node.return;
+            }
+            node.sibling.return = node.return;
+            node = node.sibling;
+            while (node.tag !== HostComponent && node.tag !== HostText && node.tag !== DehydratedFragment) {
+              if (node.flags & Placement) {
+                continue siblings;
               }
-              if (!(node.flags & Placement)) {
-                return node.stateNode;
+              if (node.child === null || node.tag === HostPortal) {
+                continue siblings;
+              } else {
+                node.child.return = node;
+                node = node.child;
               }
             }
+            if (!(node.flags & Placement)) {
+              return node.stateNode;
+            }
+          }
         }
         function commitPlacement(finishedWork) {
           var parentFiber = getHostParentFiber(finishedWork);
@@ -19333,6 +19355,7 @@ var require_react_dom_development = __commonJS({
               insertOrAppendPlacementNodeIntoContainer(finishedWork, _before, _parent);
               break;
             }
+            // eslint-disable-next-line-no-fallthrough
             default:
               throw new Error("Invalid host parent fiber. This error is likely caused by a bug in React. Please file an issue.");
           }
@@ -19347,8 +19370,7 @@ var require_react_dom_development = __commonJS({
             } else {
               appendChildToContainer(parent, stateNode);
             }
-          } else if (tag === HostPortal)
-            ;
+          } else if (tag === HostPortal) ;
           else {
             var child = node.child;
             if (child !== null) {
@@ -19371,8 +19393,7 @@ var require_react_dom_development = __commonJS({
             } else {
               appendChild(parent, stateNode);
             }
-          } else if (tag === HostPortal)
-            ;
+          } else if (tag === HostPortal) ;
           else {
             var child = node.child;
             if (child !== null) {
@@ -19390,27 +19411,26 @@ var require_react_dom_development = __commonJS({
         function commitDeletionEffects(root4, returnFiber, deletedFiber) {
           {
             var parent = returnFiber;
-            findParent:
-              while (parent !== null) {
-                switch (parent.tag) {
-                  case HostComponent: {
-                    hostParent = parent.stateNode;
-                    hostParentIsContainer = false;
-                    break findParent;
-                  }
-                  case HostRoot: {
-                    hostParent = parent.stateNode.containerInfo;
-                    hostParentIsContainer = true;
-                    break findParent;
-                  }
-                  case HostPortal: {
-                    hostParent = parent.stateNode.containerInfo;
-                    hostParentIsContainer = true;
-                    break findParent;
-                  }
+            findParent: while (parent !== null) {
+              switch (parent.tag) {
+                case HostComponent: {
+                  hostParent = parent.stateNode;
+                  hostParentIsContainer = false;
+                  break findParent;
                 }
-                parent = parent.return;
+                case HostRoot: {
+                  hostParent = parent.stateNode.containerInfo;
+                  hostParentIsContainer = true;
+                  break findParent;
+                }
+                case HostPortal: {
+                  hostParent = parent.stateNode.containerInfo;
+                  hostParentIsContainer = true;
+                  break findParent;
+                }
               }
+              parent = parent.return;
+            }
             if (hostParent === null) {
               throw new Error("Expected to find a host parent. This error is likely caused by a bug in React. Please file an issue.");
             }
@@ -19435,6 +19455,7 @@ var require_react_dom_development = __commonJS({
                 safelyDetachRef(deletedFiber, nearestMountedAncestor);
               }
             }
+            // eslint-disable-next-line-no-fallthrough
             case HostText: {
               {
                 var prevHostParent = hostParent;
@@ -20696,6 +20717,9 @@ var require_react_dom_development = __commonJS({
             case RootFatalErrored: {
               throw new Error("Root did not complete. This is a bug in React.");
             }
+            // Flow knows about invariant, so it complains if I add a break
+            // statement, but eslint doesn't know about invariant, so it complains
+            // if I do. eslint-disable-next-line no-fallthrough
             case RootErrored: {
               commitRoot(root4, workInProgressRootRecoverableErrors, workInProgressTransitions);
               break;
@@ -22322,67 +22346,71 @@ var require_react_dom_development = __commonJS({
           } else if (typeof type === "string") {
             fiberTag = HostComponent;
           } else {
-            getTag:
-              switch (type) {
-                case REACT_FRAGMENT_TYPE:
-                  return createFiberFromFragment(pendingProps.children, mode, lanes, key);
-                case REACT_STRICT_MODE_TYPE:
-                  fiberTag = Mode;
-                  mode |= StrictLegacyMode;
-                  if ((mode & ConcurrentMode) !== NoMode) {
-                    mode |= StrictEffectsMode;
-                  }
-                  break;
-                case REACT_PROFILER_TYPE:
-                  return createFiberFromProfiler(pendingProps, mode, lanes, key);
-                case REACT_SUSPENSE_TYPE:
-                  return createFiberFromSuspense(pendingProps, mode, lanes, key);
-                case REACT_SUSPENSE_LIST_TYPE:
-                  return createFiberFromSuspenseList(pendingProps, mode, lanes, key);
-                case REACT_OFFSCREEN_TYPE:
-                  return createFiberFromOffscreen(pendingProps, mode, lanes, key);
-                case REACT_LEGACY_HIDDEN_TYPE:
-                case REACT_SCOPE_TYPE:
-                case REACT_CACHE_TYPE:
-                case REACT_TRACING_MARKER_TYPE:
-                case REACT_DEBUG_TRACING_MODE_TYPE:
-                default: {
-                  if (typeof type === "object" && type !== null) {
-                    switch (type.$$typeof) {
-                      case REACT_PROVIDER_TYPE:
-                        fiberTag = ContextProvider;
-                        break getTag;
-                      case REACT_CONTEXT_TYPE:
-                        fiberTag = ContextConsumer;
-                        break getTag;
-                      case REACT_FORWARD_REF_TYPE:
-                        fiberTag = ForwardRef;
-                        {
-                          resolvedType = resolveForwardRefForHotReloading(resolvedType);
-                        }
-                        break getTag;
-                      case REACT_MEMO_TYPE:
-                        fiberTag = MemoComponent;
-                        break getTag;
-                      case REACT_LAZY_TYPE:
-                        fiberTag = LazyComponent;
-                        resolvedType = null;
-                        break getTag;
-                    }
-                  }
-                  var info = "";
-                  {
-                    if (type === void 0 || typeof type === "object" && type !== null && Object.keys(type).length === 0) {
-                      info += " You likely forgot to export your component from the file it's defined in, or you might have mixed up default and named imports.";
-                    }
-                    var ownerName = owner ? getComponentNameFromFiber(owner) : null;
-                    if (ownerName) {
-                      info += "\n\nCheck the render method of `" + ownerName + "`.";
-                    }
-                  }
-                  throw new Error("Element type is invalid: expected a string (for built-in components) or a class/function (for composite components) " + ("but got: " + (type == null ? type : typeof type) + "." + info));
+            getTag: switch (type) {
+              case REACT_FRAGMENT_TYPE:
+                return createFiberFromFragment(pendingProps.children, mode, lanes, key);
+              case REACT_STRICT_MODE_TYPE:
+                fiberTag = Mode;
+                mode |= StrictLegacyMode;
+                if ((mode & ConcurrentMode) !== NoMode) {
+                  mode |= StrictEffectsMode;
                 }
+                break;
+              case REACT_PROFILER_TYPE:
+                return createFiberFromProfiler(pendingProps, mode, lanes, key);
+              case REACT_SUSPENSE_TYPE:
+                return createFiberFromSuspense(pendingProps, mode, lanes, key);
+              case REACT_SUSPENSE_LIST_TYPE:
+                return createFiberFromSuspenseList(pendingProps, mode, lanes, key);
+              case REACT_OFFSCREEN_TYPE:
+                return createFiberFromOffscreen(pendingProps, mode, lanes, key);
+              case REACT_LEGACY_HIDDEN_TYPE:
+              // eslint-disable-next-line no-fallthrough
+              case REACT_SCOPE_TYPE:
+              // eslint-disable-next-line no-fallthrough
+              case REACT_CACHE_TYPE:
+              // eslint-disable-next-line no-fallthrough
+              case REACT_TRACING_MARKER_TYPE:
+              // eslint-disable-next-line no-fallthrough
+              case REACT_DEBUG_TRACING_MODE_TYPE:
+              // eslint-disable-next-line no-fallthrough
+              default: {
+                if (typeof type === "object" && type !== null) {
+                  switch (type.$$typeof) {
+                    case REACT_PROVIDER_TYPE:
+                      fiberTag = ContextProvider;
+                      break getTag;
+                    case REACT_CONTEXT_TYPE:
+                      fiberTag = ContextConsumer;
+                      break getTag;
+                    case REACT_FORWARD_REF_TYPE:
+                      fiberTag = ForwardRef;
+                      {
+                        resolvedType = resolveForwardRefForHotReloading(resolvedType);
+                      }
+                      break getTag;
+                    case REACT_MEMO_TYPE:
+                      fiberTag = MemoComponent;
+                      break getTag;
+                    case REACT_LAZY_TYPE:
+                      fiberTag = LazyComponent;
+                      resolvedType = null;
+                      break getTag;
+                  }
+                }
+                var info = "";
+                {
+                  if (type === void 0 || typeof type === "object" && type !== null && Object.keys(type).length === 0) {
+                    info += " You likely forgot to export your component from the file it's defined in, or you might have mixed up default and named imports.";
+                  }
+                  var ownerName = owner ? getComponentNameFromFiber(owner) : null;
+                  if (ownerName) {
+                    info += "\n\nCheck the render method of `" + ownerName + "`.";
+                  }
+                }
+                throw new Error("Element type is invalid: expected a string (for built-in components) or a class/function (for composite components) " + ("but got: " + (type == null ? type : typeof type) + "." + info));
               }
+            }
           }
           var fiber = createFiber(fiberTag, pendingProps, key, mode);
           fiber.elementType = type;
@@ -22409,7 +22437,7 @@ var require_react_dom_development = __commonJS({
           return fiber;
         }
         function createFiberFromFragment(elements, mode, lanes, key) {
-          var fiber = createFiber(Fragment10, elements, key, mode);
+          var fiber = createFiber(Fragment16, elements, key, mode);
           fiber.lanes = lanes;
           return fiber;
         }
@@ -23567,7 +23595,7 @@ var require_use_sync_external_store_shim_development = __commonJS({
         return x === y && (0 !== x || 1 / x === 1 / y) || x !== x && y !== y;
       }
       function useSyncExternalStore$2(subscribe, getSnapshot) {
-        didWarnOld18Alpha || void 0 === React23.startTransition || (didWarnOld18Alpha = true, console.error(
+        didWarnOld18Alpha || void 0 === React31.startTransition || (didWarnOld18Alpha = true, console.error(
           "You are using an outdated, pre-release alpha of React 18 that does not support useSyncExternalStore. The use-sync-external-store shim will not work correctly. Upgrade to a newer pre-release."
         ));
         var value = getSnapshot();
@@ -23577,7 +23605,7 @@ var require_use_sync_external_store_shim_development = __commonJS({
             "The result of getSnapshot should be cached to avoid an infinite loop"
           ), didWarnUncachedGetSnapshot = true);
         }
-        cachedValue = useState11({
+        cachedValue = useState18({
           inst: { value, getSnapshot }
         });
         var inst = cachedValue[0].inst, forceUpdate = cachedValue[1];
@@ -23589,7 +23617,7 @@ var require_use_sync_external_store_shim_development = __commonJS({
           },
           [subscribe, value, getSnapshot]
         );
-        useEffect10(
+        useEffect16(
           function() {
             checkIfSnapshotChanged(inst) && forceUpdate({ inst });
             return subscribe(function() {
@@ -23615,8 +23643,8 @@ var require_use_sync_external_store_shim_development = __commonJS({
         return getSnapshot();
       }
       "undefined" !== typeof __REACT_DEVTOOLS_GLOBAL_HOOK__ && "function" === typeof __REACT_DEVTOOLS_GLOBAL_HOOK__.registerInternalModuleStart && __REACT_DEVTOOLS_GLOBAL_HOOK__.registerInternalModuleStart(Error());
-      var React23 = require_react(), objectIs = "function" === typeof Object.is ? Object.is : is, useState11 = React23.useState, useEffect10 = React23.useEffect, useLayoutEffect4 = React23.useLayoutEffect, useDebugValue2 = React23.useDebugValue, didWarnOld18Alpha = false, didWarnUncachedGetSnapshot = false, shim = "undefined" === typeof window || "undefined" === typeof window.document || "undefined" === typeof window.document.createElement ? useSyncExternalStore$1 : useSyncExternalStore$2;
-      exports.useSyncExternalStore = void 0 !== React23.useSyncExternalStore ? React23.useSyncExternalStore : shim;
+      var React31 = require_react(), objectIs = "function" === typeof Object.is ? Object.is : is, useState18 = React31.useState, useEffect16 = React31.useEffect, useLayoutEffect4 = React31.useLayoutEffect, useDebugValue2 = React31.useDebugValue, didWarnOld18Alpha = false, didWarnUncachedGetSnapshot = false, shim = "undefined" === typeof window || "undefined" === typeof window.document || "undefined" === typeof window.document.createElement ? useSyncExternalStore$1 : useSyncExternalStore$2;
+      exports.useSyncExternalStore = void 0 !== React31.useSyncExternalStore ? React31.useSyncExternalStore : shim;
       "undefined" !== typeof __REACT_DEVTOOLS_GLOBAL_HOOK__ && "function" === typeof __REACT_DEVTOOLS_GLOBAL_HOOK__.registerInternalModuleStop && __REACT_DEVTOOLS_GLOBAL_HOOK__.registerInternalModuleStop(Error());
     })();
   }
@@ -23643,15 +23671,14 @@ var require_with_selector_development = __commonJS({
         return x === y && (0 !== x || 1 / x === 1 / y) || x !== x && y !== y;
       }
       "undefined" !== typeof __REACT_DEVTOOLS_GLOBAL_HOOK__ && "function" === typeof __REACT_DEVTOOLS_GLOBAL_HOOK__.registerInternalModuleStart && __REACT_DEVTOOLS_GLOBAL_HOOK__.registerInternalModuleStart(Error());
-      var React23 = require_react(), shim = require_shim(), objectIs = "function" === typeof Object.is ? Object.is : is, useSyncExternalStore = shim.useSyncExternalStore, useRef10 = React23.useRef, useEffect10 = React23.useEffect, useMemo7 = React23.useMemo, useDebugValue2 = React23.useDebugValue;
+      var React31 = require_react(), shim = require_shim(), objectIs = "function" === typeof Object.is ? Object.is : is, useSyncExternalStore = shim.useSyncExternalStore, useRef15 = React31.useRef, useEffect16 = React31.useEffect, useMemo14 = React31.useMemo, useDebugValue2 = React31.useDebugValue;
       exports.useSyncExternalStoreWithSelector = function(subscribe, getSnapshot, getServerSnapshot, selector4, isEqual) {
-        var instRef = useRef10(null);
+        var instRef = useRef15(null);
         if (null === instRef.current) {
           var inst = { hasValue: false, value: null };
           instRef.current = inst;
-        } else
-          inst = instRef.current;
-        instRef = useMemo7(
+        } else inst = instRef.current;
+        instRef = useMemo14(
           function() {
             function memoizedSelector(nextSnapshot) {
               if (!hasMemo) {
@@ -23687,7 +23714,7 @@ var require_with_selector_development = __commonJS({
           [getSnapshot, getServerSnapshot, selector4, isEqual]
         );
         var value = useSyncExternalStore(subscribe, instRef[0], instRef[1]);
-        useEffect10(
+        useEffect16(
           function() {
             inst.hasValue = true;
             inst.value = value;
@@ -23721,7 +23748,7 @@ var require_react_jsx_runtime_development = __commonJS({
     if (true) {
       (function() {
         "use strict";
-        var React23 = require_react();
+        var React31 = require_react();
         var REACT_ELEMENT_TYPE = Symbol.for("react.element");
         var REACT_PORTAL_TYPE = Symbol.for("react.portal");
         var REACT_FRAGMENT_TYPE = Symbol.for("react.fragment");
@@ -23747,7 +23774,7 @@ var require_react_jsx_runtime_development = __commonJS({
           }
           return null;
         }
-        var ReactSharedInternals = React23.__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED;
+        var ReactSharedInternals = React31.__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED;
         function error(format) {
           {
             {
@@ -24597,11 +24624,11 @@ var require_react_jsx_runtime_development = __commonJS({
             return jsxWithValidation(type, props, key, false);
           }
         }
-        var jsx18 = jsxWithValidationDynamic;
-        var jsxs18 = jsxWithValidationStatic;
+        var jsx26 = jsxWithValidationDynamic;
+        var jsxs26 = jsxWithValidationStatic;
         exports.Fragment = REACT_FRAGMENT_TYPE;
-        exports.jsx = jsx18;
-        exports.jsxs = jsxs18;
+        exports.jsx = jsx26;
+        exports.jsxs = jsxs26;
       })();
     }
   }
@@ -24642,16 +24669,14 @@ var require_elk_bundled = __commonJS({
       }
     })(function() {
       var define2, module2, exports2;
-      return (/* @__PURE__ */ function() {
+      return (/* @__PURE__ */ (function() {
         function r(e, n, t) {
           function o(i2, f) {
             if (!n[i2]) {
               if (!e[i2]) {
                 var c = "function" == typeof __require && __require;
-                if (!f && c)
-                  return c(i2, true);
-                if (u)
-                  return u(i2, true);
+                if (!f && c) return c(i2, true);
+                if (u) return u(i2, true);
                 var a = new Error("Cannot find module '" + i2 + "'");
                 throw a.code = "MODULE_NOT_FOUND", a;
               }
@@ -24663,41 +24688,37 @@ var require_elk_bundled = __commonJS({
             }
             return n[i2].exports;
           }
-          for (var u = "function" == typeof __require && __require, i = 0; i < t.length; i++)
-            o(t[i]);
+          for (var u = "function" == typeof __require && __require, i = 0; i < t.length; i++) o(t[i]);
           return o;
         }
         return r;
-      }())({ 1: [function(require2, module3, exports3) {
+      })())({ 1: [function(require2, module3, exports3) {
         "use strict";
         Object.defineProperty(exports3, "__esModule", {
           value: true
         });
-        var _createClass = /* @__PURE__ */ function() {
+        var _createClass = /* @__PURE__ */ (function() {
           function defineProperties(target, props) {
             for (var i = 0; i < props.length; i++) {
               var descriptor = props[i];
               descriptor.enumerable = descriptor.enumerable || false;
               descriptor.configurable = true;
-              if ("value" in descriptor)
-                descriptor.writable = true;
+              if ("value" in descriptor) descriptor.writable = true;
               Object.defineProperty(target, descriptor.key, descriptor);
             }
           }
           return function(Constructor, protoProps, staticProps) {
-            if (protoProps)
-              defineProperties(Constructor.prototype, protoProps);
-            if (staticProps)
-              defineProperties(Constructor, staticProps);
+            if (protoProps) defineProperties(Constructor.prototype, protoProps);
+            if (staticProps) defineProperties(Constructor, staticProps);
             return Constructor;
           };
-        }();
+        })();
         function _classCallCheck(instance, Constructor) {
           if (!(instance instanceof Constructor)) {
             throw new TypeError("Cannot call a class as a function");
           }
         }
-        var ELK2 = function() {
+        var ELK2 = (function() {
           function ELK3() {
             var _this = this;
             var _ref = arguments.length > 0 && arguments[0] !== void 0 ? arguments[0] : {}, _ref$defaultLayoutOpt = _ref.defaultLayoutOptions, defaultLayoutOptions = _ref$defaultLayoutOpt === void 0 ? {} : _ref$defaultLayoutOpt, _ref$algorithms = _ref.algorithms, algorithms = _ref$algorithms === void 0 ? ["layered", "stress", "mrtree", "radial", "force", "disco", "sporeOverlap", "sporeCompaction", "rectpacking"] : _ref$algorithms, workerFactory = _ref.workerFactory, workerUrl = _ref.workerUrl;
@@ -24760,14 +24781,13 @@ var require_elk_bundled = __commonJS({
           }, {
             key: "terminateWorker",
             value: function terminateWorker() {
-              if (this.worker)
-                this.worker.terminate();
+              if (this.worker) this.worker.terminate();
             }
           }]);
           return ELK3;
-        }();
+        })();
         exports3.default = ELK2;
-        var PromisedWorker = function() {
+        var PromisedWorker = (function() {
           function PromisedWorker2(worker) {
             var _this2 = this;
             _classCallCheck(this, PromisedWorker2);
@@ -24839,7 +24859,7 @@ var require_elk_bundled = __commonJS({
             }
           }]);
           return PromisedWorker2;
-        }();
+        })();
       }, {}], 2: [function(require2, module3, exports3) {
         (function(global2) {
           (function() {
@@ -28383,8 +28403,7 @@ var require_elk_bundled = __commonJS({
               return a;
             }
             function _wb(a, b) {
-              while (a.Bd(b))
-                ;
+              while (a.Bd(b)) ;
             }
             function atb(a) {
               this.a = new Usb(a);
@@ -28450,8 +28469,7 @@ var require_elk_bundled = __commonJS({
               a.splice(b, c);
             }
             function ixb(a, b) {
-              while (a.Re(b))
-                ;
+              while (a.Re(b)) ;
             }
             function NKb(a) {
               a.c ? MKb(a) : OKb(a);
@@ -33730,13 +33748,11 @@ var require_elk_bundled = __commonJS({
               return ZD(a, 484) ? RD(a, 484) : jeb(a);
             }
             function bve(a) {
-              if (a)
-                return a.dc();
+              if (a) return a.dc();
               return !a.Kc().Ob();
             }
             function kte(a) {
-              if (!Ase)
-                return false;
+              if (!Ase) return false;
               return Yjb(Ase, a);
             }
             function hDb(a) {
@@ -33820,33 +33836,27 @@ var require_elk_bundled = __commonJS({
               return a;
             }
             function uKd(a) {
-              if (a.p != 4)
-                throw Adb(new cgb());
+              if (a.p != 4) throw Adb(new cgb());
               return a.e;
             }
             function tKd(a) {
-              if (a.p != 3)
-                throw Adb(new cgb());
+              if (a.p != 3) throw Adb(new cgb());
               return a.e;
             }
             function CKd(a) {
-              if (a.p != 3)
-                throw Adb(new cgb());
+              if (a.p != 3) throw Adb(new cgb());
               return a.j;
             }
             function DKd(a) {
-              if (a.p != 4)
-                throw Adb(new cgb());
+              if (a.p != 4) throw Adb(new cgb());
               return a.j;
             }
             function wKd(a) {
-              if (a.p != 6)
-                throw Adb(new cgb());
+              if (a.p != 6) throw Adb(new cgb());
               return a.f;
             }
             function FKd(a) {
-              if (a.p != 6)
-                throw Adb(new cgb());
+              if (a.p != 6) throw Adb(new cgb());
               return a.k;
             }
             function $9d(a) {
@@ -34705,13 +34715,11 @@ var require_elk_bundled = __commonJS({
               return Uub(a.b);
             }
             function vKd(a) {
-              if (a.p != 5)
-                throw Adb(new cgb());
+              if (a.p != 5) throw Adb(new cgb());
               return Ydb(a.f);
             }
             function EKd(a) {
-              if (a.p != 5)
-                throw Adb(new cgb());
+              if (a.p != 5) throw Adb(new cgb());
               return Ydb(a.k);
             }
             function P$d(a) {
@@ -34859,18 +34867,15 @@ var require_elk_bundled = __commonJS({
               return eeb[b];
             }
             function kzd(a) {
-              if (a.Db >> 16 != 3)
-                return null;
+              if (a.Db >> 16 != 3) return null;
               return RD(a.Cb, 27);
             }
             function MCd(a) {
-              if (a.Db >> 16 != 9)
-                return null;
+              if (a.Db >> 16 != 9) return null;
               return RD(a.Cb, 27);
             }
             function Fzd(a) {
-              if (a.Db >> 16 != 6)
-                return null;
+              if (a.Db >> 16 != 6) return null;
               return RD(a.Cb, 74);
             }
             function dVc() {
@@ -34979,43 +34984,35 @@ var require_elk_bundled = __commonJS({
               return new dnb(c);
             }
             function qKd(a) {
-              if (a.p != 0)
-                throw Adb(new cgb());
+              if (a.p != 0) throw Adb(new cgb());
               return Pdb(a.f, 0);
             }
             function zKd(a) {
-              if (a.p != 0)
-                throw Adb(new cgb());
+              if (a.p != 0) throw Adb(new cgb());
               return Pdb(a.k, 0);
             }
             function gBd(a) {
-              if (a.Db >> 16 != 7)
-                return null;
+              if (a.Db >> 16 != 7) return null;
               return RD(a.Cb, 241);
             }
             function xXd(a) {
-              if (a.Db >> 16 != 6)
-                return null;
+              if (a.Db >> 16 != 6) return null;
               return RD(a.Cb, 241);
             }
             function dCd(a) {
-              if (a.Db >> 16 != 7)
-                return null;
+              if (a.Db >> 16 != 7) return null;
               return RD(a.Cb, 167);
             }
             function vCd(a) {
-              if (a.Db >> 16 != 11)
-                return null;
+              if (a.Db >> 16 != 11) return null;
               return RD(a.Cb, 27);
             }
             function uWd(a) {
-              if (a.Db >> 16 != 17)
-                return null;
+              if (a.Db >> 16 != 17) return null;
               return RD(a.Cb, 29);
             }
             function kVd(a) {
-              if (a.Db >> 16 != 3)
-                return null;
+              if (a.Db >> 16 != 3) return null;
               return RD(a.Cb, 155);
             }
             function BDb(a) {
@@ -35459,18 +35456,15 @@ var require_elk_bundled = __commonJS({
               return new Gv(a, c);
             }
             function CXd(a) {
-              if (a.Db >> 16 != 6)
-                return null;
+              if (a.Db >> 16 != 6) return null;
               return RD(yvd(a), 241);
             }
             function sKd(a) {
-              if (a.p != 2)
-                throw Adb(new cgb());
+              if (a.p != 2) throw Adb(new cgb());
               return Ydb(a.f) & Bwe;
             }
             function BKd(a) {
-              if (a.p != 2)
-                throw Adb(new cgb());
+              if (a.p != 2) throw Adb(new cgb());
               return Ydb(a.k) & Bwe;
             }
             function ynb(a) {
@@ -35753,8 +35747,7 @@ var require_elk_bundled = __commonJS({
               return !a.a ? a.c : a.e.length == 0 ? a.a.a : a.a.a + ("" + a.e);
             }
             function Rib(a) {
-              while (a.d > 0 && a.a[--a.d] == 0)
-                ;
+              while (a.d > 0 && a.a[--a.d] == 0) ;
               a.a[a.d++] == 0 && (a.e = 0);
             }
             function fvb(a) {
@@ -36228,23 +36221,19 @@ var require_elk_bundled = __commonJS({
               return !c || c.fk(b);
             }
             function rKd(a) {
-              if (a.p != 1)
-                throw Adb(new cgb());
+              if (a.p != 1) throw Adb(new cgb());
               return Ydb(a.f) << 24 >> 24;
             }
             function AKd(a) {
-              if (a.p != 1)
-                throw Adb(new cgb());
+              if (a.p != 1) throw Adb(new cgb());
               return Ydb(a.k) << 24 >> 24;
             }
             function GKd(a) {
-              if (a.p != 7)
-                throw Adb(new cgb());
+              if (a.p != 7) throw Adb(new cgb());
               return Ydb(a.k) << 16 >> 16;
             }
             function xKd(a) {
-              if (a.p != 7)
-                throw Adb(new cgb());
+              if (a.p != 7) throw Adb(new cgb());
               return Ydb(a.f) << 16 >> 16;
             }
             function Wib(a, b) {
@@ -36513,8 +36502,7 @@ var require_elk_bundled = __commonJS({
             }
             function Tib(a, b) {
               var c;
-              for (c = a.d - 1; c >= 0 && a.a[c] === b[c]; c--)
-                ;
+              for (c = a.d - 1; c >= 0 && a.a[c] === b[c]; c--) ;
               return c < 0;
             }
             function Xx(a) {
@@ -37727,8 +37715,7 @@ var require_elk_bundled = __commonJS({
               return iMc(a, d);
             }
             function Pue(a) {
-              if (a.b <= 0)
-                throw Adb(new Dvb());
+              if (a.b <= 0) throw Adb(new Dvb());
               --a.b;
               a.a -= a.c.c;
               return sgb(a.a);
@@ -37787,8 +37774,7 @@ var require_elk_bundled = __commonJS({
               }
             }
             function NHd(a, b) {
-              if (a.g == null || b >= a.i)
-                throw Adb(new yNd(b, a.i));
+              if (a.g == null || b >= a.i) throw Adb(new yNd(b, a.i));
               return a.g[b];
             }
             function P_d(a, b, c) {
@@ -38921,8 +38907,7 @@ var require_elk_bundled = __commonJS({
               }
             }
             function QHd(a, b) {
-              if (a.g == null || b >= a.i)
-                throw Adb(new yNd(b, a.i));
+              if (a.g == null || b >= a.i) throw Adb(new yNd(b, a.i));
               return a.Wi(b, a.g[b]);
             }
             function Dob(a, b) {
@@ -39356,8 +39341,7 @@ var require_elk_bundled = __commonJS({
             function ZGd(a, b) {
               var c;
               c = a.gc();
-              if (b < 0 || b > c)
-                throw Adb(new aMd(b, c));
+              if (b < 0 || b > c) throw Adb(new aMd(b, c));
               return new CMd(a, b);
             }
             function Cad(a, b) {
@@ -40282,8 +40266,7 @@ var require_elk_bundled = __commonJS({
                 if (a.e == 0) {
                   b = -1;
                 } else {
-                  for (b = 0; a.a[b] == 0; b++)
-                    ;
+                  for (b = 0; a.a[b] == 0; b++) ;
                 }
                 a.b = b;
               }
@@ -40714,8 +40697,7 @@ var require_elk_bundled = __commonJS({
                 if (ZD(a, 82)) {
                   d = a;
                   ZEb(b.c, d);
-                } else
-                  throw Adb(a);
+                } else throw Adb(a);
               }
             }
             function Wdb(a) {
@@ -41326,8 +41308,7 @@ var require_elk_bundled = __commonJS({
             function XGd(a, b, c) {
               var d;
               d = a.gc();
-              if (b > d)
-                throw Adb(new aMd(b, d));
+              if (b > d) throw Adb(new aMd(b, d));
               a.Si() && (c = bHd(a, c));
               return a.Ei(b, c);
             }
@@ -41364,14 +41345,12 @@ var require_elk_bundled = __commonJS({
               } else if (a == 0) {
                 return 0;
               } else {
-                for (b = hwe; (b & a) == 0; b >>= 1)
-                  ;
+                for (b = hwe; (b & a) == 0; b >>= 1) ;
                 return b;
               }
             }
             function zSd(a, b, c) {
-              if (a >= 128)
-                return false;
+              if (a >= 128) return false;
               return a < 64 ? Pdb(Cdb(Sdb(1, a), c), 0) : Pdb(Cdb(Sdb(1, a - 64), b), 0);
             }
             function oQb(a, b, c) {
@@ -41856,8 +41835,7 @@ var require_elk_bundled = __commonJS({
             function fte() {
               Vse();
               var a;
-              if (Cse)
-                return Cse;
+              if (Cse) return Cse;
               a = Zse(hte("M", true));
               a = $se(hte("M", false), a);
               Cse = a;
@@ -42001,8 +41979,7 @@ var require_elk_bundled = __commonJS({
             }
             function Ejb(a, b, c) {
               var d;
-              for (d = c - 1; d >= 0 && a[d] === b[d]; d--)
-                ;
+              for (d = c - 1; d >= 0 && a[d] === b[d]; d--) ;
               return d < 0 ? 0 : Ldb(Cdb(a[d], yxe), Cdb(b[d], yxe)) ? -1 : 1;
             }
             function it(a, b, c) {
@@ -42385,11 +42362,9 @@ var require_elk_bundled = __commonJS({
             }
             function tSd(a) {
               var b, c;
-              if (a == null)
-                return null;
+              if (a == null) return null;
               for (b = 0, c = a.length; b < c; b++) {
-                if (!GSd(a[b]))
-                  return a[b];
+                if (!GSd(a[b])) return a[b];
               }
               return null;
             }
@@ -42554,11 +42529,9 @@ var require_elk_bundled = __commonJS({
             }
             function HSd(a) {
               var b, c;
-              if (a == null)
-                return false;
+              if (a == null) return false;
               for (b = 0, c = a.length; b < c; b++) {
-                if (!GSd(a[b]))
-                  return false;
+                if (!GSd(a[b])) return false;
               }
               return true;
             }
@@ -42815,8 +42788,7 @@ var require_elk_bundled = __commonJS({
                   if (b) {
                     RD(b.g, 379);
                     e = b.i;
-                    for (d = 0; d < e; ++d)
-                      ;
+                    for (d = 0; d < e; ++d) ;
                   }
                 }
               }
@@ -42996,8 +42968,7 @@ var require_elk_bundled = __commonJS({
                 e = Kfb(UD(evb(f)));
                 if (e > c) {
                   break;
-                } else
-                  e >= b && ++d;
+                } else e >= b && ++d;
               }
               return d;
             }
@@ -43009,8 +42980,7 @@ var require_elk_bundled = __commonJS({
                 a = zdb(a);
                 if (ZD(a, 212) || ZD(a, 169)) {
                   return false;
-                } else
-                  throw Adb(a);
+                } else throw Adb(a);
               }
             }
             function Nk(b, c) {
@@ -43021,8 +42991,7 @@ var require_elk_bundled = __commonJS({
                 a = zdb(a);
                 if (ZD(a, 212) || ZD(a, 169)) {
                   return false;
-                } else
-                  throw Adb(a);
+                } else throw Adb(a);
               }
             }
             function Ok(b, c) {
@@ -43033,8 +43002,7 @@ var require_elk_bundled = __commonJS({
                 a = zdb(a);
                 if (ZD(a, 212) || ZD(a, 169)) {
                   return false;
-                } else
-                  throw Adb(a);
+                } else throw Adb(a);
               }
             }
             function Xv(b, c) {
@@ -43045,8 +43013,7 @@ var require_elk_bundled = __commonJS({
                 a = zdb(a);
                 if (ZD(a, 212) || ZD(a, 169)) {
                   return null;
-                } else
-                  throw Adb(a);
+                } else throw Adb(a);
               }
             }
             function Yv(b, c) {
@@ -43057,8 +43024,7 @@ var require_elk_bundled = __commonJS({
                 a = zdb(a);
                 if (ZD(a, 212) || ZD(a, 169)) {
                   return null;
-                } else
-                  throw Adb(a);
+                } else throw Adb(a);
               }
             }
             function aMc(a, b) {
@@ -43074,8 +43040,7 @@ var require_elk_bundled = __commonJS({
             }
             function QAd(a) {
               var b;
-              if ((a.Db & 64) != 0)
-                return awd(a);
+              if ((a.Db & 64) != 0) return awd(a);
               b = new Shb(awd(a));
               b.a += " (name: ";
               Nhb(b, a.zb);
@@ -43205,8 +43170,7 @@ var require_elk_bundled = __commonJS({
             }
             function oVd(a) {
               var b;
-              if ((a.Db & 64) != 0)
-                return awd(a);
+              if ((a.Db & 64) != 0) return awd(a);
               b = new Shb(awd(a));
               b.a += " (source: ";
               Nhb(b, a.d);
@@ -43403,8 +43367,7 @@ var require_elk_bundled = __commonJS({
             function VGd(a, b, c) {
               var d;
               d = a.gc();
-              if (b > d)
-                throw Adb(new aMd(b, d));
+              if (b > d) throw Adb(new aMd(b, d));
               if (a.Si() && a.Hc(c)) {
                 throw Adb(new agb(LIe));
               }
@@ -43827,8 +43790,7 @@ var require_elk_bundled = __commonJS({
             }
             function kyd(a) {
               var b;
-              if ((a.Db & 64) != 0)
-                return awd(a);
+              if ((a.Db & 64) != 0) return awd(a);
               b = new Shb(awd(a));
               b.a += " (identifier: ";
               Nhb(b, a.k);
@@ -43949,8 +43911,7 @@ var require_elk_bundled = __commonJS({
                 if (ZD(a, 606)) {
                   e = a;
                   throw Adb(new Deb(e));
-                } else
-                  throw Adb(a);
+                } else throw Adb(a);
               }
               return c;
             }
@@ -44004,8 +43965,7 @@ var require_elk_bundled = __commonJS({
               var b, c;
               for (c = Nje(BXd(uWd(a))).Kc(); c.Ob(); ) {
                 b = WD(c.Pb());
-                if (bAd(a, b))
-                  return dTd((cTd(), bTd), b);
+                if (bAd(a, b)) return dTd((cTd(), bTd), b);
               }
               return null;
             }
@@ -44239,8 +44199,7 @@ var require_elk_bundled = __commonJS({
             function mSd(a, b, c) {
               var d, e;
               for (d = 0, e = a.length; d < e; d++) {
-                if (zSd((BFb(d, a.length), a.charCodeAt(d)), b, c))
-                  return true;
+                if (zSd((BFb(d, a.length), a.charCodeAt(d)), b, c)) return true;
               }
               return false;
             }
@@ -44306,8 +44265,7 @@ var require_elk_bundled = __commonJS({
             function kSd(a) {
               if (a.e == null) {
                 return a;
-              } else
-                !a.c && (a.c = new lSd((a.f & 256) != 0, a.i, a.a, a.d, (a.f & 16) != 0, a.j, a.g, null));
+              } else !a.c && (a.c = new lSd((a.f & 256) != 0, a.i, a.a, a.d, (a.f & 16) != 0, a.j, a.g, null));
               return a.c;
             }
             function pnc(a) {
@@ -44322,13 +44280,11 @@ var require_elk_bundled = __commonJS({
                 c = vm(RD(a, 307));
                 b = c;
                 return b;
-              } else
-                return ZD(a, 441) ? RD(a, 441).a : ZD(a, 59) ? new Fv(a) : new uv(a);
+              } else return ZD(a, 441) ? RD(a, 441).a : ZD(a, 59) ? new Fv(a) : new uv(a);
             }
             function FSd(a) {
               var b;
-              if (a == null)
-                return true;
+              if (a == null) return true;
               b = a.length;
               return b > 0 && (BFb(b - 1, a.length), a.charCodeAt(b - 1) == 58) && !mSd(a, aSd, bSd);
             }
@@ -44772,8 +44728,7 @@ var require_elk_bundled = __commonJS({
             }
             function MXd(a) {
               var b;
-              if ((a.Db & 64) != 0)
-                return QAd(a);
+              if ((a.Db & 64) != 0) return QAd(a);
               b = new Shb(QAd(a));
               b.a += " (instanceClassName: ";
               Nhb(b, a.D);
@@ -44884,8 +44839,7 @@ var require_elk_bundled = __commonJS({
                 a = zdb(a);
                 if (ZD(a, 77)) {
                   throw Adb(new Jrb());
-                } else
-                  throw Adb(a);
+                } else throw Adb(a);
               }
             }
             function a8d() {
@@ -45086,8 +45040,7 @@ var require_elk_bundled = __commonJS({
             function ose(a, b) {
               var c, d;
               d = b.length;
-              for (c = 0; c < d; c += 2)
-                rte(a, (BFb(c, b.length), b.charCodeAt(c)), (BFb(c + 1, b.length), b.charCodeAt(c + 1)));
+              for (c = 0; c < d; c += 2) rte(a, (BFb(c, b.length), b.charCodeAt(c)), (BFb(c + 1, b.length), b.charCodeAt(c + 1)));
             }
             function G6c(a, b) {
               b.Ug("Min Size Postprocessing", 1);
@@ -45274,8 +45227,7 @@ var require_elk_bundled = __commonJS({
             }
             function kne(a) {
               var b, c, d, e, f;
-              if (a == null)
-                return null;
+              if (a == null) return null;
               f = new bnb();
               for (c = xAd(a), d = 0, e = c.length; d < e; ++d) {
                 b = c[d];
@@ -45285,8 +45237,7 @@ var require_elk_bundled = __commonJS({
             }
             function nne(a) {
               var b, c, d, e, f;
-              if (a == null)
-                return null;
+              if (a == null) return null;
               f = new bnb();
               for (c = xAd(a), d = 0, e = c.length; d < e; ++d) {
                 b = c[d];
@@ -45296,8 +45247,7 @@ var require_elk_bundled = __commonJS({
             }
             function one2(a) {
               var b, c, d, e, f;
-              if (a == null)
-                return null;
+              if (a == null) return null;
               f = new bnb();
               for (c = xAd(a), d = 0, e = c.length; d < e; ++d) {
                 b = c[d];
@@ -45519,8 +45469,7 @@ var require_elk_bundled = __commonJS({
                   d = Xwd(a, b);
                   d == -1 ? a.Eb = c : bD(SD(a.Eb), d, c);
                 }
-              } else
-                c != null && Twd(a, b, c);
+              } else c != null && Twd(a, b, c);
             }
             function tTc(a, b, c, d) {
               var e, f;
@@ -45917,8 +45866,7 @@ var require_elk_bundled = __commonJS({
                 if (ZD(a, 103)) {
                   e = a;
                   throw Adb(e);
-                } else
-                  throw Adb(a);
+                } else throw Adb(a);
               }
             }
             function tEd(a, b, c) {
@@ -45940,11 +45888,9 @@ var require_elk_bundled = __commonJS({
             function sSd(a, b, c, d) {
               var e;
               e = a.length;
-              if (b >= e)
-                return e;
+              if (b >= e) return e;
               for (b = b > 0 ? b : 0; b < e; b++) {
-                if (zSd((BFb(b, a.length), a.charCodeAt(b)), c, d))
-                  break;
+                if (zSd((BFb(b, a.length), a.charCodeAt(b)), c, d)) break;
               }
               return b;
             }
@@ -45982,8 +45928,7 @@ var require_elk_bundled = __commonJS({
             }
             function mne(a) {
               var b;
-              if (a == null)
-                return null;
+              if (a == null) return null;
               b = Hqe(nue(a, true));
               if (b == null) {
                 throw Adb(new Mle("Invalid hexBinary value: '" + a + "'"));
@@ -46199,11 +46144,9 @@ var require_elk_bundled = __commonJS({
             }
             function iSd(a, b) {
               var c, d;
-              if (a.j.length != b.j.length)
-                return false;
+              if (a.j.length != b.j.length) return false;
               for (c = 0, d = a.j.length; c < d; c++) {
-                if (!lhb(a.j[c], b.j[c]))
-                  return false;
+                if (!lhb(a.j[c], b.j[c])) return false;
               }
               return true;
             }
@@ -46219,8 +46162,7 @@ var require_elk_bundled = __commonJS({
                 if (ZD(a, 77)) {
                   b.Xj();
                   throw Adb(new Dvb());
-                } else
-                  throw Adb(a);
+                } else throw Adb(a);
               }
             }
             function xMd(b) {
@@ -46235,8 +46177,7 @@ var require_elk_bundled = __commonJS({
                 if (ZD(a, 77)) {
                   b.Xj();
                   throw Adb(new Dvb());
-                } else
-                  throw Adb(a);
+                } else throw Adb(a);
               }
             }
             function vSd(a) {
@@ -46268,8 +46209,7 @@ var require_elk_bundled = __commonJS({
                 } else {
                   Xub(c);
                 }
-              } else
-                !!c && pQb(a, RAc, null);
+              } else !!c && pQb(a, RAc, null);
               return c;
             }
             function tSb() {
@@ -46331,8 +46271,7 @@ var require_elk_bundled = __commonJS({
             }
             function ine(a) {
               var b;
-              if (a == null)
-                return null;
+              if (a == null) return null;
               b = Aqe(nue(a, true));
               if (b == null) {
                 throw Adb(new Mle("Invalid base64Binary value: '" + a + "'"));
@@ -46348,8 +46287,7 @@ var require_elk_bundled = __commonJS({
                 a = zdb(a);
                 if (ZD(a, 112)) {
                   throw Adb(new veb("Can't get element " + c));
-                } else
-                  throw Adb(a);
+                } else throw Adb(a);
               }
             }
             function ANb(a, b) {
@@ -46710,8 +46648,7 @@ var require_elk_bundled = __commonJS({
             function fZd(a, b) {
               var c, d, e;
               e = RHd(a, b);
-              if (e >= 0)
-                return e;
+              if (e >= 0) return e;
               if (a.ol()) {
                 for (d = 0; d < a.i; ++d) {
                   c = a.pl(RD(a.g[d], 58));
@@ -46725,8 +46662,7 @@ var require_elk_bundled = __commonJS({
             function eHd(a, b, c) {
               var d, e;
               e = a.gc();
-              if (b >= e)
-                throw Adb(new aMd(b, e));
+              if (b >= e) throw Adb(new aMd(b, e));
               if (a.Si()) {
                 d = a.dd(c);
                 if (d >= 0 && d != b) {
@@ -46983,8 +46919,7 @@ var require_elk_bundled = __commonJS({
               } else if (b.Ik() != -2) {
                 d = b.ik();
                 return d == null ? c == null : pb(d, c);
-              } else
-                return b.qk() == a.e.Dh() && c == null;
+              } else return b.qk() == a.e.Dh() && c == null;
             }
             function Io() {
               var a;
@@ -47116,18 +47051,12 @@ var require_elk_bundled = __commonJS({
               return a.a;
             }
             function Xqe(a) {
-              if (a < 48)
-                return -1;
-              if (a > 102)
-                return -1;
-              if (a <= 57)
-                return a - 48;
-              if (a < 65)
-                return -1;
-              if (a <= 70)
-                return a - 65 + 10;
-              if (a < 97)
-                return -1;
+              if (a < 48) return -1;
+              if (a > 102) return -1;
+              if (a <= 57) return a - 48;
+              if (a < 65) return -1;
+              if (a <= 70) return a - 65 + 10;
+              if (a < 97) return -1;
               return a - 97 + 10;
             }
             function ck(a, b) {
@@ -47251,8 +47180,7 @@ var require_elk_bundled = __commonJS({
                 if (ZD(a, 77)) {
                   e = a;
                   throw Adb(new veb(e.g + ize + c + pve + d + ")."));
-                } else
-                  throw Adb(a);
+                } else throw Adb(a);
               }
             }
             function _Pb(b, c, d) {
@@ -47264,8 +47192,7 @@ var require_elk_bundled = __commonJS({
                 if (ZD(a, 77)) {
                   e = a;
                   throw Adb(new veb(e.g + ize + c + pve + d + ")."));
-                } else
-                  throw Adb(a);
+                } else throw Adb(a);
               }
             }
             function aQb(b, c, d) {
@@ -47277,8 +47204,7 @@ var require_elk_bundled = __commonJS({
                 if (ZD(a, 77)) {
                   e = a;
                   throw Adb(new veb(e.g + ize + c + pve + d + ")."));
-                } else
-                  throw Adb(a);
+                } else throw Adb(a);
               }
             }
             function J8b(a) {
@@ -47421,8 +47347,7 @@ var require_elk_bundled = __commonJS({
                 a = zdb(a);
                 if (ZD(a, 333)) {
                   throw Adb(new veb(fze + b.o + "*" + b.p + gze + c + pve + d + hze));
-                } else
-                  throw Adb(a);
+                } else throw Adb(a);
               }
             }
             function QPb(b, c, d) {
@@ -47432,8 +47357,7 @@ var require_elk_bundled = __commonJS({
                 a = zdb(a);
                 if (ZD(a, 333)) {
                   throw Adb(new veb(fze + b.o + "*" + b.p + gze + c + pve + d + hze));
-                } else
-                  throw Adb(a);
+                } else throw Adb(a);
               }
             }
             function RPb(b, c, d) {
@@ -47443,8 +47367,7 @@ var require_elk_bundled = __commonJS({
                 a = zdb(a);
                 if (ZD(a, 333)) {
                   throw Adb(new veb(fze + b.o + "*" + b.p + gze + c + pve + d + hze));
-                } else
-                  throw Adb(a);
+                } else throw Adb(a);
               }
             }
             function lMd(b, c) {
@@ -47459,8 +47382,7 @@ var require_elk_bundled = __commonJS({
                 a = zdb(a);
                 if (ZD(a, 77)) {
                   throw Adb(new Jrb());
-                } else
-                  throw Adb(a);
+                } else throw Adb(a);
               }
             }
             function Y7b(a) {
@@ -47617,8 +47539,7 @@ var require_elk_bundled = __commonJS({
                   a = zdb(a);
                   if (ZD(a, 212)) {
                     return false;
-                  } else
-                    throw Adb(a);
+                  } else throw Adb(a);
                 }
               }
               return false;
@@ -47716,10 +47637,8 @@ var require_elk_bundled = __commonJS({
             }
             function ene(a) {
               var b, c, d;
-              if (!a)
-                return null;
-              if (a.dc())
-                return "";
+              if (!a) return null;
+              if (a.dc()) return "";
               d = new Qhb();
               for (c = a.Kc(); c.Ob(); ) {
                 b = c.Pb();
@@ -47801,8 +47720,7 @@ var require_elk_bundled = __commonJS({
                 if (ZD(a, 77)) {
                   e = a;
                   throw Adb(new veb(e.g + ize + c + pve + d + ")."));
-                } else
-                  throw Adb(a);
+                } else throw Adb(a);
               }
             }
             function dQb(b, c, d) {
@@ -47814,8 +47732,7 @@ var require_elk_bundled = __commonJS({
                 if (ZD(a, 77)) {
                   e = a;
                   throw Adb(new veb(e.g + ize + c + pve + d + ")."));
-                } else
-                  throw Adb(a);
+                } else throw Adb(a);
               }
             }
             function u8b(a) {
@@ -47900,8 +47817,7 @@ var require_elk_bundled = __commonJS({
                     b.hl(null);
                   } catch (a) {
                     a = zdb(a);
-                    if (!ZD(a, 63))
-                      throw Adb(a);
+                    if (!ZD(a, 63)) throw Adb(a);
                   }
                 }
               }
@@ -48167,8 +48083,7 @@ var require_elk_bundled = __commonJS({
                 if (ZD(a, 130)) {
                   c = Ahb(b);
                   d = c[0];
-                } else
-                  throw Adb(a);
+                } else throw Adb(a);
               }
               return hfb(d);
             }
@@ -48185,8 +48100,7 @@ var require_elk_bundled = __commonJS({
                 if (ZD(a, 130)) {
                   c = Ahb(b);
                   d = c[0];
-                } else
-                  throw Adb(a);
+                } else throw Adb(a);
               }
               return hfb(d);
             }
@@ -48261,8 +48175,7 @@ var require_elk_bundled = __commonJS({
             }
             function THd(a, b) {
               var c, d;
-              if (b >= a.i)
-                throw Adb(new yNd(b, a.i));
+              if (b >= a.i) throw Adb(new yNd(b, a.i));
               ++a.j;
               c = a.g[b];
               d = a.i - b - 1;
@@ -48502,8 +48415,7 @@ var require_elk_bundled = __commonJS({
                 a = zdb(a);
                 if (ZD(a, 112)) {
                   throw Adb(new veb("Can't remove element " + c));
-                } else
-                  throw Adb(a);
+                } else throw Adb(a);
               }
             }
             function GA(a, b) {
@@ -49045,8 +48957,7 @@ var require_elk_bundled = __commonJS({
                 if (ZD(a, 103)) {
                   b = a;
                   UId((Hde(), b));
-                } else
-                  throw Adb(a);
+                } else throw Adb(a);
               }
               return new KAd();
             }
@@ -49063,8 +48974,7 @@ var require_elk_bundled = __commonJS({
                 if (ZD(a, 103)) {
                   b = a;
                   UId((Hde(), b));
-                } else
-                  throw Adb(a);
+                } else throw Adb(a);
               }
               return new Mae();
             }
@@ -49081,8 +48991,7 @@ var require_elk_bundled = __commonJS({
                 if (ZD(a, 103)) {
                   b = a;
                   UId((Hde(), b));
-                } else
-                  throw Adb(a);
+                } else throw Adb(a);
               }
               return new rne();
             }
@@ -49441,8 +49350,7 @@ var require_elk_bundled = __commonJS({
             function Bid(a) {
               if (a < 0) {
                 throw Adb(new agb("The input must be positive"));
-              } else
-                return a < sid.length ? Xdb(sid[a]) : $wnd.Math.sqrt(dFe * a) * (Jid(a, a) / Iid(2.718281828459045, a));
+              } else return a < sid.length ? Xdb(sid[a]) : $wnd.Math.sqrt(dFe * a) * (Jid(a, a) / Iid(2.718281828459045, a));
             }
             function PHd(a, b) {
               var c;
@@ -49766,8 +49674,7 @@ var require_elk_bundled = __commonJS({
                 a = zdb(a);
                 if (ZD(a, 77)) {
                   throw Adb(new Jrb());
-                } else
-                  throw Adb(a);
+                } else throw Adb(a);
               }
             }
             function v0b(a) {
@@ -49779,8 +49686,7 @@ var require_elk_bundled = __commonJS({
                 if (b.c == (BEc(), yEc)) {
                   e = d == 0 ? 0 : d - 1;
                   break;
-                } else
-                  d == a.c.length - 1 && (e = d);
+                } else d == a.c.length - 1 && (e = d);
                 d += 1;
               }
               return e;
@@ -50016,8 +49922,7 @@ var require_elk_bundled = __commonJS({
             }
             function GYd(a) {
               var b;
-              if ((a.Db & 64) != 0)
-                return MXd(a);
+              if ((a.Db & 64) != 0) return MXd(a);
               b = new Shb(MXd(a));
               b.a += " (abstract: ";
               Ohb(b, (a.Bb & 256) != 0);
@@ -50058,8 +49963,7 @@ var require_elk_bundled = __commonJS({
                 e = d - b;
                 if (e > AEe) {
                   return c;
-                } else
-                  e > -1e-6 && ++c;
+                } else e > -1e-6 && ++c;
               }
               return c;
             }
@@ -50071,8 +49975,7 @@ var require_elk_bundled = __commonJS({
                 !!b && (c = Ivd(b, a, -4, c));
                 c = e2d(a, b, c);
                 !!c && c.oj();
-              } else
-                (a.Db & 4) != 0 && (a.Db & 1) == 0 && qvd(a, new N3d(a, 1, 3, b, b));
+              } else (a.Db & 4) != 0 && (a.Db & 1) == 0 && qvd(a, new N3d(a, 1, 3, b, b));
             }
             function q2d(a, b) {
               var c;
@@ -50082,8 +49985,7 @@ var require_elk_bundled = __commonJS({
                 !!b && (c = Ivd(b, a, -1, c));
                 c = g2d(a, b, c);
                 !!c && c.oj();
-              } else
-                (a.Db & 4) != 0 && (a.Db & 1) == 0 && qvd(a, new N3d(a, 1, 0, b, b));
+              } else (a.Db & 4) != 0 && (a.Db & 1) == 0 && qvd(a, new N3d(a, 1, 0, b, b));
             }
             function Lge(a, b, c, d) {
               var e, f, g10, h;
@@ -50098,11 +50000,9 @@ var require_elk_bundled = __commonJS({
             }
             function bne(a) {
               var b, c, d;
-              if (a == null)
-                return null;
+              if (a == null) return null;
               c = RD(a, 15);
-              if (c.dc())
-                return "";
+              if (c.dc()) return "";
               d = new Qhb();
               for (b = c.Kc(); b.Ob(); ) {
                 Nhb(d, (nme(), WD(b.Pb())));
@@ -50112,11 +50012,9 @@ var require_elk_bundled = __commonJS({
             }
             function fne(a) {
               var b, c, d;
-              if (a == null)
-                return null;
+              if (a == null) return null;
               c = RD(a, 15);
-              if (c.dc())
-                return "";
+              if (c.dc()) return "";
               d = new Qhb();
               for (b = c.Kc(); b.Ob(); ) {
                 Nhb(d, (nme(), WD(b.Pb())));
@@ -50183,8 +50081,7 @@ var require_elk_bundled = __commonJS({
                   return c.e == null;
                 } catch (a) {
                   a = zdb(a);
-                  if (!ZD(a, 33))
-                    throw Adb(a);
+                  if (!ZD(a, 33)) throw Adb(a);
                 }
               }
               return false;
@@ -50590,8 +50487,7 @@ var require_elk_bundled = __commonJS({
             }
             function aCd() {
               var a;
-              if (YBd)
-                return RD(N5d((YSd(), XSd), $He), 2115);
+              if (YBd) return RD(N5d((YSd(), XSd), $He), 2115);
               a = RD(ZD(Xjb((YSd(), XSd), $He), 569) ? Xjb(XSd, $He) : new _Bd(), 569);
               YBd = true;
               ZBd(a);
@@ -50602,8 +50498,7 @@ var require_elk_bundled = __commonJS({
             }
             function Tge(a, b, c) {
               var d, e;
-              if (a.j == 0)
-                return c;
+              if (a.j == 0) return c;
               e = RD(jZd(a, b, c), 76);
               d = c.Lk();
               if (!d.rk() || !a.a.am(d)) {
@@ -51447,8 +51342,7 @@ var require_elk_bundled = __commonJS({
                   if (ZD(a, 33)) {
                     e = a;
                     c = e;
-                  } else
-                    throw Adb(a);
+                  } else throw Adb(a);
                 }
               }
               throw Adb(new RSd(c));
@@ -51579,10 +51473,8 @@ var require_elk_bundled = __commonJS({
               var d, e, f;
               ++a.j;
               e = a.Ej();
-              if (b >= e || b < 0)
-                throw Adb(new veb(MIe + b + NIe + e));
-              if (c >= e || c < 0)
-                throw Adb(new veb(OIe + c + NIe + e));
+              if (b >= e || b < 0) throw Adb(new veb(MIe + b + NIe + e));
+              if (c >= e || c < 0) throw Adb(new veb(OIe + c + NIe + e));
               b != c ? d = (f = a.Cj(c), a.qj(b, f), f) : d = a.xj(c);
               return d;
             }
@@ -51631,8 +51523,7 @@ var require_elk_bundled = __commonJS({
                 !!b && (c = RD(b, 54).Rh(a, 4, t7, c));
                 c = rAd(a, b, c);
                 !!c && c.oj();
-              } else
-                (a.Db & 4) != 0 && (a.Db & 1) == 0 && qvd(a, new N3d(a, 1, 1, b, b));
+              } else (a.Db & 4) != 0 && (a.Db & 1) == 0 && qvd(a, new N3d(a, 1, 1, b, b));
             }
             function p2d(a, b) {
               var c;
@@ -51641,8 +51532,7 @@ var require_elk_bundled = __commonJS({
                 !!b && (!b.b && (b.b = new pae(new lae())), nae(b.b, a));
                 c = f2d(a, b, null);
                 !!c && c.oj();
-              } else
-                (a.Db & 4) != 0 && (a.Db & 1) == 0 && qvd(a, new N3d(a, 1, 4, b, b));
+              } else (a.Db & 4) != 0 && (a.Db & 1) == 0 && qvd(a, new N3d(a, 1, 4, b, b));
             }
             function $mc(a, b) {
               var c;
@@ -51915,8 +51805,7 @@ var require_elk_bundled = __commonJS({
                 !!b && (c = RD(b, 54).Rh(a, 1, n7, c));
                 c = hBd(a, b, c);
                 !!c && c.oj();
-              } else
-                (a.Db & 4) != 0 && (a.Db & 1) == 0 && qvd(a, new N3d(a, 1, 4, b, b));
+              } else (a.Db & 4) != 0 && (a.Db & 1) == 0 && qvd(a, new N3d(a, 1, 4, b, b));
             }
             function YDd(a, b) {
               var c, d, e, f;
@@ -52083,8 +51972,7 @@ var require_elk_bundled = __commonJS({
                 throw Adb(new agb("k and n must be positive"));
               } else if (b > a) {
                 throw Adb(new agb("k must be smaller than n"));
-              } else
-                return b == 0 || b == a ? 1 : a == 0 ? 0 : Bid(a) / (Bid(b) * Bid(a - b));
+              } else return b == 0 || b == a ? 1 : a == 0 ? 0 : Bid(a) / (Bid(b) * Bid(a - b));
             }
             function msd(a, b) {
               var c, d, e, f;
@@ -52101,8 +51989,7 @@ var require_elk_bundled = __commonJS({
             }
             function Fyd(a) {
               var b;
-              if ((a.Db & 64) != 0)
-                return kyd(a);
+              if ((a.Db & 64) != 0) return kyd(a);
               b = new Shb(kyd(a));
               b.a += " (height: ";
               Khb(b, a.f);
@@ -52187,8 +52074,7 @@ var require_elk_bundled = __commonJS({
               b = 0;
               for (a = 0; a < "X".length; a++) {
                 c = rse((BFb(a, "X".length), "X".charCodeAt(a)));
-                if (c == 0)
-                  throw Adb(new Lqe((BFb(a, "X".length + 1), "Unknown Option: " + "X".substr(a))));
+                if (c == 0) throw Adb(new Lqe((BFb(a, "X".length + 1), "Unknown Option: " + "X".substr(a))));
                 b |= c;
               }
               return b;
@@ -52277,8 +52163,7 @@ var require_elk_bundled = __commonJS({
             function Iqe(a) {
               Gqe();
               var b, c, d, e, f;
-              if (a == null)
-                return null;
+              if (a == null) return null;
               d = a.length;
               e = d * 2;
               b = $C(hE, zwe, 28, e, 15, 1);
@@ -52470,8 +52355,7 @@ var require_elk_bundled = __commonJS({
                   a = zdb(a);
                   if (ZD(a, 169) || ZD(a, 212)) {
                     return false;
-                  } else
-                    throw Adb(a);
+                  } else throw Adb(a);
                 }
               }
               return false;
@@ -52709,8 +52593,7 @@ var require_elk_bundled = __commonJS({
             }
             function gCd(a) {
               var b;
-              if ((a.Db & 64) != 0)
-                return Fyd(a);
+              if ((a.Db & 64) != 0) return Fyd(a);
               b = new dib(FHe);
               !a.a || Zhb(Zhb((b.a += ' "', b), a.a), '"');
               Zhb(Uhb(Zhb(Uhb(Zhb(Uhb(Zhb(Uhb((b.a += " (", b), a.i), ","), a.j), " | "), a.g), ","), a.f), ")");
@@ -52773,8 +52656,7 @@ var require_elk_bundled = __commonJS({
                     d = a;
                     Qz();
                     Wz(ZD(d, 486) ? RD(d, 486).ke() : d);
-                  } else
-                    throw Adb(a);
+                  } else throw Adb(a);
                 }
               }
               return c;
@@ -53479,8 +53361,7 @@ var require_elk_bundled = __commonJS({
             }
             function Cne() {
               var a;
-              if (wne)
-                return RD(N5d((YSd(), XSd), dLe), 2044);
+              if (wne) return RD(N5d((YSd(), XSd), dLe), 2044);
               Dne();
               a = RD(ZD(Xjb((YSd(), XSd), dLe), 594) ? Xjb(XSd, dLe) : new Bne(), 594);
               wne = true;
@@ -53756,8 +53637,7 @@ var require_elk_bundled = __commonJS({
                   }
                 } catch (a) {
                   a = zdb(a);
-                  if (!ZD(a, 63))
-                    throw Adb(a);
+                  if (!ZD(a, 63)) throw Adb(a);
                 }
               }
               return b;
@@ -53947,8 +53827,7 @@ var require_elk_bundled = __commonJS({
                   if (ZD(a, 130)) {
                     e = a;
                     throw Adb(new RSd(e));
-                  } else
-                    throw Adb(a);
+                  } else throw Adb(a);
                 }
               }
               d = (!b.a && (b.a = new Zde(b)), b.a);
@@ -54807,13 +54686,11 @@ var require_elk_bundled = __commonJS({
             function Sqe(a, b) {
               var c, d, e, f;
               Mqe(a);
-              if (a.c != 0 || a.a != 123)
-                throw Adb(new Lqe(TId((Hde(), eJe))));
+              if (a.c != 0 || a.a != 123) throw Adb(new Lqe(TId((Hde(), eJe))));
               f = b == 112;
               d = a.d;
               c = phb(a.i, 125, d);
-              if (c < 0)
-                throw Adb(new Lqe(TId((Hde(), fJe))));
+              if (c < 0) throw Adb(new Lqe(TId((Hde(), fJe))));
               e = zhb(a.i, d, c);
               a.d = c + 1;
               return ite(e, f, (a.e & 512) == 512);
@@ -54919,12 +54796,10 @@ var require_elk_bundled = __commonJS({
                     }
                   } catch (a) {
                     a = zdb(a);
-                    if (!ZD(a, 130))
-                      throw Adb(a);
+                    if (!ZD(a, 130)) throw Adb(a);
                   }
                   return null;
-                } else
-                  throw Adb(b);
+                } else throw Adb(b);
               }
             }
             function Rvd(a, b) {
@@ -54942,8 +54817,7 @@ var require_elk_bundled = __commonJS({
             function _ae() {
               Tae();
               var a;
-              if (Sae)
-                return RD(N5d((YSd(), XSd), AKe), 2038);
+              if (Sae) return RD(N5d((YSd(), XSd), AKe), 2038);
               RRd(UK, new hde());
               abe();
               a = RD(ZD(Xjb((YSd(), XSd), AKe), 560) ? Xjb(XSd, AKe) : new $ae(), 560);
@@ -55057,10 +54931,8 @@ var require_elk_bundled = __commonJS({
             function SHd(a, b, c) {
               var d;
               ++a.j;
-              if (b >= a.i)
-                throw Adb(new veb(MIe + b + NIe + a.i));
-              if (c >= a.i)
-                throw Adb(new veb(OIe + c + NIe + a.i));
+              if (b >= a.i) throw Adb(new veb(MIe + b + NIe + a.i));
+              if (c >= a.i) throw Adb(new veb(OIe + c + NIe + a.i));
               d = a.g[c];
               if (b != c) {
                 b < c ? hib(a.g, b, a.g, b + 1, c - b) : hib(a.g, c + 1, a.g, c, b - c);
@@ -55511,8 +55383,7 @@ var require_elk_bundled = __commonJS({
               var c, d, e, f, g10;
               c = RD(Ywd(a.a, 4), 129);
               g10 = c == null ? 0 : c.length;
-              if (b >= g10)
-                throw Adb(new aMd(b, g10));
+              if (b >= g10) throw Adb(new aMd(b, g10));
               e = c[b];
               if (g10 == 1) {
                 d = null;
@@ -55750,8 +55621,7 @@ var require_elk_bundled = __commonJS({
             }
             function Qzd(a) {
               var b;
-              if ((a.Db & 64) != 0)
-                return awd(a);
+              if ((a.Db & 64) != 0) return awd(a);
               b = new Shb(awd(a));
               b.a += " (startX: ";
               Khb(b, a.j);
@@ -55768,8 +55638,7 @@ var require_elk_bundled = __commonJS({
             }
             function cWd(a) {
               var b;
-              if ((a.Db & 64) != 0)
-                return QAd(a);
+              if ((a.Db & 64) != 0) return QAd(a);
               b = new Shb(QAd(a));
               b.a += " (ordered: ";
               Ohb(b, (a.Bb & 256) != 0);
@@ -56273,8 +56142,7 @@ var require_elk_bundled = __commonJS({
                 d = Uib(a);
                 if (e < d) {
                   return false;
-                } else
-                  d == e ? c = -c : c = ~c;
+                } else d == e ? c = -c : c = ~c;
               }
               return (c & b) != 0;
             }
@@ -56854,8 +56722,7 @@ var require_elk_bundled = __commonJS({
                   if (h.f.d) {
                     f.d.d += d + Tye;
                     f.d.a -= d + Tye;
-                  } else
-                    h.f.a && (f.d.a -= d + Tye);
+                  } else h.f.a && (f.d.a -= d + Tye);
                 }
               }
             }
@@ -57220,8 +57087,7 @@ var require_elk_bundled = __commonJS({
                 e = ASd(b);
                 LSd(fSd, b, e);
                 c != null && (e = hSd(e, c));
-              } else
-                c != null && (e = hSd(e, (uFb(c), c)));
+              } else c != null && (e = hSd(e, (uFb(c), c)));
               return e;
             }
             function Ree(a, b, c, d) {
@@ -57235,12 +57101,10 @@ var require_elk_bundled = __commonJS({
                   if (c == null) {
                     if (g10 == null) {
                       return f;
-                    } else
-                      !i10 && (i10 = f);
+                    } else !i10 && (i10 = f);
                   } else if (lhb(c, g10)) {
                     return f;
-                  } else
-                    g10 == null && !i10 && (i10 = f);
+                  } else g10 == null && !i10 && (i10 = f);
                 }
               }
               return null;
@@ -57256,12 +57120,10 @@ var require_elk_bundled = __commonJS({
                   if (c == null) {
                     if (g10 == null) {
                       return f;
-                    } else
-                      !i10 && (i10 = f);
+                    } else !i10 && (i10 = f);
                   } else if (lhb(c, g10)) {
                     return f;
-                  } else
-                    g10 == null && !i10 && (i10 = f);
+                  } else g10 == null && !i10 && (i10 = f);
                 }
               }
               return null;
@@ -57365,10 +57227,8 @@ var require_elk_bundled = __commonJS({
             }
             function vte(a) {
               var b, c, d;
-              if (a.c)
-                return;
-              if (a.b == null)
-                return;
+              if (a.c) return;
+              if (a.b == null) return;
               for (b = a.b.length - 4; b >= 0; b -= 2) {
                 for (c = 0; c <= b; c += 2) {
                   if (a.b[c] > a.b[c + 2] || a.b[c] === a.b[c + 2] && a.b[c + 1] > a.b[c + 3]) {
@@ -57521,21 +57381,17 @@ var require_elk_bundled = __commonJS({
             function Hqe(a) {
               Gqe();
               var b, c, d, e, f, g10, h;
-              if (a == null)
-                return null;
+              if (a == null) return null;
               e = a.length;
-              if (e % 2 != 0)
-                return null;
+              if (e % 2 != 0) return null;
               b = Ahb(a);
               f = e / 2 | 0;
               c = $C(gE, YHe, 28, f, 15, 1);
               for (d = 0; d < f; d++) {
                 g10 = Eqe[b[d * 2]];
-                if (g10 == -1)
-                  return null;
+                if (g10 == -1) return null;
                 h = Eqe[b[d * 2 + 1]];
-                if (h == -1)
-                  return null;
+                if (h == -1) return null;
                 c[d] = (g10 << 4 | h) << 24 >> 24;
               }
               return c;
@@ -57696,8 +57552,7 @@ var require_elk_bundled = __commonJS({
                   }
                   b.a += "\\";
                   Jhb(b, c & Bwe);
-                } else
-                  !!b && Jhb(b, c & Bwe);
+                } else !!b && Jhb(b, c & Bwe);
               }
               return b ? b.a : a;
             }
@@ -57788,24 +57643,23 @@ var require_elk_bundled = __commonJS({
               b = true;
               e = null;
               f = null;
-              j:
-                for (i10 = new Anb(a.a); i10.a < i10.c.c.length; ) {
-                  h = RD(ynb(i10), 10);
-                  for (d = new is(Mr(Z2b(h).a.Kc(), new ir())); gs(d); ) {
-                    c = RD(hs(d), 18);
-                    if (!!e && e != h) {
-                      b = false;
-                      break j;
-                    }
-                    e = h;
-                    g10 = c.c.i;
-                    if (!!f && f != g10) {
-                      b = false;
-                      break j;
-                    }
-                    f = g10;
+              j: for (i10 = new Anb(a.a); i10.a < i10.c.c.length; ) {
+                h = RD(ynb(i10), 10);
+                for (d = new is(Mr(Z2b(h).a.Kc(), new ir())); gs(d); ) {
+                  c = RD(hs(d), 18);
+                  if (!!e && e != h) {
+                    b = false;
+                    break j;
                   }
+                  e = h;
+                  g10 = c.c.i;
+                  if (!!f && f != g10) {
+                    b = false;
+                    break j;
+                  }
+                  f = g10;
                 }
+              }
               return b;
             }
             function mTc(a, b, c) {
@@ -58574,41 +58428,35 @@ var require_elk_bundled = __commonJS({
             function Mzd(a, b) {
               var c, d;
               if (b != a.Cb || a.Db >> 16 != 6 && !!b) {
-                if (Oje(a, b))
-                  throw Adb(new agb(UHe + Qzd(a)));
+                if (Oje(a, b)) throw Adb(new agb(UHe + Qzd(a)));
                 d = null;
                 !!a.Cb && (d = (c = a.Db >> 16, c >= 0 ? Czd(a, d) : a.Cb.Th(a, -1 - c, null, d)));
                 !!b && (d = Ivd(b, a, 6, d));
                 d = Bzd(a, b, d);
                 !!d && d.oj();
-              } else
-                (a.Db & 4) != 0 && (a.Db & 1) == 0 && qvd(a, new N3d(a, 1, 6, b, b));
+              } else (a.Db & 4) != 0 && (a.Db & 1) == 0 && qvd(a, new N3d(a, 1, 6, b, b));
             }
             function pzd(a, b) {
               var c, d;
               if (b != a.Cb || a.Db >> 16 != 3 && !!b) {
-                if (Oje(a, b))
-                  throw Adb(new agb(UHe + qzd(a)));
+                if (Oje(a, b)) throw Adb(new agb(UHe + qzd(a)));
                 d = null;
                 !!a.Cb && (d = (c = a.Db >> 16, c >= 0 ? jzd(a, d) : a.Cb.Th(a, -1 - c, null, d)));
                 !!b && (d = Ivd(b, a, 12, d));
                 d = izd(a, b, d);
                 !!d && d.oj();
-              } else
-                (a.Db & 4) != 0 && (a.Db & 1) == 0 && qvd(a, new N3d(a, 1, 3, b, b));
+              } else (a.Db & 4) != 0 && (a.Db & 1) == 0 && qvd(a, new N3d(a, 1, 3, b, b));
             }
             function NCd(a, b) {
               var c, d;
               if (b != a.Cb || a.Db >> 16 != 9 && !!b) {
-                if (Oje(a, b))
-                  throw Adb(new agb(UHe + OCd(a)));
+                if (Oje(a, b)) throw Adb(new agb(UHe + OCd(a)));
                 d = null;
                 !!a.Cb && (d = (c = a.Db >> 16, c >= 0 ? LCd(a, d) : a.Cb.Th(a, -1 - c, null, d)));
                 !!b && (d = Ivd(b, a, 9, d));
                 d = KCd(a, b, d);
                 !!d && d.oj();
-              } else
-                (a.Db & 4) != 0 && (a.Db & 1) == 0 && qvd(a, new N3d(a, 1, 9, b, b));
+              } else (a.Db & 4) != 0 && (a.Db & 1) == 0 && qvd(a, new N3d(a, 1, 9, b, b));
             }
             function tWd(b) {
               var c, d, e, f, g10;
@@ -58629,8 +58477,7 @@ var require_elk_bundled = __commonJS({
                         a = zdb(a);
                         if (ZD(a, 82)) {
                           b.g = null;
-                        } else
-                          throw Adb(a);
+                        } else throw Adb(a);
                       }
                     }
                     b.i = f;
@@ -58663,8 +58510,7 @@ var require_elk_bundled = __commonJS({
                   e = nfb(rb(b)) + "@" + (d = (gib(), jFb(b)) >>> 0, d.toString(16));
                   lBb(pBb(), (SAb(), "Exception during lenientFormat for " + e), c);
                   return "<" + e + " threw " + nfb(c.Rm) + ">";
-                } else
-                  throw Adb(a);
+                } else throw Adb(a);
               }
             }
             function mTb(a, b, c) {
@@ -58785,15 +58631,13 @@ var require_elk_bundled = __commonJS({
             function yCd(a, b) {
               var c, d;
               if (b != a.Cb || a.Db >> 16 != 11 && !!b) {
-                if (Oje(a, b))
-                  throw Adb(new agb(UHe + zCd(a)));
+                if (Oje(a, b)) throw Adb(new agb(UHe + zCd(a)));
                 d = null;
                 !!a.Cb && (d = (c = a.Db >> 16, c >= 0 ? sCd(a, d) : a.Cb.Th(a, -1 - c, null, d)));
                 !!b && (d = Ivd(b, a, 10, d));
                 d = rCd(a, b, d);
                 !!d && d.oj();
-              } else
-                (a.Db & 4) != 0 && (a.Db & 1) == 0 && qvd(a, new N3d(a, 1, 11, b, b));
+              } else (a.Db & 4) != 0 && (a.Db & 1) == 0 && qvd(a, new N3d(a, 1, 11, b, b));
             }
             function C0b(a) {
               var b, c, d, e;
@@ -59304,28 +59148,24 @@ var require_elk_bundled = __commonJS({
             function eCd(a, b) {
               var c, d;
               if (b != a.Cb || a.Db >> 16 != 7 && !!b) {
-                if (Oje(a, b))
-                  throw Adb(new agb(UHe + gCd(a)));
+                if (Oje(a, b)) throw Adb(new agb(UHe + gCd(a)));
                 d = null;
                 !!a.Cb && (d = (c = a.Db >> 16, c >= 0 ? cCd(a, d) : a.Cb.Th(a, -1 - c, null, d)));
                 !!b && (d = RD(b, 54).Rh(a, 1, H4, d));
                 d = bCd(a, b, d);
                 !!d && d.oj();
-              } else
-                (a.Db & 4) != 0 && (a.Db & 1) == 0 && qvd(a, new N3d(a, 1, 7, b, b));
+              } else (a.Db & 4) != 0 && (a.Db & 1) == 0 && qvd(a, new N3d(a, 1, 7, b, b));
             }
             function lVd(a, b) {
               var c, d;
               if (b != a.Cb || a.Db >> 16 != 3 && !!b) {
-                if (Oje(a, b))
-                  throw Adb(new agb(UHe + oVd(a)));
+                if (Oje(a, b)) throw Adb(new agb(UHe + oVd(a)));
                 d = null;
                 !!a.Cb && (d = (c = a.Db >> 16, c >= 0 ? iVd(a, d) : a.Cb.Th(a, -1 - c, null, d)));
                 !!b && (d = RD(b, 54).Rh(a, 0, p7, d));
                 d = hVd(a, b, d);
                 !!d && d.oj();
-              } else
-                (a.Db & 4) != 0 && (a.Db & 1) == 0 && qvd(a, new N3d(a, 1, 3, b, b));
+              } else (a.Db & 4) != 0 && (a.Db & 1) == 0 && qvd(a, new N3d(a, 1, 3, b, b));
             }
             function Mjb(a, b) {
               Ljb();
@@ -59644,8 +59484,7 @@ var require_elk_bundled = __commonJS({
                 do {
                   if (h > i10 - a.b && h < i10 + a.b) {
                     return -1;
-                  } else
-                    h > i10 - a.a && h < i10 + a.a && ++d;
+                  } else h > i10 - a.a && h < i10 + a.a && ++d;
                   h <= i10 && f.b != f.d.c ? h = Kfb(UD(evb(f))) : i10 <= h && g10.b != g10.d.c ? i10 = Kfb(UD(evb(g10))) : e = false;
                 } while (e);
               }
@@ -60314,8 +60153,7 @@ var require_elk_bundled = __commonJS({
               e = $C(kE, Pwe, 28, f + 1, 15, 1);
               ujb(e, f, a.a, d, b);
               if (a.e < 0) {
-                for (c = 0; c < d && a.a[c] == 0; c++)
-                  ;
+                for (c = 0; c < d && a.a[c] == 0; c++) ;
                 if (c < d || b > 0 && a.a[c] << 32 - b != 0) {
                   for (c = 0; c < f && e[c] == -1; c++) {
                     e[c] = 0;
@@ -60787,13 +60625,11 @@ var require_elk_bundled = __commonJS({
               a.j = a.i.length;
               Mqe(a);
               f = Qqe(a);
-              if (a.d != a.j)
-                throw Adb(new Lqe(TId((Hde(), TIe))));
+              if (a.d != a.j) throw Adb(new Lqe(TId((Hde(), TIe))));
               if (a.g) {
                 for (d = 0; d < a.g.a.c.length; d++) {
                   e = RD(eyb(a.g, d), 592);
-                  if (a.f <= e.a)
-                    throw Adb(new Lqe(TId((Hde(), UIe))));
+                  if (a.f <= e.a) throw Adb(new Lqe(TId((Hde(), UIe))));
                 }
                 a.g.a.c.length = 0;
               }
@@ -60850,20 +60686,19 @@ var require_elk_bundled = __commonJS({
               var d, e, f, g10, h, i10, j, k, l, m;
               m = b.c.length;
               l = (j = a.Ih(c), RD(j >= 0 ? a.Lh(j, false, true) : Qvd(a, c, false), 61));
-              n:
-                for (f = l.Kc(); f.Ob(); ) {
-                  e = RD(f.Pb(), 58);
-                  for (k = 0; k < m; ++k) {
-                    g10 = (tFb(k, b.c.length), RD(b.c[k], 76));
-                    i10 = g10.md();
-                    h = g10.Lk();
-                    d = e.Nh(h, false);
-                    if (i10 == null ? d != null : !pb(i10, d)) {
-                      continue n;
-                    }
+              n: for (f = l.Kc(); f.Ob(); ) {
+                e = RD(f.Pb(), 58);
+                for (k = 0; k < m; ++k) {
+                  g10 = (tFb(k, b.c.length), RD(b.c[k], 76));
+                  i10 = g10.md();
+                  h = g10.Lk();
+                  d = e.Nh(h, false);
+                  if (i10 == null ? d != null : !pb(i10, d)) {
+                    continue n;
                   }
-                  return e;
                 }
+                return e;
+              }
               return null;
             }
             function o6b(a, b) {
@@ -61599,10 +61434,8 @@ var require_elk_bundled = __commonJS({
               for (e = 102; e >= 97; e--) {
                 Eqe[e] = e - 97 + 10 << 24 >> 24;
               }
-              for (f = 0; f < 10; f++)
-                Fqe[f] = 48 + f & Bwe;
-              for (a = 10; a <= 15; a++)
-                Fqe[a] = 65 + a - 10 & Bwe;
+              for (f = 0; f < 10; f++) Fqe[f] = 48 + f & Bwe;
+              for (a = 10; a <= 15; a++) Fqe[a] = 65 + a - 10 & Bwe;
             }
             function yYc(a, b) {
               b.Ug("Process graph bounds", 1);
@@ -61667,8 +61500,7 @@ var require_elk_bundled = __commonJS({
             }
             function Dre(a) {
               var b;
-              if (a.c != 10)
-                throw Adb(new Lqe(TId((Hde(), VIe))));
+              if (a.c != 10) throw Adb(new Lqe(TId((Hde(), VIe))));
               b = a.a;
               switch (b) {
                 case 110:
@@ -62588,8 +62420,7 @@ var require_elk_bundled = __commonJS({
             }
             function GWd(a) {
               var b;
-              if ((a.Db & 64) != 0)
-                return cWd(a);
+              if ((a.Db & 64) != 0) return cWd(a);
               b = new Shb(cWd(a));
               b.a += " (changeable: ";
               Ohb(b, (a.Bb & gwe) != 0);
@@ -63021,8 +62852,7 @@ var require_elk_bundled = __commonJS({
                 a = zdb(a);
                 if (ZD(a, 333)) {
                   throw Adb(new veb(fze + b.o + "*" + b.p + gze + c + pve + d + hze));
-                } else
-                  throw Adb(a);
+                } else throw Adb(a);
               }
             }
             function eMc(a, b, c, d) {
@@ -63106,8 +62936,7 @@ var require_elk_bundled = __commonJS({
             }
             function zCd(a) {
               var b, c, d;
-              if ((a.Db & 64) != 0)
-                return Fyd(a);
+              if ((a.Db & 64) != 0) return Fyd(a);
               b = new dib(GHe);
               c = a.k;
               if (!c) {
@@ -63124,8 +62953,7 @@ var require_elk_bundled = __commonJS({
             }
             function OCd(a) {
               var b, c, d;
-              if ((a.Db & 64) != 0)
-                return Fyd(a);
+              if ((a.Db & 64) != 0) return Fyd(a);
               b = new dib(HHe);
               c = a.k;
               if (!c) {
@@ -63773,13 +63601,11 @@ var require_elk_bundled = __commonJS({
               f = 0;
               while (f < d) {
                 c = ihb(a, f++);
-                if (c == 9 || c == 10 || c == 12 || c == 13 || c == 32)
-                  continue;
+                if (c == 9 || c == 10 || c == 12 || c == 13 || c == 32) continue;
                 if (c == 35) {
                   while (f < d) {
                     c = ihb(a, f++);
-                    if (c == 13 || c == 10)
-                      break;
+                    if (c == 13 || c == 10) break;
                   }
                   continue;
                 }
@@ -63792,8 +63618,7 @@ var require_elk_bundled = __commonJS({
                     Jhb(b, e & Bwe);
                     ++f;
                   }
-                } else
-                  Jhb(b, c & Bwe);
+                } else Jhb(b, c & Bwe);
               }
               return b.a;
             }
@@ -66686,12 +66511,9 @@ var require_elk_bundled = __commonJS({
               }
               xqe[43] = 62;
               xqe[47] = 63;
-              for (f = 0; f <= 25; f++)
-                yqe[f] = 65 + f & Bwe;
-              for (g10 = 26, i10 = 0; g10 <= 51; ++g10, i10++)
-                yqe[g10] = 97 + i10 & Bwe;
-              for (a = 52, h = 0; a <= 61; ++a, h++)
-                yqe[a] = 48 + h & Bwe;
+              for (f = 0; f <= 25; f++) yqe[f] = 65 + f & Bwe;
+              for (g10 = 26, i10 = 0; g10 <= 51; ++g10, i10++) yqe[g10] = 97 + i10 & Bwe;
+              for (a = 52, h = 0; a <= 61; ++a, h++) yqe[a] = 48 + h & Bwe;
               yqe[62] = 43;
               yqe[63] = 47;
             }
@@ -66715,8 +66537,7 @@ var require_elk_bundled = __commonJS({
                   d < 0 ? f = Wib(f, Sjb(-d)) : d > 0 && (g10 = Wib(g10, Sjb(d)));
                   return Qib(f, g10);
                 }
-              } else
-                return e < h ? -1 : 1;
+              } else return e < h ? -1 : 1;
             }
             function pUb(a, b, c) {
               var d, e, f, g10, h, i10, j, k;
@@ -66847,8 +66668,7 @@ var require_elk_bundled = __commonJS({
             function yte(a) {
               Vse();
               var b, c, d, e, f, g10;
-              if (a.e != 4 && a.e != 5)
-                throw Adb(new agb("Token#complementRanges(): must be RANGE: " + a.e));
+              if (a.e != 4 && a.e != 5) throw Adb(new agb("Token#complementRanges(): must be RANGE: " + a.e));
               f = a;
               vte(f);
               ste(f);
@@ -67107,8 +66927,7 @@ var require_elk_bundled = __commonJS({
             function gte() {
               Vse();
               var a, b, c, d, e, f;
-              if (Fse)
-                return Fse;
+              if (Fse) return Fse;
               a = (++Use, new xte(4));
               ute(a, hte(WLe, true));
               wte(a, hte("M", true));
@@ -67843,8 +67662,7 @@ var require_elk_bundled = __commonJS({
                   } else if (a >= txe) {
                     c = (b = a >>> 0, "0" + b.toString(16));
                     d = "\\v" + zhb(c, c.length - 6, c.length);
-                  } else
-                    d = "" + String.fromCharCode(a & Bwe);
+                  } else d = "" + String.fromCharCode(a & Bwe);
               }
               return d;
             }
@@ -68839,8 +68657,7 @@ var require_elk_bundled = __commonJS({
                 nAd = cD(WC(h8, 1), rve, 2114, 0, [new c2d((WA(), YA("yyyy-MM-dd'T'HH:mm:ss'.'SSSZ", _A(($A(), $A(), ZA))))), new c2d(YA("yyyy-MM-dd'T'HH:mm:ss'.'SSS", _A((null, ZA)))), new c2d(YA("yyyy-MM-dd'T'HH:mm:ss", _A((null, ZA)))), new c2d(YA("yyyy-MM-dd'T'HH:mm", _A((null, ZA)))), new c2d(YA("yyyy-MM-dd", _A((null, ZA))))]);
               } catch (a) {
                 a = zdb(a);
-                if (!ZD(a, 82))
-                  throw Adb(a);
+                if (!ZD(a, 82)) throw Adb(a);
               }
             }
             function uKc(a, b) {
@@ -69494,8 +69311,7 @@ var require_elk_bundled = __commonJS({
               g10 = RD(b, 138);
               vte(a);
               vte(g10);
-              if (g10.b == null)
-                return;
+              if (g10.b == null) return;
               a.c = true;
               if (a.b == null) {
                 a.b = $C(kE, Pwe, 28, g10.b.length, 15, 1);
@@ -69574,8 +69390,7 @@ var require_elk_bundled = __commonJS({
             }
             function qzd(a) {
               var b, c, d, e;
-              if ((a.Db & 64) != 0)
-                return kyd(a);
+              if ((a.Db & 64) != 0) return kyd(a);
               b = new dib(BHe);
               d = a.k;
               if (!d) {
@@ -70026,8 +69841,7 @@ var require_elk_bundled = __commonJS({
                         f == Jle || f == Gle ? vLd(a, g10) : ++g10;
                       }
                       j || RD(eHd(a, h, oke(b, c)), 76);
-                    } else
-                      Mge(a, b, c) ? vLd(a, g10) : RD(eHd(a, g10, (nke(), RD(b, 69).xk() ? RD(c, 76) : oke(b, c))), 76);
+                    } else Mge(a, b, c) ? vLd(a, g10) : RD(eHd(a, g10, (nke(), RD(b, 69).xk() ? RD(c, 76) : oke(b, c))), 76);
                     return;
                   }
                 }
@@ -70318,8 +70132,7 @@ var require_elk_bundled = __commonJS({
                   !!k && (n += d);
                   n < j && !e && !f && (n = j);
                   q += n;
-                } else
-                  !e && !f && (q += j);
+                } else !e && !f && (q += j);
                 h = k;
                 i10 = l;
               } while (k);
@@ -70692,22 +70505,18 @@ var require_elk_bundled = __commonJS({
             }
             function ste(a) {
               var b, c, d, e;
-              if (a.b == null || a.b.length <= 2)
-                return;
-              if (a.a)
-                return;
+              if (a.b == null || a.b.length <= 2) return;
+              if (a.a) return;
               b = 0;
               e = 0;
               while (e < a.b.length) {
                 if (b != e) {
                   a.b[b] = a.b[e++];
                   a.b[b + 1] = a.b[e++];
-                } else
-                  e += 2;
+                } else e += 2;
                 c = a.b[b + 1];
                 while (e < a.b.length) {
-                  if (c + 1 < a.b[e])
-                    break;
+                  if (c + 1 < a.b[e]) break;
                   if (c + 1 == a.b[e]) {
                     a.b[b + 1] = a.b[e + 1];
                     c = a.b[b + 1];
@@ -71061,16 +70870,14 @@ var require_elk_bundled = __commonJS({
             }
             function hue(a, b) {
               var c, d, e, f, g10, h;
-              if (!b)
-                return;
+              if (!b) return;
               !a.a && (a.a = new gyb());
               if (a.e == 2) {
                 dyb(a.a, b);
                 return;
               }
               if (b.e == 1) {
-                for (e = 0; e < b.Pm(); e++)
-                  hue(a, b.Lm(e));
+                for (e = 0; e < b.Pm(); e++) hue(a, b.Lm(e));
                 return;
               }
               h = a.a.a.c.length;
@@ -72667,46 +72474,44 @@ var require_elk_bundled = __commonJS({
               a.c = 0;
               a.b = 0;
               d = 2 * b.c.a.c.length + 1;
-              o:
-                for (l = c.Kc(); l.Ob(); ) {
-                  k = RD(l.Pb(), 12);
-                  h = k.j == (qpd(), Yod) || k.j == npd;
-                  n = 0;
-                  if (h) {
-                    m = RD(mQb(k, (Ywc(), Iwc)), 10);
-                    if (!m) {
-                      continue;
-                    }
-                    n += tIc(a, d, k, m);
-                  } else {
-                    for (j = new Anb(k.g); j.a < j.c.c.length; ) {
-                      i10 = RD(ynb(j), 18);
-                      e = i10.d;
-                      if (e.i.c == b.c) {
-                        Rmb(a.a, k);
-                        continue o;
-                      } else {
-                        n += a.g[e.p];
-                      }
-                    }
-                    for (g10 = new Anb(k.e); g10.a < g10.c.c.length; ) {
-                      f = RD(ynb(g10), 18);
-                      e = f.c;
-                      if (e.i.c == b.c) {
-                        Rmb(a.a, k);
-                        continue o;
-                      } else {
-                        n -= a.g[e.p];
-                      }
+              o: for (l = c.Kc(); l.Ob(); ) {
+                k = RD(l.Pb(), 12);
+                h = k.j == (qpd(), Yod) || k.j == npd;
+                n = 0;
+                if (h) {
+                  m = RD(mQb(k, (Ywc(), Iwc)), 10);
+                  if (!m) {
+                    continue;
+                  }
+                  n += tIc(a, d, k, m);
+                } else {
+                  for (j = new Anb(k.g); j.a < j.c.c.length; ) {
+                    i10 = RD(ynb(j), 18);
+                    e = i10.d;
+                    if (e.i.c == b.c) {
+                      Rmb(a.a, k);
+                      continue o;
+                    } else {
+                      n += a.g[e.p];
                     }
                   }
-                  if (k.e.c.length + k.g.c.length > 0) {
-                    a.f[k.p] = n / (k.e.c.length + k.g.c.length);
-                    a.c = $wnd.Math.min(a.c, a.f[k.p]);
-                    a.b = $wnd.Math.max(a.b, a.f[k.p]);
-                  } else
-                    h && (a.f[k.p] = n);
+                  for (g10 = new Anb(k.e); g10.a < g10.c.c.length; ) {
+                    f = RD(ynb(g10), 18);
+                    e = f.c;
+                    if (e.i.c == b.c) {
+                      Rmb(a.a, k);
+                      continue o;
+                    } else {
+                      n -= a.g[e.p];
+                    }
+                  }
                 }
+                if (k.e.c.length + k.g.c.length > 0) {
+                  a.f[k.p] = n / (k.e.c.length + k.g.c.length);
+                  a.c = $wnd.Math.min(a.c, a.f[k.p]);
+                  a.b = $wnd.Math.max(a.b, a.f[k.p]);
+                } else h && (a.f[k.p] = n);
+              }
             }
             function xne(a) {
               a.b = null;
@@ -73107,8 +72912,7 @@ var require_elk_bundled = __commonJS({
                     a = zdb(a);
                     if (ZD(a, 130)) {
                       return null;
-                    } else
-                      throw Adb(a);
+                    } else throw Adb(a);
                   }
                 case 4:
                   try {
@@ -73117,8 +72921,7 @@ var require_elk_bundled = __commonJS({
                     a = zdb(a);
                     if (ZD(a, 130)) {
                       return null;
-                    } else
-                      throw Adb(a);
+                    } else throw Adb(a);
                   }
                 case 3:
                   return c;
@@ -73137,8 +72940,7 @@ var require_elk_bundled = __commonJS({
                     a = zdb(a);
                     if (ZD(a, 33)) {
                       return null;
-                    } else
-                      throw Adb(a);
+                    } else throw Adb(a);
                   }
                 default:
                   throw Adb(new dgb("Invalid type set for this layout option."));
@@ -73383,8 +73185,7 @@ var require_elk_bundled = __commonJS({
                     d = RD(e.Pb(), 239);
                     if (d == b) {
                       continue;
-                    } else
-                      this.e.Hc(d) ? --d.c : this.e.Fc(d);
+                    } else this.e.Hc(d) ? --d.c : this.e.Fc(d);
                   }
                 }
               } else if (c.e) {
@@ -74024,8 +73825,7 @@ var require_elk_bundled = __commonJS({
             function tte(a, b) {
               var c, d, e, f, g10, h, i10, j, k;
               j = b;
-              if (j.b == null || a.b == null)
-                return;
+              if (j.b == null || a.b == null) return;
               vte(a);
               ste(a);
               vte(j);
@@ -74495,8 +74295,7 @@ var require_elk_bundled = __commonJS({
               b.Vg();
             }
             function ZBd(a) {
-              if (a.q)
-                return;
+              if (a.q) return;
               a.q = true;
               a.p = jBd(a, 0);
               a.a = jBd(a, 1);
@@ -74609,8 +74408,7 @@ var require_elk_bundled = __commonJS({
                       }
                     } catch (a) {
                       a = zdb(a);
-                      if (!ZD(a, 103))
-                        throw Adb(a);
+                      if (!ZD(a, 103)) throw Adb(a);
                     }
                   }
                 }
@@ -74823,8 +74621,7 @@ var require_elk_bundled = __commonJS({
                 return;
               }
               j = b;
-              if (j.b == null || a.b == null)
-                return;
+              if (j.b == null || a.b == null) return;
               vte(a);
               ste(a);
               vte(j);
@@ -75180,8 +74977,7 @@ var require_elk_bundled = __commonJS({
               for (f = 0; f < j; ) {
                 d = ihb(a.a, f);
                 if (d >= 97 && d <= 122 || d >= 65 && d <= 90) {
-                  for (g10 = f + 1; g10 < j && ihb(a.a, g10) == d; ++g10)
-                    ;
+                  for (g10 = f + 1; g10 < j && ihb(a.a, g10) == d; ++g10) ;
                   LA(k, d, g10 - f, h, i10, c);
                   f = g10;
                 } else if (d == 39) {
@@ -75277,8 +75073,7 @@ var require_elk_bundled = __commonJS({
                       j = new btb(b);
                       Gyb(c, Inb(h, j));
                     }
-                  } else
-                    ZD(d, 183) ? Gyb(c, hob(RD(d, 183))) : ZD(d, 195) ? Gyb(c, aob(RD(d, 195))) : ZD(d, 201) ? Gyb(c, bob(RD(d, 201))) : ZD(d, 2111) ? Gyb(c, gob(RD(d, 2111))) : ZD(d, 53) ? Gyb(c, eob(RD(d, 53))) : ZD(d, 376) ? Gyb(c, fob(RD(d, 376))) : ZD(d, 846) ? Gyb(c, dob(RD(d, 846))) : ZD(d, 109) && Gyb(c, cob(RD(d, 109)));
+                  } else ZD(d, 183) ? Gyb(c, hob(RD(d, 183))) : ZD(d, 195) ? Gyb(c, aob(RD(d, 195))) : ZD(d, 201) ? Gyb(c, bob(RD(d, 201))) : ZD(d, 2111) ? Gyb(c, gob(RD(d, 2111))) : ZD(d, 53) ? Gyb(c, eob(RD(d, 53))) : ZD(d, 376) ? Gyb(c, fob(RD(d, 376))) : ZD(d, 846) ? Gyb(c, dob(RD(d, 846))) : ZD(d, 109) && Gyb(c, cob(RD(d, 109)));
                 } else {
                   Gyb(c, d == null ? vve : jeb(d));
                 }
@@ -75344,8 +75139,7 @@ var require_elk_bundled = __commonJS({
                       if (ZD(a, 130)) {
                         g10 = a;
                         throw Adb(new RSd(g10));
-                      } else
-                        throw Adb(a);
+                      } else throw Adb(a);
                     }
                     if (k < e.gc()) {
                       m = e.Xb(k);
@@ -75903,22 +75697,14 @@ var require_elk_bundled = __commonJS({
                 do
                   f.a += "[";
                 while ((c = phb(d, 91, ++c)) != -1);
-                if (lhb(e, hve))
-                  f.a += "Z";
-                else if (lhb(e, dKe))
-                  f.a += "B";
-                else if (lhb(e, eKe))
-                  f.a += "C";
-                else if (lhb(e, fKe))
-                  f.a += "D";
-                else if (lhb(e, gKe))
-                  f.a += "F";
-                else if (lhb(e, hKe))
-                  f.a += "I";
-                else if (lhb(e, iKe))
-                  f.a += "J";
-                else if (lhb(e, jKe))
-                  f.a += "S";
+                if (lhb(e, hve)) f.a += "Z";
+                else if (lhb(e, dKe)) f.a += "B";
+                else if (lhb(e, eKe)) f.a += "C";
+                else if (lhb(e, fKe)) f.a += "D";
+                else if (lhb(e, gKe)) f.a += "F";
+                else if (lhb(e, hKe)) f.a += "I";
+                else if (lhb(e, iKe)) f.a += "J";
+                else if (lhb(e, jKe)) f.a += "S";
                 else {
                   f.a += "L";
                   f.a += "" + e;
@@ -75928,26 +75714,17 @@ var require_elk_bundled = __commonJS({
                   return null;
                 } catch (a) {
                   a = zdb(a);
-                  if (!ZD(a, 63))
-                    throw Adb(a);
+                  if (!ZD(a, 63)) throw Adb(a);
                 }
               } else if (qhb(d, Fhb(46)) == -1) {
-                if (lhb(d, hve))
-                  return xdb;
-                else if (lhb(d, dKe))
-                  return gE;
-                else if (lhb(d, eKe))
-                  return hE;
-                else if (lhb(d, fKe))
-                  return iE;
-                else if (lhb(d, gKe))
-                  return jE;
-                else if (lhb(d, hKe))
-                  return kE;
-                else if (lhb(d, iKe))
-                  return lE;
-                else if (lhb(d, jKe))
-                  return wdb;
+                if (lhb(d, hve)) return xdb;
+                else if (lhb(d, dKe)) return gE;
+                else if (lhb(d, eKe)) return hE;
+                else if (lhb(d, fKe)) return iE;
+                else if (lhb(d, gKe)) return jE;
+                else if (lhb(d, hKe)) return kE;
+                else if (lhb(d, iKe)) return lE;
+                else if (lhb(d, jKe)) return wdb;
               }
               return null;
             }
@@ -78232,8 +78009,7 @@ var require_elk_bundled = __commonJS({
                 var c = this;
                 var d = 0;
                 return { next: function() {
-                  if (d >= b.length)
-                    return { done: true };
+                  if (d >= b.length) return { done: true };
                   var a = b[d++];
                   return { value: [a, c.get(a)], done: false };
                 } };
@@ -78297,8 +78073,7 @@ var require_elk_bundled = __commonJS({
             function Bqe(a) {
               zqe();
               var b, c, d, e, f, g10, h, i10, j, k, l, m, n, o10, p, q;
-              if (a == null)
-                return null;
+              if (a == null) return null;
               l = a.length * 8;
               if (l == 0) {
                 return "";
@@ -79138,8 +78913,7 @@ var require_elk_bundled = __commonJS({
                           if (ZD(a, 130)) {
                             i10 = a;
                             throw Adb(new RSd(i10));
-                          } else
-                            throw Adb(a);
+                          } else throw Adb(a);
                         }
                       }
                       for (r = P2d(b.Gh()); r.Ob(); ) {
@@ -79165,8 +78939,7 @@ var require_elk_bundled = __commonJS({
                       a = zdb(a);
                       if (ZD(a, 130)) {
                         o10 = c;
-                      } else
-                        throw Adb(a);
+                      } else throw Adb(a);
                     }
                   }
                   o10 = lhb("%", o10) ? null : oSd(o10);
@@ -79568,8 +79341,7 @@ var require_elk_bundled = __commonJS({
             function oSd(a) {
               gSd();
               var b, c, d, e, f, g10, h, i10;
-              if (a == null)
-                return null;
+              if (a == null) return null;
               e = qhb(a, Fhb(37));
               if (e < 0) {
                 return a;
@@ -80188,16 +79960,14 @@ var require_elk_bundled = __commonJS({
             function Aqe(a) {
               zqe();
               var b, c, d, e, f, g10, h, i10, j, k, l, m, n, o10, p, q;
-              if (a == null)
-                return null;
+              if (a == null) return null;
               f = Ahb(a);
               o10 = Dqe(f);
               if (o10 % 4 != 0) {
                 return null;
               }
               p = o10 / 4 | 0;
-              if (p == 0)
-                return $C(gE, YHe, 28, 0, 15, 1);
+              if (p == 0) return $C(gE, YHe, 28, 0, 15, 1);
               l = null;
               b = 0;
               c = 0;
@@ -80212,8 +79982,7 @@ var require_elk_bundled = __commonJS({
               k = 0;
               l = $C(gE, YHe, 28, p * 3, 15, 1);
               for (; n < p - 1; n++) {
-                if (!Cqe(g10 = f[k++]) || !Cqe(h = f[k++]) || !Cqe(i10 = f[k++]) || !Cqe(j = f[k++]))
-                  return null;
+                if (!Cqe(g10 = f[k++]) || !Cqe(h = f[k++]) || !Cqe(i10 = f[k++]) || !Cqe(j = f[k++])) return null;
                 b = xqe[g10];
                 c = xqe[h];
                 d = xqe[i10];
@@ -80231,16 +80000,14 @@ var require_elk_bundled = __commonJS({
               j = f[k++];
               if (xqe[i10] == -1 || xqe[j] == -1) {
                 if (i10 == 61 && j == 61) {
-                  if ((c & 15) != 0)
-                    return null;
+                  if ((c & 15) != 0) return null;
                   q = $C(gE, YHe, 28, n * 3 + 1, 15, 1);
                   hib(l, 0, q, 0, n * 3);
                   q[m] = (b << 2 | c >> 4) << 24 >> 24;
                   return q;
                 } else if (i10 != 61 && j == 61) {
                   d = xqe[i10];
-                  if ((d & 3) != 0)
-                    return null;
+                  if ((d & 3) != 0) return null;
                   q = $C(gE, YHe, 28, n * 3 + 2, 15, 1);
                   hib(l, 0, q, 0, n * 3);
                   q[m++] = (b << 2 | c >> 4) << 24 >> 24;
@@ -80726,23 +80493,22 @@ var require_elk_bundled = __commonJS({
               if (Dod(RD(mQb(d, (yCc(), BBc)), 101))) {
                 g10 = false;
                 h = false;
-                t:
-                  for (o10 = new Anb(d.j); o10.a < o10.c.c.length; ) {
-                    n = RD(ynb(o10), 12);
-                    for (q = Fl(Al(cD(WC(cJ, 1), rve, 20, 0, [new T3b(n), new _3b(n)]))); gs(q); ) {
-                      p = RD(hs(q), 12);
-                      if (!Heb(TD(mQb(p.i, Uzc)))) {
-                        if (n.j == (qpd(), Yod)) {
-                          g10 = true;
-                          break t;
-                        }
-                        if (n.j == npd) {
-                          h = true;
-                          break t;
-                        }
+                t: for (o10 = new Anb(d.j); o10.a < o10.c.c.length; ) {
+                  n = RD(ynb(o10), 12);
+                  for (q = Fl(Al(cD(WC(cJ, 1), rve, 20, 0, [new T3b(n), new _3b(n)]))); gs(q); ) {
+                    p = RD(hs(q), 12);
+                    if (!Heb(TD(mQb(p.i, Uzc)))) {
+                      if (n.j == (qpd(), Yod)) {
+                        g10 = true;
+                        break t;
+                      }
+                      if (n.j == npd) {
+                        h = true;
+                        break t;
                       }
                     }
                   }
+                }
                 m = h && !g10;
                 l = g10 && !h;
               }
@@ -80924,8 +80690,7 @@ var require_elk_bundled = __commonJS({
                     j = s;
                   }
                   u += j;
-                } else
-                  !m && !n && (u += s);
+                } else !m && !n && (u += s);
                 !!t && p2b(t, u);
                 for (w = new Anb(a.i); w.a < w.c.c.length; ) {
                   v = RD(ynb(w), 131);
@@ -81026,25 +80791,24 @@ var require_elk_bundled = __commonJS({
                   for (e = 0; e < a.i; ++e) {
                     h = a.g[e];
                     n = h;
-                    v:
-                      for (s = 0; s < 2; ++s) {
-                        for (i10 = k; --i10 >= 0; ) {
-                          if (n != null ? pb(n, o10[i10]) : dE(n) === dE(o10[i10])) {
-                            if (r.length <= d) {
-                              q = r;
-                              r = $C(kE, Pwe, 28, 2 * r.length, 15, 1);
-                              hib(q, 0, r, 0, d);
-                            }
-                            r[d++] = e;
-                            WGd(u, o10[i10]);
-                            break v;
+                    v: for (s = 0; s < 2; ++s) {
+                      for (i10 = k; --i10 >= 0; ) {
+                        if (n != null ? pb(n, o10[i10]) : dE(n) === dE(o10[i10])) {
+                          if (r.length <= d) {
+                            q = r;
+                            r = $C(kE, Pwe, 28, 2 * r.length, 15, 1);
+                            hib(q, 0, r, 0, d);
                           }
-                        }
-                        n = n;
-                        if (dE(n) === dE(h)) {
-                          break;
+                          r[d++] = e;
+                          WGd(u, o10[i10]);
+                          break v;
                         }
                       }
+                      n = n;
+                      if (dE(n) === dE(h)) {
+                        break;
+                      }
+                    }
                   }
                   j = u;
                   o10 = u.g;
@@ -81793,8 +81557,7 @@ var require_elk_bundled = __commonJS({
               return new rjd(l, F);
             }
             function zne(a) {
-              if (a.N)
-                return;
+              if (a.N) return;
               a.N = true;
               a.b = jBd(a, 0);
               iBd(a.b, 0);
@@ -82198,48 +81961,47 @@ var require_elk_bundled = __commonJS({
                   case 91: {
                     m = new bnb();
                     Rmb(i10, new KTd(d, m));
-                    n:
-                      for (; ; ) {
-                        switch (ihb(b, ++k)) {
-                          case 39: {
-                            h = phb(b, 39, ++k);
-                            Rmb(m, lwd((AFb(k, h, b.length), b.substr(k, h - k)), f, e));
-                            k = h + 1;
-                            break;
-                          }
-                          case 34: {
-                            h = phb(b, 34, ++k);
-                            Rmb(m, lwd((AFb(k, h, b.length), b.substr(k, h - k)), f, e));
-                            k = h + 1;
-                            break;
-                          }
-                          case 110: {
-                            ++k;
-                            if (b.indexOf("ull", k) == k) {
-                              m.c.push(null);
-                            } else {
-                              throw Adb(new yz(MHe));
-                            }
-                            k += 3;
-                            break;
-                          }
+                    n: for (; ; ) {
+                      switch (ihb(b, ++k)) {
+                        case 39: {
+                          h = phb(b, 39, ++k);
+                          Rmb(m, lwd((AFb(k, h, b.length), b.substr(k, h - k)), f, e));
+                          k = h + 1;
+                          break;
                         }
-                        if (k < l) {
-                          switch (BFb(k, b.length), b.charCodeAt(k)) {
-                            case 44: {
-                              break;
-                            }
-                            case 93: {
-                              break n;
-                            }
-                            default: {
-                              throw Adb(new yz("Expecting , or ]"));
-                            }
+                        case 34: {
+                          h = phb(b, 34, ++k);
+                          Rmb(m, lwd((AFb(k, h, b.length), b.substr(k, h - k)), f, e));
+                          k = h + 1;
+                          break;
+                        }
+                        case 110: {
+                          ++k;
+                          if (b.indexOf("ull", k) == k) {
+                            m.c.push(null);
+                          } else {
+                            throw Adb(new yz(MHe));
                           }
-                        } else {
+                          k += 3;
                           break;
                         }
                       }
+                      if (k < l) {
+                        switch (BFb(k, b.length), b.charCodeAt(k)) {
+                          case 44: {
+                            break;
+                          }
+                          case 93: {
+                            break n;
+                          }
+                          default: {
+                            throw Adb(new yz("Expecting , or ]"));
+                          }
+                        }
+                      } else {
+                        break;
+                      }
+                    }
                     j = k + 1;
                     break;
                   }
@@ -82337,8 +82099,7 @@ var require_elk_bundled = __commonJS({
                     case 80:
                     case 112:
                       f = Sqe(a, a.a);
-                      if (!f)
-                        throw Adb(new Lqe(TId((Hde(), hJe))));
+                      if (!f) throw Adb(new Lqe(TId((Hde(), hJe))));
                       break;
                     default:
                       f = Yse(a.a);
@@ -82346,8 +82107,7 @@ var require_elk_bundled = __commonJS({
                   Mqe(a);
                   break;
                 case 0:
-                  if (a.a == 93 || a.a == 123 || a.a == 125)
-                    throw Adb(new Lqe(TId((Hde(), gJe))));
+                  if (a.a == 93 || a.a == 123 || a.a == 125) throw Adb(new Lqe(TId((Hde(), gJe))));
                   f = Yse(a.a);
                   d = a.a;
                   Mqe(a);
@@ -83035,8 +82795,7 @@ var require_elk_bundled = __commonJS({
                       d = b - 48;
                       while (e < a.j && (b = ihb(a.i, e++)) >= 48 && b <= 57) {
                         d = d * 10 + b - 48;
-                        if (d < 0)
-                          throw Adb(new Lqe(TId((Hde(), CJe))));
+                        if (d < 0) throw Adb(new Lqe(TId((Hde(), CJe))));
                       }
                     } else {
                       throw Adb(new Lqe(TId((Hde(), yJe))));
@@ -83049,17 +82808,14 @@ var require_elk_bundled = __commonJS({
                         c = b - 48;
                         while (e < a.j && (b = ihb(a.i, e++)) >= 48 && b <= 57) {
                           c = c * 10 + b - 48;
-                          if (c < 0)
-                            throw Adb(new Lqe(TId((Hde(), CJe))));
+                          if (c < 0) throw Adb(new Lqe(TId((Hde(), CJe))));
                         }
-                        if (d > c)
-                          throw Adb(new Lqe(TId((Hde(), BJe))));
+                        if (d > c) throw Adb(new Lqe(TId((Hde(), BJe))));
                       } else {
                         c = -1;
                       }
                     }
-                    if (b != 125)
-                      throw Adb(new Lqe(TId((Hde(), zJe))));
+                    if (b != 125) throw Adb(new Lqe(TId((Hde(), zJe))));
                     if (a.bm(e)) {
                       f = (Vse(), Vse(), ++Use, new Kte(9, f));
                       a.d = e + 1;
@@ -83243,16 +82999,14 @@ var require_elk_bundled = __commonJS({
                     }
                   } catch (a) {
                     a = zdb(a);
-                    if (!ZD(a, 63))
-                      throw Adb(a);
+                    if (!ZD(a, 63)) throw Adb(a);
                   }
                 }
                 throw Adb(new agb(XHe + d + "' does not match any member types of the union datatype '" + c.xe() + "'"));
               }
               RD(c, 847).ok();
               f = Qje(c.kk());
-              if (!f)
-                return null;
+              if (!f) return null;
               if (f == SI) {
                 h = 0;
                 try {
@@ -83262,8 +83016,7 @@ var require_elk_bundled = __commonJS({
                   if (ZD(a, 130)) {
                     g10 = Ahb(d);
                     h = g10[0];
-                  } else
-                    throw Adb(a);
+                  } else throw Adb(a);
                 }
                 return hfb(h);
               }
@@ -83273,8 +83026,7 @@ var require_elk_bundled = __commonJS({
                     return b2d(nAd[i10], d);
                   } catch (a) {
                     a = zdb(a);
-                    if (!ZD(a, 33))
-                      throw Adb(a);
+                    if (!ZD(a, 33)) throw Adb(a);
                   }
                 }
                 throw Adb(new agb(XHe + d + "' is not a date formatted string of the form yyyy-MM-dd'T'HH:mm:ss'.'SSSZ or a valid subset thereof"));
@@ -83703,32 +83455,31 @@ var require_elk_bundled = __commonJS({
                 D = $C(kE, Pwe, 28, o10, 15, 1);
                 G = o10;
                 hib(e, 0, D, 0, G);
-                I:
-                  while (true) {
-                    A = 0;
-                    for (j = G - 1; j >= 0; j--) {
-                      F = Bdb(Sdb(A, 32), Cdb(D[j], yxe));
-                      r = yjb(F);
-                      D[j] = Ydb(r);
-                      A = Ydb(Tdb(r, 32));
-                    }
-                    s = Ydb(A);
-                    q = c;
-                    do {
-                      u[--c] = 48 + s % 10 & Bwe;
-                    } while ((s = s / 10 | 0) != 0 && c != 0);
-                    d = 9 - q + c;
-                    for (i10 = 0; i10 < d && c > 0; i10++) {
-                      u[--c] = 48;
-                    }
-                    l = G - 1;
-                    for (; D[l] == 0; l--) {
-                      if (l == 0) {
-                        break I;
-                      }
-                    }
-                    G = l + 1;
+                I: while (true) {
+                  A = 0;
+                  for (j = G - 1; j >= 0; j--) {
+                    F = Bdb(Sdb(A, 32), Cdb(D[j], yxe));
+                    r = yjb(F);
+                    D[j] = Ydb(r);
+                    A = Ydb(Tdb(r, 32));
                   }
+                  s = Ydb(A);
+                  q = c;
+                  do {
+                    u[--c] = 48 + s % 10 & Bwe;
+                  } while ((s = s / 10 | 0) != 0 && c != 0);
+                  d = 9 - q + c;
+                  for (i10 = 0; i10 < d && c > 0; i10++) {
+                    u[--c] = 48;
+                  }
+                  l = G - 1;
+                  for (; D[l] == 0; l--) {
+                    if (l == 0) {
+                      break I;
+                    }
+                  }
+                  G = l + 1;
+                }
                 while (u[c] == 48) {
                   ++c;
                 }
@@ -84644,16 +84395,14 @@ var require_elk_bundled = __commonJS({
                 switch (b) {
                   case 92:
                     d = 10;
-                    if (a.d >= a.j)
-                      throw Adb(new Lqe(TId((Hde(), VIe))));
+                    if (a.d >= a.j) throw Adb(new Lqe(TId((Hde(), VIe))));
                     a.a = ihb(a.i, a.d++);
                     break;
                   case 45:
                     if ((a.e & 512) == 512 && a.d < a.j && ihb(a.i, a.d) == 91) {
                       ++a.d;
                       d = 24;
-                    } else
-                      d = 0;
+                    } else d = 0;
                     break;
                   case 91:
                     if ((a.e & 512) != 512 && a.d < a.j && ihb(a.i, a.d) == 58) {
@@ -84704,12 +84453,9 @@ var require_elk_bundled = __commonJS({
                   break;
                 case 40:
                   d = 6;
-                  if (a.d >= a.j)
-                    break;
-                  if (ihb(a.i, a.d) != 63)
-                    break;
-                  if (++a.d >= a.j)
-                    throw Adb(new Lqe(TId((Hde(), WIe))));
+                  if (a.d >= a.j) break;
+                  if (ihb(a.i, a.d) != 63) break;
+                  if (++a.d >= a.j) throw Adb(new Lqe(TId((Hde(), WIe))));
                   b = ihb(a.i, a.d++);
                   switch (b) {
                     case 58:
@@ -84728,24 +84474,20 @@ var require_elk_bundled = __commonJS({
                       d = 18;
                       break;
                     case 60:
-                      if (a.d >= a.j)
-                        throw Adb(new Lqe(TId((Hde(), WIe))));
+                      if (a.d >= a.j) throw Adb(new Lqe(TId((Hde(), WIe))));
                       b = ihb(a.i, a.d++);
                       if (b == 61) {
                         d = 16;
                       } else if (b == 33) {
                         d = 17;
-                      } else
-                        throw Adb(new Lqe(TId((Hde(), XIe))));
+                      } else throw Adb(new Lqe(TId((Hde(), XIe))));
                       break;
                     case 35:
                       while (a.d < a.j) {
                         b = ihb(a.i, a.d++);
-                        if (b == 41)
-                          break;
+                        if (b == 41) break;
                       }
-                      if (b != 41)
-                        throw Adb(new Lqe(TId((Hde(), YIe))));
+                      if (b != 41) throw Adb(new Lqe(TId((Hde(), YIe))));
                       d = 21;
                       break;
                     default:
@@ -84762,8 +84504,7 @@ var require_elk_bundled = __commonJS({
                   break;
                 case 92:
                   d = 10;
-                  if (a.d >= a.j)
-                    throw Adb(new Lqe(TId((Hde(), VIe))));
+                  if (a.d >= a.j) throw Adb(new Lqe(TId((Hde(), VIe))));
                   a.a = ihb(a.i, a.d++);
                   break;
                 default:
@@ -84901,8 +84642,7 @@ var require_elk_bundled = __commonJS({
                     case 112:
                     case 80:
                       i10 = Sqe(a, c);
-                      if (!i10)
-                        throw Adb(new Lqe(TId((Hde(), hJe))));
+                      if (!i10) throw Adb(new Lqe(TId((Hde(), hJe))));
                       ute(h, i10);
                       d = true;
                       break;
@@ -84916,26 +84656,21 @@ var require_elk_bundled = __commonJS({
                   }
                   f = Fre(a);
                   wte(h, f);
-                  if (a.c != 0 || a.a != 93)
-                    throw Adb(new Lqe(TId((Hde(), lJe))));
+                  if (a.c != 0 || a.a != 93) throw Adb(new Lqe(TId((Hde(), lJe))));
                   break;
                 }
                 Mqe(a);
                 if (!d) {
                   if (j == 0) {
-                    if (c == 91)
-                      throw Adb(new Lqe(TId((Hde(), mJe))));
-                    if (c == 93)
-                      throw Adb(new Lqe(TId((Hde(), nJe))));
-                    if (c == 45 && !e && a.a != 93)
-                      throw Adb(new Lqe(TId((Hde(), oJe))));
+                    if (c == 91) throw Adb(new Lqe(TId((Hde(), mJe))));
+                    if (c == 93) throw Adb(new Lqe(TId((Hde(), nJe))));
+                    if (c == 45 && !e && a.a != 93) throw Adb(new Lqe(TId((Hde(), oJe))));
                   }
                   if (a.c != 0 || a.a != 45 || c == 45 && e) {
                     rte(h, c, c);
                   } else {
                     Mqe(a);
-                    if ((j = a.c) == 1)
-                      throw Adb(new Lqe(TId((Hde(), jJe))));
+                    if ((j = a.c) == 1) throw Adb(new Lqe(TId((Hde(), jJe))));
                     if (j == 0 && a.a == 93) {
                       rte(h, c, c);
                       rte(h, 45, 45);
@@ -84944,25 +84679,19 @@ var require_elk_bundled = __commonJS({
                     } else {
                       g10 = a.a;
                       if (j == 0) {
-                        if (g10 == 91)
-                          throw Adb(new Lqe(TId((Hde(), mJe))));
-                        if (g10 == 93)
-                          throw Adb(new Lqe(TId((Hde(), nJe))));
-                        if (g10 == 45)
-                          throw Adb(new Lqe(TId((Hde(), oJe))));
-                      } else
-                        j == 10 && (g10 = Dre(a));
+                        if (g10 == 91) throw Adb(new Lqe(TId((Hde(), mJe))));
+                        if (g10 == 93) throw Adb(new Lqe(TId((Hde(), nJe))));
+                        if (g10 == 45) throw Adb(new Lqe(TId((Hde(), oJe))));
+                      } else j == 10 && (g10 = Dre(a));
                       Mqe(a);
-                      if (c > g10)
-                        throw Adb(new Lqe(TId((Hde(), rJe))));
+                      if (c > g10) throw Adb(new Lqe(TId((Hde(), rJe))));
                       rte(h, c, g10);
                     }
                   }
                 }
                 e = false;
               }
-              if (a.c == 1)
-                throw Adb(new Lqe(TId((Hde(), jJe))));
+              if (a.c == 1) throw Adb(new Lqe(TId((Hde(), jJe))));
               vte(h);
               ste(h);
               a.b = 0;
@@ -86090,8 +85819,7 @@ var require_elk_bundled = __commonJS({
               }
             }
             function Yae(a) {
-              if (a.gb)
-                return;
+              if (a.gb) return;
               a.gb = true;
               a.b = jBd(a, 0);
               iBd(a.b, 18);
@@ -87208,8 +86936,7 @@ var require_elk_bundled = __commonJS({
             }
             function Ane(a) {
               var b;
-              if (a.O)
-                return;
+              if (a.O) return;
               a.O = true;
               PAd(a, "type");
               CBd(a, "ecore.xml.type");
@@ -87711,8 +87438,7 @@ var require_elk_bundled = __commonJS({
             }
             function $Bd(a) {
               var b, c, d, e, f, g10, h, i10, j, k, l, m, n, o10, p;
-              if (a.r)
-                return;
+              if (a.r) return;
               a.r = true;
               PAd(a, "graph");
               CBd(a, "graph");
@@ -88462,8 +88188,7 @@ var require_elk_bundled = __commonJS({
             }
             function Zae(a) {
               var b, c, d, e, f, g10, h;
-              if (a.hb)
-                return;
+              if (a.hb) return;
               a.hb = true;
               PAd(a, "ecore");
               CBd(a, "ecore");
@@ -90702,8 +90427,7 @@ var require_elk_bundled = __commonJS({
                 a = zdb(a);
                 if (ZD(a, 212)) {
                   return false;
-                } else
-                  throw Adb(a);
+                } else throw Adb(a);
               }
             };
             _.Wd = function _n() {
@@ -91660,8 +91384,7 @@ var require_elk_bundled = __commonJS({
                 a = zdb(a);
                 if (ZD(a, 112)) {
                   throw Adb(new veb("Can't set element " + b));
-                } else
-                  throw Adb(a);
+                } else throw Adb(a);
               }
             };
             var QJ = sfb(Bve, "AbstractSequentialList", 2062);
@@ -91955,8 +91678,7 @@ var require_elk_bundled = __commonJS({
                     }
                   }
                   return false;
-                } else
-                  throw Adb(a);
+                } else throw Adb(a);
               }
             };
             _.gc = function uw() {
@@ -93233,8 +92955,7 @@ var require_elk_bundled = __commonJS({
               return ye(this, a);
             };
             _.$b = function gmb() {
-              while (mwb(this) != null)
-                ;
+              while (mwb(this) != null) ;
             };
             var PJ = sfb(Bve, "AbstractQueue", 2103);
             feb(310, 31, { 4: 1, 20: 1, 31: 1, 16: 1 }, wmb, xmb);
@@ -95056,8 +94777,7 @@ var require_elk_bundled = __commonJS({
             feb(737, 500, Pve, hEb);
             _.Bd = function iEb(a) {
               this.b = false;
-              while (!this.b && this.c.Bd(new jEb(this, a)))
-                ;
+              while (!this.b && this.c.Bd(new jEb(this, a))) ;
               return this.b;
             };
             _.b = false;
@@ -97435,8 +97155,7 @@ var require_elk_bundled = __commonJS({
                   if (ZD(a, 130)) {
                     d = a;
                     throw Adb(new agb($Ae + d));
-                  } else
-                    throw Adb(a);
+                  } else throw Adb(a);
                 }
               }
             };
@@ -99165,7 +98884,7 @@ var require_elk_bundled = __commonJS({
             var JV = sfb(sBe, "NorthSouthEdgeNeighbouringNodeCrossingsCounter", 2029);
             feb(2016, 1, {}, Pmc);
             _.a = false;
-            var KV = sfb(sBe, "SwitchDecider", 2016);
+            var KV2 = sfb(sBe, "SwitchDecider", 2016);
             feb(105, 1, { 105: 1 }, Vmc);
             _.a = null;
             _.c = null;
@@ -103545,8 +103264,7 @@ var require_elk_bundled = __commonJS({
                 if (ZD(a, 130)) {
                   d = a;
                   throw Adb(new agb($Ae + d));
-                } else
-                  throw Adb(a);
+                } else throw Adb(a);
               }
             };
             _.Ib = function yjd() {
@@ -103581,8 +103299,7 @@ var require_elk_bundled = __commonJS({
                 if (ZD(a, 130)) {
                   c = a;
                   throw Adb(new agb("The given string does not match the expected format for vectors." + c));
-                } else
-                  throw Adb(a);
+                } else throw Adb(a);
               }
             };
             _.Ib = function Kjd() {
@@ -103861,8 +103578,7 @@ var require_elk_bundled = __commonJS({
                 if (ZD(a, 103)) {
                   p = a;
                   throw Adb(p);
-                } else
-                  throw Adb(a);
+                } else throw Adb(a);
               }
               Hxd(A, Ikd) || Hxd(A, Hkd) || psd(A);
               j = Kfb(UD(Gxd(A, Ikd)));
@@ -104194,8 +103910,7 @@ var require_elk_bundled = __commonJS({
                 if (ZD(a, 103)) {
                   c = a;
                   throw Adb(new bgb(c));
-                } else
-                  throw Adb(a);
+                } else throw Adb(a);
               }
             };
             _.Ib = function itd() {
@@ -104927,8 +104642,7 @@ var require_elk_bundled = __commonJS({
             };
             _.Ib = function byd() {
               var a;
-              if ((this.Db & 64) != 0)
-                return awd(this);
+              if ((this.Db & 64) != 0) return awd(this);
               a = new Shb(awd(this));
               a.a += " (x: ";
               Khb(a, this.a);
@@ -105196,12 +104910,10 @@ var require_elk_bundled = __commonJS({
                 case 6:
                   return Fzd(this);
                 case 7:
-                  if (b)
-                    return Ezd(this);
+                  if (b) return Ezd(this);
                   return this.i;
                 case 8:
-                  if (b)
-                    return Dzd(this);
+                  if (b) return Dzd(this);
                   return this.f;
                 case 9:
                   return !this.g && (this.g = new Yie(F4, this, 9, 10)), this.g;
@@ -105662,8 +105374,7 @@ var require_elk_bundled = __commonJS({
                 case 6:
                   return !this.vb && (this.vb = new G5d(t7, this, 6, 7)), this.vb;
                 case 7:
-                  if (b)
-                    return this.Db >> 16 == 7 ? RD(this.Cb, 241) : null;
+                  if (b) return this.Db >> 16 == 7 ? RD(this.Cb, 241) : null;
                   return gBd(this);
               }
               return zvd(this, a - AYd((JTd(), CTd)), vYd((d = RD(Ywd(this, 16), 29), !d ? CTd : d), a), b, c);
@@ -105831,8 +105542,7 @@ var require_elk_bundled = __commonJS({
             };
             _.Ib = function XBd() {
               var a;
-              if ((this.Db & 64) != 0)
-                return QAd(this);
+              if ((this.Db & 64) != 0) return QAd(this);
               a = new Shb(QAd(this));
               a.a += " (nsURI: ";
               Nhb(a, this.yb);
@@ -106165,8 +105875,7 @@ var require_elk_bundled = __commonJS({
             };
             _.Ib = function nDd() {
               var a;
-              if ((this.Db & 64) != 0)
-                return awd(this);
+              if ((this.Db & 64) != 0) return awd(this);
               a = new bib();
               Zhb(Zhb(Zhb(a, this.b ? this.b.Pg() : vve), SAe), Ghb(this.c));
               return a.a;
@@ -106406,8 +106115,7 @@ var require_elk_bundled = __commonJS({
             _.fd = function AHd(a) {
               var b;
               b = this.gc();
-              if (a < 0 || a > b)
-                throw Adb(new aMd(a, b));
+              if (a < 0 || a > b) throw Adb(new aMd(a, b));
               return new nMd(this, a);
             };
             _.Ui = function BHd(a, b) {
@@ -107178,8 +106886,7 @@ var require_elk_bundled = __commonJS({
                 if (ZD(a, 77)) {
                   this.Xj();
                   throw Adb(new Dvb());
-                } else
-                  throw Adb(a);
+                } else throw Adb(a);
               }
             };
             _.$j = function qMd(a) {
@@ -107225,8 +106932,7 @@ var require_elk_bundled = __commonJS({
                 if (ZD(a, 77)) {
                   this.Xj();
                   throw Adb(new Dvb());
-                } else
-                  throw Adb(a);
+                } else throw Adb(a);
               }
             };
             _.Zj = function FMd() {
@@ -107241,8 +106947,7 @@ var require_elk_bundled = __commonJS({
                 if (ZD(a, 77)) {
                   this.Xj();
                   throw Adb(new Dvb());
-                } else
-                  throw Adb(a);
+                } else throw Adb(a);
               }
             };
             _.Qb = function GMd() {
@@ -107332,8 +107037,7 @@ var require_elk_bundled = __commonJS({
             _.Ki = function VMd(a) {
               var b, c;
               c = (b = RD(Ywd(this.a, 4), 129), b == null ? 0 : b.length);
-              if (a < 0 || a > c)
-                throw Adb(new aMd(a, c));
+              if (a < 0 || a > c) throw Adb(new aMd(a, c));
               return new wNd(this, a);
             };
             _.$b = function WMd() {
@@ -107370,8 +107074,7 @@ var require_elk_bundled = __commonJS({
               var b, c;
               b = RD(Ywd(this.a, 4), 129);
               c = b == null ? 0 : b.length;
-              if (a >= c)
-                throw Adb(new aMd(a, c));
+              if (a >= c) throw Adb(new aMd(a, c));
               return b[a];
             };
             _.dd = function ZMd(a) {
@@ -107406,18 +107109,15 @@ var require_elk_bundled = __commonJS({
             _.fd = function bNd(a) {
               var b, c;
               c = (b = RD(Ywd(this.a, 4), 129), b == null ? 0 : b.length);
-              if (a < 0 || a > c)
-                throw Adb(new aMd(a, c));
+              if (a < 0 || a > c) throw Adb(new aMd(a, c));
               return new oNd(this, a);
             };
             _.Ti = function cNd(a, b) {
               var c, d, e;
               c = MMd(this);
               e = c == null ? 0 : c.length;
-              if (a >= e)
-                throw Adb(new veb(MIe + a + NIe + e));
-              if (b >= e)
-                throw Adb(new veb(OIe + b + NIe + e));
+              if (a >= e) throw Adb(new veb(MIe + a + NIe + e));
+              if (b >= e) throw Adb(new veb(OIe + b + NIe + e));
               d = c[b];
               if (a != b) {
                 a < b ? hib(c, a, c, a + 1, b - a) : hib(c, b + 1, c, b, a - b);
@@ -108127,10 +107827,8 @@ var require_elk_bundled = __commonJS({
             feb(288, 1, { 288: 1 }, lSd);
             _.Fb = function pSd(a) {
               var b;
-              if (this === a)
-                return true;
-              if (!ZD(a, 288))
-                return false;
+              if (this === a) return true;
+              if (!ZD(a, 288)) return false;
               b = RD(a, 288);
               return this.f == b.f && rSd(this.i, b.i) && qSd(this.a, (this.f & 256) != 0 ? (b.f & 256) != 0 ? b.a : null : (b.f & 256) != 0 ? null : b.a) && qSd(this.d, b.d) && qSd(this.g, b.g) && qSd(this.e, b.e) && iSd(this, b);
             };
@@ -108658,8 +108356,7 @@ var require_elk_bundled = __commonJS({
                 case 7:
                   return Geb(), e = this.s, e >= 1 ? true : false;
                 case 8:
-                  if (b)
-                    return WVd(this);
+                  if (b) return WVd(this);
                   return this.r;
                 case 9:
                   return this.q;
@@ -108824,8 +108521,7 @@ var require_elk_bundled = __commonJS({
                 case 7:
                   return Geb(), e = this.s, e >= 1 ? true : false;
                 case 8:
-                  if (b)
-                    return WVd(this);
+                  if (b) return WVd(this);
                   return this.r;
                 case 9:
                   return this.q;
@@ -109117,8 +108813,7 @@ var require_elk_bundled = __commonJS({
                 case 7:
                   return Geb(), e = this.s, e >= 1 ? true : false;
                 case 8:
-                  if (b)
-                    return WVd(this);
+                  if (b) return WVd(this);
                   return this.r;
                 case 9:
                   return this.q;
@@ -109141,8 +108836,7 @@ var require_elk_bundled = __commonJS({
                 case 18:
                   return Geb(), (this.Bb & QHe) != 0 ? true : false;
                 case 19:
-                  if (b)
-                    return iXd(this);
+                  if (b) return iXd(this);
                   return hXd(this);
               }
               return zvd(this, a - AYd((JTd(), nTd)), vYd((d = RD(Ywd(this, 16), 29), !d ? nTd : d), a), b, c);
@@ -109326,8 +109020,7 @@ var require_elk_bundled = __commonJS({
             };
             _.Ib = function wXd() {
               var a;
-              if ((this.Db & 64) != 0)
-                return GWd(this);
+              if ((this.Db & 64) != 0) return GWd(this);
               a = new Shb(GWd(this));
               a.a += " (iD: ";
               Ohb(a, (this.Bb & QHe) != 0);
@@ -109364,8 +109057,7 @@ var require_elk_bundled = __commonJS({
                 case 5:
                   return this.F;
                 case 6:
-                  if (b)
-                    return BXd(this);
+                  if (b) return BXd(this);
                   return xXd(this);
                 case 7:
                   return !this.A && (this.A = new iie(z7, this, 7)), this.A;
@@ -109536,8 +109228,7 @@ var require_elk_bundled = __commonJS({
                 case 5:
                   return this.F;
                 case 6:
-                  if (b)
-                    return BXd(this);
+                  if (b) return BXd(this);
                   return xXd(this);
                 case 7:
                   return !this.A && (this.A = new iie(z7, this, 7)), this.A;
@@ -110419,8 +110110,7 @@ var require_elk_bundled = __commonJS({
             _.dd = function c0d(a) {
               var b, c, d, e;
               d = this.zj(a);
-              if (d >= 0)
-                return d;
+              if (d >= 0) return d;
               if (this.ol()) {
                 for (c = 0, e = this.Ej(); c < e; ++c) {
                   b = O_d(this, this.xj(c));
@@ -110698,8 +110388,7 @@ var require_elk_bundled = __commonJS({
                 case 5:
                   return this.F;
                 case 6:
-                  if (b)
-                    return BXd(this);
+                  if (b) return BXd(this);
                   return xXd(this);
                 case 7:
                   return !this.A && (this.A = new iie(z7, this, 7)), this.A;
@@ -110818,8 +110507,7 @@ var require_elk_bundled = __commonJS({
                   b = DXd(this);
                 } catch (a) {
                   a = zdb(a);
-                  if (!ZD(a, 103))
-                    throw Adb(a);
+                  if (!ZD(a, 103)) throw Adb(a);
                 }
                 this.d = null;
                 !!b && (b.i & 1) != 0 && (b == xdb ? this.d = (Geb(), Eeb) : b == kE ? this.d = sgb(0) : b == jE ? this.d = new Tfb(0) : b == iE ? this.d = 0 : b == lE ? this.d = Hgb(0) : b == wdb ? this.d = bhb(0) : b == gE ? this.d = $eb(0) : this.d = hfb(0));
@@ -110843,8 +110531,7 @@ var require_elk_bundled = __commonJS({
             };
             _.Ib = function x1d() {
               var a;
-              if ((this.Db & 64) != 0)
-                return MXd(this);
+              if ((this.Db & 64) != 0) return MXd(this);
               a = new Shb(MXd(this));
               a.a += " (serializable: ";
               Ohb(a, (this.Bb & 256) != 0);
@@ -110872,8 +110559,7 @@ var require_elk_bundled = __commonJS({
                 case 5:
                   return this.F;
                 case 6:
-                  if (b)
-                    return BXd(this);
+                  if (b) return BXd(this);
                   return xXd(this);
                 case 7:
                   return !this.A && (this.A = new iie(z7, this, 7)), this.A;
@@ -111172,16 +110858,14 @@ var require_elk_bundled = __commonJS({
                 case 1:
                   return !this.d && (this.d = new XZd(o7, this, 1)), this.d;
                 case 2:
-                  if (b)
-                    return i2d(this);
+                  if (b) return i2d(this);
                   return this.c;
                 case 3:
                   return this.b;
                 case 4:
                   return this.e;
                 case 5:
-                  if (b)
-                    return h2d(this);
+                  if (b) return h2d(this);
                   return this.a;
               }
               return zvd(this, a - AYd((JTd(), vTd)), vYd((d = RD(Ywd(this, 16), 29), !d ? vTd : d), a), b, c);
@@ -111422,8 +111106,7 @@ var require_elk_bundled = __commonJS({
                       for (d = 0, f = b.gc(); d < f; ++d) {
                         O2d(b.Tl(d)) && b.Ul(d) != null && ++e;
                       }
-                    } else
-                      a.Jk() ? e += RD(g10, 16).gc() : g10 != null && ++e;
+                    } else a.Jk() ? e += RD(g10, 16).gc() : g10 != null && ++e;
                   }
                 }
               }
@@ -111727,8 +111410,7 @@ var require_elk_bundled = __commonJS({
                 case 7:
                   return Geb(), e = this.s, e >= 1 ? true : false;
                 case 8:
-                  if (b)
-                    return WVd(this);
+                  if (b) return WVd(this);
                   return this.r;
                 case 9:
                   return this.q;
@@ -112198,8 +111880,7 @@ var require_elk_bundled = __commonJS({
                 case 7:
                   return Geb(), e = this.s, e >= 1 ? true : false;
                 case 8:
-                  if (b)
-                    return WVd(this);
+                  if (b) return WVd(this);
                   return this.r;
                 case 9:
                   return this.q;
@@ -112284,8 +111965,7 @@ var require_elk_bundled = __commonJS({
                 case 7:
                   return Geb(), e = this.s, e >= 1 ? true : false;
                 case 8:
-                  if (b)
-                    return WVd(this);
+                  if (b) return WVd(this);
                   return this.r;
                 case 9:
                   return this.q;
@@ -112312,12 +111992,10 @@ var require_elk_bundled = __commonJS({
                 case 20:
                   return Geb(), (this.Bb & txe) != 0 ? true : false;
                 case 21:
-                  if (b)
-                    return Z5d(this);
+                  if (b) return Z5d(this);
                   return this.b;
                 case 22:
-                  if (b)
-                    return $5d(this);
+                  if (b) return $5d(this);
                   return Y5d(this);
                 case 23:
                   return !this.a && (this.a = new zie(g7, this, 23)), this.a;
@@ -112539,8 +112217,7 @@ var require_elk_bundled = __commonJS({
             };
             _.Ib = function p6d() {
               var a;
-              if ((this.Db & 64) != 0)
-                return GWd(this);
+              if ((this.Db & 64) != 0) return GWd(this);
               a = new Shb(GWd(this));
               a.a += " (containment: ";
               Ohb(a, (this.Bb & QHe) != 0);
@@ -112629,8 +112306,7 @@ var require_elk_bundled = __commonJS({
             };
             _.Ib = function J6d() {
               var a;
-              if ((this.Db & 64) != 0)
-                return awd(this);
+              if ((this.Db & 64) != 0) return awd(this);
               a = new Shb(awd(this));
               a.a += " (key: ";
               Nhb(a, this.b);
@@ -112847,8 +112523,7 @@ var require_elk_bundled = __commonJS({
               e = a.Ph();
               g10 = BYd(a.Dh(), this.e);
               if (dE(d) !== dE(e) || a.Fh() != g10 && d != null) {
-                if (Oje(a, RD(d, 58)))
-                  throw Adb(new agb(UHe + a.Ib()));
+                if (Oje(a, RD(d, 58))) throw Adb(new agb(UHe + a.Ib()));
                 i10 = null;
                 !!e && (i10 = (f = a.Fh(), f >= 0 ? a.Ah(i10) : a.Ph().Th(a, -1 - f, null, i10)));
                 h = RD(d, 54);
@@ -112898,8 +112573,7 @@ var require_elk_bundled = __commonJS({
                   if (this.c != null) {
                     b.mi(c, null);
                     d = this.b;
-                  } else
-                    this.b != null ? b.mi(c, r7d) : b.mi(c, null);
+                  } else this.b != null ? b.mi(c, r7d) : b.mi(c, null);
                 } else {
                   this.Bl(d);
                   b.mi(c, d);
@@ -113026,8 +112700,7 @@ var require_elk_bundled = __commonJS({
                 if (f == null) {
                   e = false;
                   f = this.b;
-                } else
-                  dE(f) === dE(r7d) && (f = null);
+                } else dE(f) === dE(r7d) && (f = null);
                 if (d == null) {
                   if (this.c != null) {
                     b.mi(c, null);
@@ -113057,8 +112730,7 @@ var require_elk_bundled = __commonJS({
                 if (e == null) {
                   d = false;
                   e = this.b;
-                } else
-                  dE(e) === dE(r7d) && (e = null);
+                } else dE(e) === dE(r7d) && (e = null);
                 b.ni(c);
                 qvd(a, this.d.Dl(a, 2, this.e, e, this.b, d));
               } else {
@@ -113116,8 +112788,7 @@ var require_elk_bundled = __commonJS({
                   f = RD(g10, 54);
                   e = f.Th(a, BYd(f.Dh(), this.b), null, e);
                 }
-              } else
-                this.al() && g10 != null && (e = RD(g10, 54).Th(a, -1 - BYd(a.Dh(), this.e), null, e));
+              } else this.al() && g10 != null && (e = RD(g10, 54).Th(a, -1 - BYd(a.Dh(), this.e), null, e));
               if (a.vh() && a.wh()) {
                 !e && (e = new gLd(4));
                 e.nj(new b4d(a, 1, this.e, g10, d));
@@ -113175,8 +112846,7 @@ var require_elk_bundled = __commonJS({
                   g10.nj(f);
                   g10.oj();
                 }
-              } else
-                !!g10 && g10.oj();
+              } else !!g10 && g10.oj();
             };
             _.Ek = function U8d(a, b, c) {
               var d, e, f, g10, h;
@@ -113188,8 +112858,7 @@ var require_elk_bundled = __commonJS({
                 if (this.Mj()) {
                   d = RD(h, 54);
                   f = d.Th(a, BYd(d.Dh(), this.b), null, f);
-                } else
-                  this.al() && (f = RD(h, 54).Th(a, -1 - BYd(a.Dh(), this.e), null, f));
+                } else this.al() && (f = RD(h, 54).Th(a, -1 - BYd(a.Dh(), this.e), null, f));
               }
               b.ni(c);
               if (a.vh() && a.wh()) {
@@ -113200,8 +112869,7 @@ var require_elk_bundled = __commonJS({
                   f.nj(e);
                   f.oj();
                 }
-              } else
-                !!f && f.oj();
+              } else !!f && f.oj();
             };
             _.Mj = function V8d() {
               return false;
@@ -113502,8 +113170,7 @@ var require_elk_bundled = __commonJS({
                 b = c.Kk();
                 Zjb(this, RD(a, 241), b);
                 return b;
-              } else
-                return b != null ? b : a == null ? (Gie(), Fie) : null;
+              } else return b != null ? b : a == null ? (Gie(), Fie) : null;
             };
             var B9 = sfb(SHe, "EValidatorRegistryImpl", 1329);
             feb(1349, 720, { 110: 1, 94: 1, 93: 1, 480: 1, 155: 1, 58: 1, 114: 1, 2040: 1, 54: 1, 99: 1, 158: 1, 119: 1, 120: 1 }, Mae);
@@ -114352,8 +114019,7 @@ var require_elk_bundled = __commonJS({
                 a = zdb(a);
                 if (ZD(a, 77)) {
                   throw Adb(new Jrb());
-                } else
-                  throw Adb(a);
+                } else throw Adb(a);
               }
             };
             _.Ob = function Ghe() {
@@ -114403,8 +114069,7 @@ var require_elk_bundled = __commonJS({
                 a = zdb(a);
                 if (ZD(a, 77)) {
                   throw Adb(new Jrb());
-                } else
-                  throw Adb(a);
+                } else throw Adb(a);
               }
             };
             _.ul = function Nhe() {
@@ -114422,8 +114087,7 @@ var require_elk_bundled = __commonJS({
                 a = zdb(a);
                 if (ZD(a, 77)) {
                   throw Adb(new Jrb());
-                } else
-                  throw Adb(a);
+                } else throw Adb(a);
               }
             };
             _.a = 0;
@@ -114818,8 +114482,7 @@ var require_elk_bundled = __commonJS({
             feb(773, 1, { 2041: 1 }, wke);
             _.am = function xke(a) {
               var b;
-              if (this.c == a)
-                return true;
+              if (this.c == a) return true;
               b = TD(Wjb(this.a, a));
               if (b == null) {
                 if (vke(this, a)) {
@@ -115117,16 +114780,13 @@ var require_elk_bundled = __commonJS({
             _.Lh = function pme(a, b, c) {
               switch (a) {
                 case 0:
-                  if (c)
-                    return !this.c && (this.c = new Uge(this, 0)), this.c;
+                  if (c) return !this.c && (this.c = new Uge(this, 0)), this.c;
                   return !this.c && (this.c = new Uge(this, 0)), this.c.b;
                 case 1:
-                  if (c)
-                    return !this.c && (this.c = new Uge(this, 0)), RD(rge(this.c, (nme(), Sle)), 160);
+                  if (c) return !this.c && (this.c = new Uge(this, 0)), RD(rge(this.c, (nme(), Sle)), 160);
                   return (!this.c && (this.c = new Uge(this, 0)), RD(RD(rge(this.c, (nme(), Sle)), 160), 220)).Vl();
                 case 2:
-                  if (c)
-                    return !this.b && (this.b = new Uge(this, 2)), this.b;
+                  if (c) return !this.b && (this.b = new Uge(this, 2)), this.b;
                   return !this.b && (this.b = new Uge(this, 2)), this.b.b;
               }
               return zvd(this, a - AYd(this.ii()), vYd((this.j & 2) == 0 ? this.ii() : (!this.k && (this.k = new fUd()), this.k).Nk(), a), b, c);
@@ -115191,8 +114851,7 @@ var require_elk_bundled = __commonJS({
             };
             _.Ib = function vme() {
               var a;
-              if ((this.j & 4) != 0)
-                return awd(this);
+              if ((this.j & 4) != 0) return awd(this);
               a = new Shb(awd(this));
               a.a += " (mixed: ";
               Mhb(a, this.c);
@@ -115248,8 +114907,7 @@ var require_elk_bundled = __commonJS({
             };
             _.Ib = function Eme() {
               var a;
-              if ((this.j & 4) != 0)
-                return awd(this);
+              if ((this.j & 4) != 0) return awd(this);
               a = new Shb(awd(this));
               a.a += " (data: ";
               Nhb(a, this.a);
@@ -115265,16 +114923,13 @@ var require_elk_bundled = __commonJS({
             _.Lh = function Ime(a, b, c) {
               switch (a) {
                 case 0:
-                  if (c)
-                    return !this.c && (this.c = new Uge(this, 0)), this.c;
+                  if (c) return !this.c && (this.c = new Uge(this, 0)), this.c;
                   return !this.c && (this.c = new Uge(this, 0)), this.c.b;
                 case 1:
-                  if (c)
-                    return !this.c && (this.c = new Uge(this, 0)), RD(rge(this.c, (nme(), Sle)), 160);
+                  if (c) return !this.c && (this.c = new Uge(this, 0)), RD(rge(this.c, (nme(), Sle)), 160);
                   return (!this.c && (this.c = new Uge(this, 0)), RD(RD(rge(this.c, (nme(), Sle)), 160), 220)).Vl();
                 case 2:
-                  if (c)
-                    return !this.b && (this.b = new Uge(this, 2)), this.b;
+                  if (c) return !this.b && (this.b = new Uge(this, 2)), this.b;
                   return !this.b && (this.b = new Uge(this, 2)), this.b.b;
                 case 3:
                   return !this.c && (this.c = new Uge(this, 0)), WD(ige(this.c, (nme(), fme), true));
@@ -115361,8 +115016,7 @@ var require_elk_bundled = __commonJS({
             _.Lh = function Ome(a, b, c) {
               switch (a) {
                 case 0:
-                  if (c)
-                    return !this.a && (this.a = new Uge(this, 0)), this.a;
+                  if (c) return !this.a && (this.a = new Uge(this, 0)), this.a;
                   return !this.a && (this.a = new Uge(this, 0)), this.a.b;
                 case 1:
                   return c ? (!this.b && (this.b = new DVd((JTd(), FTd), C8, this, 1)), this.b) : (!this.b && (this.b = new DVd((JTd(), FTd), C8, this, 1)), dOd(this.b));
@@ -115491,8 +115145,7 @@ var require_elk_bundled = __commonJS({
             };
             _.Ib = function Ume() {
               var a;
-              if ((this.j & 4) != 0)
-                return awd(this);
+              if ((this.j & 4) != 0) return awd(this);
               a = new Shb(awd(this));
               a.a += " (mixed: ";
               Mhb(a, this.a);
@@ -116137,8 +115790,7 @@ var require_elk_bundled = __commonJS({
             };
             _.cm = function Vqe() {
               var a, b, c, d, e;
-              if (this.c != 10)
-                throw Adb(new Lqe(TId((Hde(), VIe))));
+              if (this.c != 10) throw Adb(new Lqe(TId((Hde(), VIe))));
               a = this.a;
               switch (a) {
                 case 101:
@@ -116158,34 +115810,26 @@ var require_elk_bundled = __commonJS({
                   break;
                 case 120:
                   Mqe(this);
-                  if (this.c != 0)
-                    throw Adb(new Lqe(TId((Hde(), sJe))));
+                  if (this.c != 0) throw Adb(new Lqe(TId((Hde(), sJe))));
                   if (this.a == 123) {
                     e = 0;
                     c = 0;
                     do {
                       Mqe(this);
-                      if (this.c != 0)
-                        throw Adb(new Lqe(TId((Hde(), sJe))));
-                      if ((e = Xqe(this.a)) < 0)
-                        break;
-                      if (c > c * 16)
-                        throw Adb(new Lqe(TId((Hde(), tJe))));
+                      if (this.c != 0) throw Adb(new Lqe(TId((Hde(), sJe))));
+                      if ((e = Xqe(this.a)) < 0) break;
+                      if (c > c * 16) throw Adb(new Lqe(TId((Hde(), tJe))));
                       c = c * 16 + e;
                     } while (true);
-                    if (this.a != 125)
-                      throw Adb(new Lqe(TId((Hde(), uJe))));
-                    if (c > MLe)
-                      throw Adb(new Lqe(TId((Hde(), vJe))));
+                    if (this.a != 125) throw Adb(new Lqe(TId((Hde(), uJe))));
+                    if (c > MLe) throw Adb(new Lqe(TId((Hde(), vJe))));
                     a = c;
                   } else {
                     e = 0;
-                    if (this.c != 0 || (e = Xqe(this.a)) < 0)
-                      throw Adb(new Lqe(TId((Hde(), sJe))));
+                    if (this.c != 0 || (e = Xqe(this.a)) < 0) throw Adb(new Lqe(TId((Hde(), sJe))));
                     c = e;
                     Mqe(this);
-                    if (this.c != 0 || (e = Xqe(this.a)) < 0)
-                      throw Adb(new Lqe(TId((Hde(), sJe))));
+                    if (this.c != 0 || (e = Xqe(this.a)) < 0) throw Adb(new Lqe(TId((Hde(), sJe))));
                     c = c * 16 + e;
                     a = c;
                   }
@@ -116193,50 +115837,39 @@ var require_elk_bundled = __commonJS({
                 case 117:
                   d = 0;
                   Mqe(this);
-                  if (this.c != 0 || (d = Xqe(this.a)) < 0)
-                    throw Adb(new Lqe(TId((Hde(), sJe))));
+                  if (this.c != 0 || (d = Xqe(this.a)) < 0) throw Adb(new Lqe(TId((Hde(), sJe))));
                   b = d;
                   Mqe(this);
-                  if (this.c != 0 || (d = Xqe(this.a)) < 0)
-                    throw Adb(new Lqe(TId((Hde(), sJe))));
+                  if (this.c != 0 || (d = Xqe(this.a)) < 0) throw Adb(new Lqe(TId((Hde(), sJe))));
                   b = b * 16 + d;
                   Mqe(this);
-                  if (this.c != 0 || (d = Xqe(this.a)) < 0)
-                    throw Adb(new Lqe(TId((Hde(), sJe))));
+                  if (this.c != 0 || (d = Xqe(this.a)) < 0) throw Adb(new Lqe(TId((Hde(), sJe))));
                   b = b * 16 + d;
                   Mqe(this);
-                  if (this.c != 0 || (d = Xqe(this.a)) < 0)
-                    throw Adb(new Lqe(TId((Hde(), sJe))));
+                  if (this.c != 0 || (d = Xqe(this.a)) < 0) throw Adb(new Lqe(TId((Hde(), sJe))));
                   b = b * 16 + d;
                   a = b;
                   break;
                 case 118:
                   Mqe(this);
-                  if (this.c != 0 || (d = Xqe(this.a)) < 0)
-                    throw Adb(new Lqe(TId((Hde(), sJe))));
+                  if (this.c != 0 || (d = Xqe(this.a)) < 0) throw Adb(new Lqe(TId((Hde(), sJe))));
                   b = d;
                   Mqe(this);
-                  if (this.c != 0 || (d = Xqe(this.a)) < 0)
-                    throw Adb(new Lqe(TId((Hde(), sJe))));
+                  if (this.c != 0 || (d = Xqe(this.a)) < 0) throw Adb(new Lqe(TId((Hde(), sJe))));
                   b = b * 16 + d;
                   Mqe(this);
-                  if (this.c != 0 || (d = Xqe(this.a)) < 0)
-                    throw Adb(new Lqe(TId((Hde(), sJe))));
+                  if (this.c != 0 || (d = Xqe(this.a)) < 0) throw Adb(new Lqe(TId((Hde(), sJe))));
                   b = b * 16 + d;
                   Mqe(this);
-                  if (this.c != 0 || (d = Xqe(this.a)) < 0)
-                    throw Adb(new Lqe(TId((Hde(), sJe))));
+                  if (this.c != 0 || (d = Xqe(this.a)) < 0) throw Adb(new Lqe(TId((Hde(), sJe))));
                   b = b * 16 + d;
                   Mqe(this);
-                  if (this.c != 0 || (d = Xqe(this.a)) < 0)
-                    throw Adb(new Lqe(TId((Hde(), sJe))));
+                  if (this.c != 0 || (d = Xqe(this.a)) < 0) throw Adb(new Lqe(TId((Hde(), sJe))));
                   b = b * 16 + d;
                   Mqe(this);
-                  if (this.c != 0 || (d = Xqe(this.a)) < 0)
-                    throw Adb(new Lqe(TId((Hde(), sJe))));
+                  if (this.c != 0 || (d = Xqe(this.a)) < 0) throw Adb(new Lqe(TId((Hde(), sJe))));
                   b = b * 16 + d;
-                  if (b > MLe)
-                    throw Adb(new Lqe(TId((Hde(), "parser.descappe.4"))));
+                  if (b > MLe) throw Adb(new Lqe(TId((Hde(), "parser.descappe.4"))));
                   a = b;
                   break;
                 case 65:
@@ -116291,8 +115924,7 @@ var require_elk_bundled = __commonJS({
               }
               e = true;
               while ((m = this.c) != 1) {
-                if (m == 0 && this.a == 93 && !e)
-                  break;
+                if (m == 0 && this.a == 93 && !e) break;
                 e = false;
                 c = this.a;
                 d = false;
@@ -116317,8 +115949,7 @@ var require_elk_bundled = __commonJS({
                     case 112:
                     case 80:
                       l = Sqe(this, c);
-                      if (!l)
-                        throw Adb(new Lqe(TId((Hde(), hJe))));
+                      if (!l) throw Adb(new Lqe(TId((Hde(), hJe))));
                       ute(k, l);
                       d = true;
                       break;
@@ -116327,8 +115958,7 @@ var require_elk_bundled = __commonJS({
                   }
                 } else if (m == 20) {
                   g10 = phb(this.i, 58, this.d);
-                  if (g10 < 0)
-                    throw Adb(new Lqe(TId((Hde(), iJe))));
+                  if (g10 < 0) throw Adb(new Lqe(TId((Hde(), iJe))));
                   h = true;
                   if (ihb(this.i, this.d) == 94) {
                     ++this.d;
@@ -116336,12 +115966,10 @@ var require_elk_bundled = __commonJS({
                   }
                   f = zhb(this.i, this.d, g10);
                   i10 = ite(f, h, (this.e & 512) == 512);
-                  if (!i10)
-                    throw Adb(new Lqe(TId((Hde(), kJe))));
+                  if (!i10) throw Adb(new Lqe(TId((Hde(), kJe))));
                   ute(k, i10);
                   d = true;
-                  if (g10 + 1 >= this.j || ihb(this.i, g10 + 1) != 93)
-                    throw Adb(new Lqe(TId((Hde(), iJe))));
+                  if (g10 + 1 >= this.j || ihb(this.i, g10 + 1) != 93) throw Adb(new Lqe(TId((Hde(), iJe))));
                   this.d = g10 + 2;
                 }
                 Mqe(this);
@@ -116350,8 +115978,7 @@ var require_elk_bundled = __commonJS({
                     rte(k, c, c);
                   } else {
                     Mqe(this);
-                    if ((m = this.c) == 1)
-                      throw Adb(new Lqe(TId((Hde(), jJe))));
+                    if ((m = this.c) == 1) throw Adb(new Lqe(TId((Hde(), jJe))));
                     if (m == 0 && this.a == 93) {
                       rte(k, c, c);
                       rte(k, 45, 45);
@@ -116365,8 +115992,7 @@ var require_elk_bundled = __commonJS({
                 }
                 (this.e & gwe) == gwe && this.c == 0 && this.a == 44 && Mqe(this);
               }
-              if (this.c == 1)
-                throw Adb(new Lqe(TId((Hde(), jJe))));
+              if (this.c == 1) throw Adb(new Lqe(TId((Hde(), jJe))));
               if (b) {
                 wte(b, k);
                 k = b;
@@ -116384,17 +116010,12 @@ var require_elk_bundled = __commonJS({
                 a = this.a;
                 if (d == 0 && (a == 45 || a == 38) || d == 4) {
                   Mqe(this);
-                  if (this.c != 9)
-                    throw Adb(new Lqe(TId((Hde(), pJe))));
+                  if (this.c != 9) throw Adb(new Lqe(TId((Hde(), pJe))));
                   b = this.em(false);
-                  if (d == 4)
-                    ute(c, b);
-                  else if (a == 45)
-                    wte(c, b);
-                  else if (a == 38)
-                    tte(c, b);
-                  else
-                    throw Adb(new yz("ASSERT"));
+                  if (d == 4) ute(c, b);
+                  else if (a == 45) wte(c, b);
+                  else if (a == 38) tte(c, b);
+                  else throw Adb(new yz("ASSERT"));
                 } else {
                   throw Adb(new Lqe(TId((Hde(), qJe))));
                 }
@@ -116439,8 +116060,7 @@ var require_elk_bundled = __commonJS({
             };
             _.om = function gre() {
               var a;
-              if (this.d >= this.j || ((a = ihb(this.i, this.d++)) & 65504) != 64)
-                throw Adb(new Lqe(TId((Hde(), dJe))));
+              if (this.d >= this.j || ((a = ihb(this.i, this.d++)) & 65504) != 64) throw Adb(new Lqe(TId((Hde(), dJe))));
               Mqe(this);
               return Vse(), Vse(), ++Use, new Hte(0, a - 64);
             };
@@ -116475,8 +116095,7 @@ var require_elk_bundled = __commonJS({
             };
             _.wm = function ore() {
               var a, b, c, d, e;
-              if (this.d + 1 >= this.j)
-                throw Adb(new Lqe(TId((Hde(), aJe))));
+              if (this.d + 1 >= this.j) throw Adb(new Lqe(TId((Hde(), aJe))));
               d = -1;
               b = null;
               a = ihb(this.i, this.d);
@@ -116485,8 +116104,7 @@ var require_elk_bundled = __commonJS({
                 !this.g && (this.g = new gyb());
                 dyb(this.g, new Bte(d));
                 ++this.d;
-                if (ihb(this.i, this.d) != 41)
-                  throw Adb(new Lqe(TId((Hde(), ZIe))));
+                if (ihb(this.i, this.d) != 41) throw Adb(new Lqe(TId((Hde(), ZIe))));
                 ++this.d;
               } else {
                 a == 63 && --this.d;
@@ -116499,8 +116117,7 @@ var require_elk_bundled = __commonJS({
                   case 23:
                     break;
                   case 8:
-                    if (this.c != 7)
-                      throw Adb(new Lqe(TId((Hde(), ZIe))));
+                    if (this.c != 7) throw Adb(new Lqe(TId((Hde(), ZIe))));
                     break;
                   default:
                     throw Adb(new Lqe(TId((Hde(), bJe))));
@@ -116510,13 +116127,11 @@ var require_elk_bundled = __commonJS({
               e = Qqe(this);
               c = null;
               if (e.e == 2) {
-                if (e.Pm() != 2)
-                  throw Adb(new Lqe(TId((Hde(), cJe))));
+                if (e.Pm() != 2) throw Adb(new Lqe(TId((Hde(), cJe))));
                 c = e.Lm(1);
                 e = e.Lm(0);
               }
-              if (this.c != 7)
-                throw Adb(new Lqe(TId((Hde(), ZIe))));
+              if (this.c != 7) throw Adb(new Lqe(TId((Hde(), ZIe))));
               Mqe(this);
               return Vse(), Vse(), ++Use, new Ute(d, b, e, c);
             };
@@ -116528,8 +116143,7 @@ var require_elk_bundled = __commonJS({
               var a;
               Mqe(this);
               a = _se(24, Qqe(this));
-              if (this.c != 7)
-                throw Adb(new Lqe(TId((Hde(), ZIe))));
+              if (this.c != 7) throw Adb(new Lqe(TId((Hde(), ZIe))));
               Mqe(this);
               return a;
             };
@@ -116537,8 +116151,7 @@ var require_elk_bundled = __commonJS({
               var a;
               Mqe(this);
               a = _se(20, Qqe(this));
-              if (this.c != 7)
-                throw Adb(new Lqe(TId((Hde(), ZIe))));
+              if (this.c != 7) throw Adb(new Lqe(TId((Hde(), ZIe))));
               Mqe(this);
               return a;
             };
@@ -116546,8 +116159,7 @@ var require_elk_bundled = __commonJS({
               var a;
               Mqe(this);
               a = _se(22, Qqe(this));
-              if (this.c != 7)
-                throw Adb(new Lqe(TId((Hde(), ZIe))));
+              if (this.c != 7) throw Adb(new Lqe(TId((Hde(), ZIe))));
               Mqe(this);
               return a;
             };
@@ -116559,47 +116171,40 @@ var require_elk_bundled = __commonJS({
               while (this.d < this.j) {
                 b = ihb(this.i, this.d);
                 e = rse(b);
-                if (e == 0)
-                  break;
+                if (e == 0) break;
                 a |= e;
                 ++this.d;
               }
-              if (this.d >= this.j)
-                throw Adb(new Lqe(TId((Hde(), $Ie))));
+              if (this.d >= this.j) throw Adb(new Lqe(TId((Hde(), $Ie))));
               if (b == 45) {
                 ++this.d;
                 while (this.d < this.j) {
                   b = ihb(this.i, this.d);
                   e = rse(b);
-                  if (e == 0)
-                    break;
+                  if (e == 0) break;
                   c |= e;
                   ++this.d;
                 }
-                if (this.d >= this.j)
-                  throw Adb(new Lqe(TId((Hde(), $Ie))));
+                if (this.d >= this.j) throw Adb(new Lqe(TId((Hde(), $Ie))));
               }
               if (b == 58) {
                 ++this.d;
                 Mqe(this);
                 d = ate(Qqe(this), a, c);
-                if (this.c != 7)
-                  throw Adb(new Lqe(TId((Hde(), ZIe))));
+                if (this.c != 7) throw Adb(new Lqe(TId((Hde(), ZIe))));
                 Mqe(this);
               } else if (b == 41) {
                 ++this.d;
                 Mqe(this);
                 d = ate(Qqe(this), a, c);
-              } else
-                throw Adb(new Lqe(TId((Hde(), _Ie))));
+              } else throw Adb(new Lqe(TId((Hde(), _Ie))));
               return d;
             };
             _.Cm = function ure() {
               var a;
               Mqe(this);
               a = _se(21, Qqe(this));
-              if (this.c != 7)
-                throw Adb(new Lqe(TId((Hde(), ZIe))));
+              if (this.c != 7) throw Adb(new Lqe(TId((Hde(), ZIe))));
               Mqe(this);
               return a;
             };
@@ -116607,8 +116212,7 @@ var require_elk_bundled = __commonJS({
               var a;
               Mqe(this);
               a = _se(23, Qqe(this));
-              if (this.c != 7)
-                throw Adb(new Lqe(TId((Hde(), ZIe))));
+              if (this.c != 7) throw Adb(new Lqe(TId((Hde(), ZIe))));
               Mqe(this);
               return a;
             };
@@ -116617,8 +116221,7 @@ var require_elk_bundled = __commonJS({
               Mqe(this);
               a = this.f++;
               b = bte(Qqe(this), a);
-              if (this.c != 7)
-                throw Adb(new Lqe(TId((Hde(), ZIe))));
+              if (this.c != 7) throw Adb(new Lqe(TId((Hde(), ZIe))));
               Mqe(this);
               return b;
             };
@@ -116626,8 +116229,7 @@ var require_elk_bundled = __commonJS({
               var a;
               Mqe(this);
               a = bte(Qqe(this), 0);
-              if (this.c != 7)
-                throw Adb(new Lqe(TId((Hde(), ZIe))));
+              if (this.c != 7) throw Adb(new Lqe(TId((Hde(), ZIe))));
               Mqe(this);
               return a;
             };
@@ -116636,8 +116238,7 @@ var require_elk_bundled = __commonJS({
               if (this.c == 5) {
                 Mqe(this);
                 return $se(a, (Vse(), Vse(), ++Use, new Kte(9, a)));
-              } else
-                return $se(a, (Vse(), Vse(), ++Use, new Kte(3, a)));
+              } else return $se(a, (Vse(), Vse(), ++Use, new Kte(3, a)));
             };
             _.Hm = function zre(a) {
               var b;
@@ -116658,8 +116259,7 @@ var require_elk_bundled = __commonJS({
               if (this.c == 5) {
                 Mqe(this);
                 return Vse(), Vse(), ++Use, new Kte(9, a);
-              } else
-                return Vse(), Vse(), ++Use, new Kte(3, a);
+              } else return Vse(), Vse(), ++Use, new Kte(3, a);
             };
             _.a = 0;
             _.b = 0;
@@ -116768,8 +116368,7 @@ var require_elk_bundled = __commonJS({
               var a;
               Mqe(this);
               a = bte(Qqe(this), 0);
-              if (this.c != 7)
-                throw Adb(new Lqe(TId((Hde(), ZIe))));
+              if (this.c != 7) throw Adb(new Lqe(TId((Hde(), ZIe))));
               Mqe(this);
               return a;
             };
@@ -116827,14 +116426,10 @@ var require_elk_bundled = __commonJS({
             _.Qm = function Ate(a) {
               var b, c, d;
               if (this.e == 4) {
-                if (this == Dse)
-                  c = ".";
-                else if (this == Bse)
-                  c = "\\d";
-                else if (this == Rse)
-                  c = "\\w";
-                else if (this == Mse)
-                  c = "\\s";
+                if (this == Dse) c = ".";
+                else if (this == Bse) c = "\\d";
+                else if (this == Rse) c = "\\w";
+                else if (this == Mse) c = "\\s";
                 else {
                   d = new Qhb();
                   d.a += "[";
@@ -116852,12 +116447,9 @@ var require_elk_bundled = __commonJS({
                   c = d.a;
                 }
               } else {
-                if (this == Ise)
-                  c = "\\D";
-                else if (this == Kse)
-                  c = "\\W";
-                else if (this == Jse)
-                  c = "\\S";
+                if (this == Ise) c = "\\D";
+                else if (this == Kse) c = "\\W";
+                else if (this == Jse) c = "\\S";
                 else {
                   d = new Qhb();
                   d.a += "[^";
@@ -116886,10 +116478,8 @@ var require_elk_bundled = __commonJS({
             feb(591, 1, { 3: 1, 591: 1 }, Dte);
             _.Fb = function Ete(a) {
               var b;
-              if (a == null)
-                return false;
-              if (!ZD(a, 591))
-                return false;
+              if (a == null) return false;
+              if (!ZD(a, 591)) return false;
               b = RD(a, 591);
               return lhb(this.b, b.b) && this.a == b.a;
             };
@@ -116941,8 +116531,7 @@ var require_elk_bundled = __commonJS({
                       if (this.a >= txe) {
                         c = (b = this.a >>> 0, "0" + b.toString(16));
                         d = "\\v" + zhb(c, c.length - 6, c.length);
-                      } else
-                        d = "" + XD(this.a & Bwe);
+                      } else d = "" + XD(this.a & Bwe);
                   }
                   break;
                 case 8:
@@ -116979,8 +116568,7 @@ var require_elk_bundled = __commonJS({
                   b = this.a.Qm(a) + "{" + this.c + "," + this.b + "}";
                 } else if (this.c >= 0 && this.b < 0) {
                   b = this.a.Qm(a) + "{" + this.c + ",}";
-                } else
-                  throw Adb(new yz("Token#toString(): CLOSURE " + this.c + pve + this.b));
+                } else throw Adb(new yz("Token#toString(): CLOSURE " + this.c + pve + this.b));
               } else {
                 if (this.c < 0 && this.b < 0) {
                   b = this.a.Qm(a) + "*?";
@@ -116990,8 +116578,7 @@ var require_elk_bundled = __commonJS({
                   b = this.a.Qm(a) + "{" + this.c + "," + this.b + "}?";
                 } else if (this.c >= 0 && this.b < 0) {
                   b = this.a.Qm(a) + "{" + this.c + ",}?";
-                } else
-                  throw Adb(new yz("Token#toString(): NONGREEDYCLOSURE " + this.c + pve + this.b));
+                } else throw Adb(new yz("Token#toString(): NONGREEDYCLOSURE " + this.c + pve + this.b));
               }
               return b;
             };
@@ -117013,10 +116600,8 @@ var require_elk_bundled = __commonJS({
             var kdb = sfb(LLe, "RegEx/Token/ConcatToken", 837);
             feb(1945, 122, ZLe, Ute);
             _.Lm = function Vte(a) {
-              if (a == 0)
-                return this.d;
-              if (a == 1)
-                return this.b;
+              if (a == 0) return this.d;
+              if (a == 1) return this.b;
               throw Adb(new yz("Internal Error: " + a));
             };
             _.Pm = function Wte() {
@@ -117254,11 +116839,10 @@ var require_elk_bundled = __commonJS({
             throw new TypeError("Super expression must either be null or a function, not " + typeof superClass);
           }
           subClass.prototype = Object.create(superClass && superClass.prototype, { constructor: { value: subClass, enumerable: false, writable: true, configurable: true } });
-          if (superClass)
-            Object.setPrototypeOf ? Object.setPrototypeOf(subClass, superClass) : subClass.__proto__ = superClass;
+          if (superClass) Object.setPrototypeOf ? Object.setPrototypeOf(subClass, superClass) : subClass.__proto__ = superClass;
         }
         var ELK2 = require2("./elk-api.js").default;
-        var ELKNode = function(_ELK) {
+        var ELKNode = (function(_ELK) {
           _inherits(ELKNode2, _ELK);
           function ELKNode2() {
             var options = arguments.length > 0 && arguments[0] !== void 0 ? arguments[0] : {};
@@ -117289,7 +116873,7 @@ var require_elk_bundled = __commonJS({
             return _possibleConstructorReturn(this, (ELKNode2.__proto__ || Object.getPrototypeOf(ELKNode2)).call(this, optionsClone));
           }
           return ELKNode2;
-        }(ELK2);
+        })(ELK2);
         Object.defineProperty(module3.exports, "__esModule", {
           value: true
         });
@@ -117303,7 +116887,7 @@ var require_elk_bundled = __commonJS({
 });
 
 // src/webview/App.jsx
-var import_react23 = __toESM(require_react());
+var import_react32 = __toESM(require_react());
 var import_client = __toESM(require_client());
 
 // node_modules/@reactflow/core/dist/esm/index.mjs
@@ -117311,8 +116895,7 @@ var import_react2 = __toESM(require_react(), 1);
 
 // node_modules/classcat/index.js
 function cc(names) {
-  if (typeof names === "string" || typeof names === "number")
-    return "" + names;
+  if (typeof names === "string" || typeof names === "number") return "" + names;
   let out = "";
   if (Array.isArray(names)) {
     for (let i = 0, tmp; i < names.length; i++) {
@@ -117322,8 +116905,7 @@ function cc(names) {
     }
   } else {
     for (let k in names) {
-      if (names[k])
-        out += (out && " ") + k;
+      if (names[k]) out += (out && " ") + k;
     }
   }
   return out;
@@ -117359,9 +116941,9 @@ var createStoreImpl = (createState) => {
     }
     listeners.clear();
   };
-  const api = { setState, getState, getInitialState, subscribe, destroy };
-  const initialState2 = state = createState(setState, getState, api);
-  return api;
+  const api2 = { setState, getState, getInitialState, subscribe, destroy };
+  const initialState2 = state = createState(setState, getState, api2);
+  return api2;
 };
 var createStore = (createState) => createState ? createStoreImpl(createState) : createStoreImpl;
 
@@ -117369,11 +116951,11 @@ var createStore = (createState) => createState ? createStoreImpl(createState) : 
 var { useDebugValue } = import_react.default;
 var { useSyncExternalStoreWithSelector } = import_with_selector.default;
 var identity = (arg) => arg;
-function useStoreWithEqualityFn(api, selector4 = identity, equalityFn) {
+function useStoreWithEqualityFn(api2, selector4 = identity, equalityFn) {
   const slice = useSyncExternalStoreWithSelector(
-    api.subscribe,
-    api.getState,
-    api.getServerState || api.getInitialState,
+    api2.subscribe,
+    api2.getState,
+    api2.getServerState || api2.getInitialState,
     selector4,
     equalityFn
   );
@@ -117381,9 +116963,9 @@ function useStoreWithEqualityFn(api, selector4 = identity, equalityFn) {
   return slice;
 }
 var createWithEqualityFnImpl = (createState, defaultEqualityFn) => {
-  const api = createStore(createState);
-  const useBoundStoreWithEqualityFn = (selector4, equalityFn = defaultEqualityFn) => useStoreWithEqualityFn(api, selector4, equalityFn);
-  Object.assign(useBoundStoreWithEqualityFn, api);
+  const api2 = createStore(createState);
+  const useBoundStoreWithEqualityFn = (selector4, equalityFn = defaultEqualityFn) => useStoreWithEqualityFn(api2, selector4, equalityFn);
+  Object.assign(useBoundStoreWithEqualityFn, api2);
   return useBoundStoreWithEqualityFn;
 };
 var createWithEqualityFn = (createState, defaultEqualityFn) => createState ? createWithEqualityFnImpl(createState, defaultEqualityFn) : createWithEqualityFnImpl;
@@ -117397,8 +116979,7 @@ function shallow$1(objA, objB) {
     return false;
   }
   if (objA instanceof Map && objB instanceof Map) {
-    if (objA.size !== objB.size)
-      return false;
+    if (objA.size !== objB.size) return false;
     for (const [key, value] of objA) {
       if (!Object.is(value, objB.get(key))) {
         return false;
@@ -117407,8 +116988,7 @@ function shallow$1(objA, objB) {
     return true;
   }
   if (objA instanceof Set && objB instanceof Set) {
-    if (objA.size !== objB.size)
-      return false;
+    if (objA.size !== objB.size) return false;
     for (const value of objA) {
       if (!objB.has(value)) {
         return false;
@@ -117433,8 +117013,7 @@ var noop = { value: () => {
 } };
 function dispatch() {
   for (var i = 0, n = arguments.length, _ = {}, t; i < n; ++i) {
-    if (!(t = arguments[i] + "") || t in _ || /[\s.]/.test(t))
-      throw new Error("illegal type: " + t);
+    if (!(t = arguments[i] + "") || t in _ || /[\s.]/.test(t)) throw new Error("illegal type: " + t);
     _[t] = [];
   }
   return new Dispatch(_);
@@ -117445,10 +117024,8 @@ function Dispatch(_) {
 function parseTypenames(typenames, types) {
   return typenames.trim().split(/^|\s+/).map(function(t) {
     var name = "", i = t.indexOf(".");
-    if (i >= 0)
-      name = t.slice(i + 1), t = t.slice(0, i);
-    if (t && !types.hasOwnProperty(t))
-      throw new Error("unknown type: " + t);
+    if (i >= 0) name = t.slice(i + 1), t = t.slice(0, i);
+    if (t && !types.hasOwnProperty(t)) throw new Error("unknown type: " + t);
     return { type: t, name };
   });
 }
@@ -117457,42 +117034,29 @@ Dispatch.prototype = dispatch.prototype = {
   on: function(typename, callback) {
     var _ = this._, T = parseTypenames(typename + "", _), t, i = -1, n = T.length;
     if (arguments.length < 2) {
-      while (++i < n)
-        if ((t = (typename = T[i]).type) && (t = get(_[t], typename.name)))
-          return t;
+      while (++i < n) if ((t = (typename = T[i]).type) && (t = get(_[t], typename.name))) return t;
       return;
     }
-    if (callback != null && typeof callback !== "function")
-      throw new Error("invalid callback: " + callback);
+    if (callback != null && typeof callback !== "function") throw new Error("invalid callback: " + callback);
     while (++i < n) {
-      if (t = (typename = T[i]).type)
-        _[t] = set(_[t], typename.name, callback);
-      else if (callback == null)
-        for (t in _)
-          _[t] = set(_[t], typename.name, null);
+      if (t = (typename = T[i]).type) _[t] = set(_[t], typename.name, callback);
+      else if (callback == null) for (t in _) _[t] = set(_[t], typename.name, null);
     }
     return this;
   },
   copy: function() {
     var copy = {}, _ = this._;
-    for (var t in _)
-      copy[t] = _[t].slice();
+    for (var t in _) copy[t] = _[t].slice();
     return new Dispatch(copy);
   },
   call: function(type, that) {
-    if ((n = arguments.length - 2) > 0)
-      for (var args = new Array(n), i = 0, n, t; i < n; ++i)
-        args[i] = arguments[i + 2];
-    if (!this._.hasOwnProperty(type))
-      throw new Error("unknown type: " + type);
-    for (t = this._[type], i = 0, n = t.length; i < n; ++i)
-      t[i].value.apply(that, args);
+    if ((n = arguments.length - 2) > 0) for (var args = new Array(n), i = 0, n, t; i < n; ++i) args[i] = arguments[i + 2];
+    if (!this._.hasOwnProperty(type)) throw new Error("unknown type: " + type);
+    for (t = this._[type], i = 0, n = t.length; i < n; ++i) t[i].value.apply(that, args);
   },
   apply: function(type, that, args) {
-    if (!this._.hasOwnProperty(type))
-      throw new Error("unknown type: " + type);
-    for (var t = this._[type], i = 0, n = t.length; i < n; ++i)
-      t[i].value.apply(that, args);
+    if (!this._.hasOwnProperty(type)) throw new Error("unknown type: " + type);
+    for (var t = this._[type], i = 0, n = t.length; i < n; ++i) t[i].value.apply(that, args);
   }
 };
 function get(type, name) {
@@ -117509,8 +117073,7 @@ function set(type, name, callback) {
       break;
     }
   }
-  if (callback != null)
-    type.push({ name, value: callback });
+  if (callback != null) type.push({ name, value: callback });
   return type;
 }
 var dispatch_default = dispatch;
@@ -117528,8 +117091,7 @@ var namespaces_default = {
 // node_modules/d3-selection/src/namespace.js
 function namespace_default(name) {
   var prefix = name += "", i = prefix.indexOf(":");
-  if (i >= 0 && (prefix = name.slice(0, i)) !== "xmlns")
-    name = name.slice(i + 1);
+  if (i >= 0 && (prefix = name.slice(0, i)) !== "xmlns") name = name.slice(i + 1);
   return namespaces_default.hasOwnProperty(prefix) ? { space: namespaces_default[prefix], local: name } : name;
 }
 
@@ -117561,13 +117123,11 @@ function selector_default(selector4) {
 
 // node_modules/d3-selection/src/selection/select.js
 function select_default(select) {
-  if (typeof select !== "function")
-    select = selector_default(select);
+  if (typeof select !== "function") select = selector_default(select);
   for (var groups = this._groups, m = groups.length, subgroups = new Array(m), j = 0; j < m; ++j) {
     for (var group = groups[j], n = group.length, subgroup = subgroups[j] = new Array(n), node, subnode, i = 0; i < n; ++i) {
       if ((node = group[i]) && (subnode = select.call(node, node.__data__, i, group))) {
-        if ("__data__" in node)
-          subnode.__data__ = node.__data__;
+        if ("__data__" in node) subnode.__data__ = node.__data__;
         subgroup[i] = subnode;
       }
     }
@@ -117597,10 +117157,8 @@ function arrayAll(select) {
   };
 }
 function selectAll_default(select) {
-  if (typeof select === "function")
-    select = arrayAll(select);
-  else
-    select = selectorAll_default(select);
+  if (typeof select === "function") select = arrayAll(select);
+  else select = selectorAll_default(select);
   for (var groups = this._groups, m = groups.length, subgroups = [], parents = [], j = 0; j < m; ++j) {
     for (var group = groups[j], n = group.length, node, i = 0; i < n; ++i) {
       if (node = group[i]) {
@@ -117654,8 +117212,7 @@ function selectChildren_default(match) {
 
 // node_modules/d3-selection/src/selection/filter.js
 function filter_default(match) {
-  if (typeof match !== "function")
-    match = matcher_default(match);
+  if (typeof match !== "function") match = matcher_default(match);
   for (var groups = this._groups, m = groups.length, subgroups = new Array(m), j = 0; j < m; ++j) {
     for (var group = groups[j], n = group.length, subgroup = subgroups[j] = [], node, i = 0; i < n; ++i) {
       if ((node = group[i]) && match.call(node, node.__data__, i, group)) {
@@ -117754,20 +117311,16 @@ function datum(node) {
   return node.__data__;
 }
 function data_default(value, key) {
-  if (!arguments.length)
-    return Array.from(this, datum);
+  if (!arguments.length) return Array.from(this, datum);
   var bind = key ? bindKey : bindIndex, parents = this._parents, groups = this._groups;
-  if (typeof value !== "function")
-    value = constant_default(value);
+  if (typeof value !== "function") value = constant_default(value);
   for (var m = groups.length, update = new Array(m), enter = new Array(m), exit = new Array(m), j = 0; j < m; ++j) {
     var parent = parents[j], group = groups[j], groupLength = group.length, data = arraylike(value.call(parent, parent && parent.__data__, j, parents)), dataLength = data.length, enterGroup = enter[j] = new Array(dataLength), updateGroup = update[j] = new Array(dataLength), exitGroup = exit[j] = new Array(groupLength);
     bind(parent, group, enterGroup, updateGroup, exitGroup, data, key);
     for (var i0 = 0, i1 = 0, previous, next; i0 < dataLength; ++i0) {
       if (previous = enterGroup[i0]) {
-        if (i0 >= i1)
-          i1 = i0 + 1;
-        while (!(next = updateGroup[i1]) && ++i1 < dataLength)
-          ;
+        if (i0 >= i1) i1 = i0 + 1;
+        while (!(next = updateGroup[i1]) && ++i1 < dataLength) ;
         previous._next = next || null;
       }
     }
@@ -117791,20 +117344,16 @@ function join_default(onenter, onupdate, onexit) {
   var enter = this.enter(), update = this, exit = this.exit();
   if (typeof onenter === "function") {
     enter = onenter(enter);
-    if (enter)
-      enter = enter.selection();
+    if (enter) enter = enter.selection();
   } else {
     enter = enter.append(onenter + "");
   }
   if (onupdate != null) {
     update = onupdate(update);
-    if (update)
-      update = update.selection();
+    if (update) update = update.selection();
   }
-  if (onexit == null)
-    exit.remove();
-  else
-    onexit(exit);
+  if (onexit == null) exit.remove();
+  else onexit(exit);
   return enter && update ? enter.merge(update).order() : update;
 }
 
@@ -117829,8 +117378,7 @@ function order_default() {
   for (var groups = this._groups, j = -1, m = groups.length; ++j < m; ) {
     for (var group = groups[j], i = group.length - 1, next = group[i], node; --i >= 0; ) {
       if (node = group[i]) {
-        if (next && node.compareDocumentPosition(next) ^ 4)
-          next.parentNode.insertBefore(node, next);
+        if (next && node.compareDocumentPosition(next) ^ 4) next.parentNode.insertBefore(node, next);
         next = node;
       }
     }
@@ -117840,8 +117388,7 @@ function order_default() {
 
 // node_modules/d3-selection/src/selection/sort.js
 function sort_default(compare) {
-  if (!compare)
-    compare = ascending;
+  if (!compare) compare = ascending;
   function compareNode(a, b) {
     return a && b ? compare(a.__data__, b.__data__) : !a - !b;
   }
@@ -117877,8 +117424,7 @@ function node_default() {
   for (var groups = this._groups, j = 0, m = groups.length; j < m; ++j) {
     for (var group = groups[j], i = 0, n = group.length; i < n; ++i) {
       var node = group[i];
-      if (node)
-        return node;
+      if (node) return node;
     }
   }
   return null;
@@ -117887,8 +117433,7 @@ function node_default() {
 // node_modules/d3-selection/src/selection/size.js
 function size_default() {
   let size = 0;
-  for (const node of this)
-    ++size;
+  for (const node of this) ++size;
   return size;
 }
 
@@ -117901,8 +117446,7 @@ function empty_default() {
 function each_default(callback) {
   for (var groups = this._groups, j = 0, m = groups.length; j < m; ++j) {
     for (var group = groups[j], i = 0, n = group.length, node; i < n; ++i) {
-      if (node = group[i])
-        callback.call(node, node.__data__, i, group);
+      if (node = group[i]) callback.call(node, node.__data__, i, group);
     }
   }
   return this;
@@ -117932,19 +117476,15 @@ function attrConstantNS(fullname, value) {
 function attrFunction(name, value) {
   return function() {
     var v = value.apply(this, arguments);
-    if (v == null)
-      this.removeAttribute(name);
-    else
-      this.setAttribute(name, v);
+    if (v == null) this.removeAttribute(name);
+    else this.setAttribute(name, v);
   };
 }
 function attrFunctionNS(fullname, value) {
   return function() {
     var v = value.apply(this, arguments);
-    if (v == null)
-      this.removeAttributeNS(fullname.space, fullname.local);
-    else
-      this.setAttributeNS(fullname.space, fullname.local, v);
+    if (v == null) this.removeAttributeNS(fullname.space, fullname.local);
+    else this.setAttributeNS(fullname.space, fullname.local, v);
   };
 }
 function attr_default(name, value) {
@@ -117975,10 +117515,8 @@ function styleConstant(name, value, priority) {
 function styleFunction(name, value, priority) {
   return function() {
     var v = value.apply(this, arguments);
-    if (v == null)
-      this.style.removeProperty(name);
-    else
-      this.style.setProperty(name, v, priority);
+    if (v == null) this.style.removeProperty(name);
+    else this.style.setProperty(name, v, priority);
   };
 }
 function style_default(name, value, priority) {
@@ -118002,10 +117540,8 @@ function propertyConstant(name, value) {
 function propertyFunction(name, value) {
   return function() {
     var v = value.apply(this, arguments);
-    if (v == null)
-      delete this[name];
-    else
-      this[name] = v;
+    if (v == null) delete this[name];
+    else this[name] = v;
   };
 }
 function property_default(name, value) {
@@ -118044,13 +117580,11 @@ ClassList.prototype = {
 };
 function classedAdd(node, names) {
   var list = classList(node), i = -1, n = names.length;
-  while (++i < n)
-    list.add(names[i]);
+  while (++i < n) list.add(names[i]);
 }
 function classedRemove(node, names) {
   var list = classList(node), i = -1, n = names.length;
-  while (++i < n)
-    list.remove(names[i]);
+  while (++i < n) list.remove(names[i]);
 }
 function classedTrue(names) {
   return function() {
@@ -118071,9 +117605,7 @@ function classed_default(name, value) {
   var names = classArray(name + "");
   if (arguments.length < 2) {
     var list = classList(this.node()), i = -1, n = names.length;
-    while (++i < n)
-      if (!list.contains(names[i]))
-        return false;
+    while (++i < n) if (!list.contains(names[i])) return false;
     return true;
   }
   return this.each((typeof value === "function" ? classedFunction : value ? classedTrue : classedFalse)(names, value));
@@ -118119,8 +117651,7 @@ function html_default(value) {
 
 // node_modules/d3-selection/src/selection/raise.js
 function raise() {
-  if (this.nextSibling)
-    this.parentNode.appendChild(this);
+  if (this.nextSibling) this.parentNode.appendChild(this);
 }
 function raise_default() {
   return this.each(raise);
@@ -118128,8 +117659,7 @@ function raise_default() {
 
 // node_modules/d3-selection/src/selection/lower.js
 function lower() {
-  if (this.previousSibling)
-    this.parentNode.insertBefore(this, this.parentNode.firstChild);
+  if (this.previousSibling) this.parentNode.insertBefore(this, this.parentNode.firstChild);
 }
 function lower_default() {
   return this.each(lower);
@@ -118157,8 +117687,7 @@ function insert_default(name, before) {
 // node_modules/d3-selection/src/selection/remove.js
 function remove() {
   var parent = this.parentNode;
-  if (parent)
-    parent.removeChild(this);
+  if (parent) parent.removeChild(this);
 }
 function remove_default() {
   return this.each(remove);
@@ -118191,16 +117720,14 @@ function contextListener(listener) {
 function parseTypenames2(typenames) {
   return typenames.trim().split(/^|\s+/).map(function(t) {
     var name = "", i = t.indexOf(".");
-    if (i >= 0)
-      name = t.slice(i + 1), t = t.slice(0, i);
+    if (i >= 0) name = t.slice(i + 1), t = t.slice(0, i);
     return { type: t, name };
   });
 }
 function onRemove(typename) {
   return function() {
     var on = this.__on;
-    if (!on)
-      return;
+    if (!on) return;
     for (var j = 0, i = -1, m = on.length, o; j < m; ++j) {
       if (o = on[j], (!typename.type || o.type === typename.type) && o.name === typename.name) {
         this.removeEventListener(o.type, o.listener, o.options);
@@ -118208,49 +117735,42 @@ function onRemove(typename) {
         on[++i] = o;
       }
     }
-    if (++i)
-      on.length = i;
-    else
-      delete this.__on;
+    if (++i) on.length = i;
+    else delete this.__on;
   };
 }
 function onAdd(typename, value, options) {
   return function() {
     var on = this.__on, o, listener = contextListener(value);
-    if (on)
-      for (var j = 0, m = on.length; j < m; ++j) {
-        if ((o = on[j]).type === typename.type && o.name === typename.name) {
-          this.removeEventListener(o.type, o.listener, o.options);
-          this.addEventListener(o.type, o.listener = listener, o.options = options);
-          o.value = value;
-          return;
-        }
+    if (on) for (var j = 0, m = on.length; j < m; ++j) {
+      if ((o = on[j]).type === typename.type && o.name === typename.name) {
+        this.removeEventListener(o.type, o.listener, o.options);
+        this.addEventListener(o.type, o.listener = listener, o.options = options);
+        o.value = value;
+        return;
       }
+    }
     this.addEventListener(typename.type, listener, options);
     o = { type: typename.type, name: typename.name, value, listener, options };
-    if (!on)
-      this.__on = [o];
-    else
-      on.push(o);
+    if (!on) this.__on = [o];
+    else on.push(o);
   };
 }
 function on_default(typename, value, options) {
   var typenames = parseTypenames2(typename + ""), i, n = typenames.length, t;
   if (arguments.length < 2) {
     var on = this.node().__on;
-    if (on)
-      for (var j = 0, m = on.length, o; j < m; ++j) {
-        for (i = 0, o = on[j]; i < n; ++i) {
-          if ((t = typenames[i]).type === o.type && t.name === o.name) {
-            return o.value;
-          }
+    if (on) for (var j = 0, m = on.length, o; j < m; ++j) {
+      for (i = 0, o = on[j]; i < n; ++i) {
+        if ((t = typenames[i]).type === o.type && t.name === o.name) {
+          return o.value;
         }
       }
+    }
     return;
   }
   on = value ? onAdd : onRemove;
-  for (i = 0; i < n; ++i)
-    this.each(on(typenames[i], value, options));
+  for (i = 0; i < n; ++i) this.each(on(typenames[i], value, options));
   return this;
 }
 
@@ -118261,10 +117781,8 @@ function dispatchEvent(node, type, params) {
     event = new event(type, params);
   } else {
     event = window2.document.createEvent("Event");
-    if (params)
-      event.initEvent(type, params.bubbles, params.cancelable), event.detail = params.detail;
-    else
-      event.initEvent(type, false, false);
+    if (params) event.initEvent(type, params.bubbles, params.cancelable), event.detail = params.detail;
+    else event.initEvent(type, false, false);
   }
   node.dispatchEvent(event);
 }
@@ -118286,8 +117804,7 @@ function dispatch_default2(type, params) {
 function* iterator_default() {
   for (var groups = this._groups, j = 0, m = groups.length; j < m; ++j) {
     for (var group = groups[j], i = 0, n = group.length, node; i < n; ++i) {
-      if (node = group[i])
-        yield node;
+      if (node = group[i]) yield node;
     }
   }
 }
@@ -118352,16 +117869,14 @@ function select_default2(selector4) {
 // node_modules/d3-selection/src/sourceEvent.js
 function sourceEvent_default(event) {
   let sourceEvent;
-  while (sourceEvent = event.sourceEvent)
-    event = sourceEvent;
+  while (sourceEvent = event.sourceEvent) event = sourceEvent;
   return event;
 }
 
 // node_modules/d3-selection/src/pointer.js
 function pointer_default(event, node) {
   event = sourceEvent_default(event);
-  if (node === void 0)
-    node = event.currentTarget;
+  if (node === void 0) node = event.currentTarget;
   if (node) {
     var svg = node.ownerSVGElement || node;
     if (svg.createSVGPoint) {
@@ -118469,11 +117984,9 @@ function drag_default() {
     selection2.on("mousedown.drag", mousedowned).filter(touchable).on("touchstart.drag", touchstarted).on("touchmove.drag", touchmoved, nonpassive).on("touchend.drag touchcancel.drag", touchended).style("touch-action", "none").style("-webkit-tap-highlight-color", "rgba(0,0,0,0)");
   }
   function mousedowned(event, d) {
-    if (touchending || !filter2.call(this, event, d))
-      return;
+    if (touchending || !filter2.call(this, event, d)) return;
     var gesture = beforestart(this, container.call(this, event, d), event, d, "mouse");
-    if (!gesture)
-      return;
+    if (!gesture) return;
     select_default2(event.view).on("mousemove.drag", mousemoved, nonpassivecapture).on("mouseup.drag", mouseupped, nonpassivecapture);
     nodrag_default(event.view);
     nopropagation(event);
@@ -118497,8 +118010,7 @@ function drag_default() {
     gestures.mouse("end", event);
   }
   function touchstarted(event, d) {
-    if (!filter2.call(this, event, d))
-      return;
+    if (!filter2.call(this, event, d)) return;
     var touches = event.changedTouches, c = container.call(this, event, d), n = touches.length, i, gesture;
     for (i = 0; i < n; ++i) {
       if (gesture = beforestart(this, c, event, d, touches[i].identifier, touches[i])) {
@@ -118518,8 +118030,7 @@ function drag_default() {
   }
   function touchended(event) {
     var touches = event.changedTouches, n = touches.length, i, gesture;
-    if (touchending)
-      clearTimeout(touchending);
+    if (touchending) clearTimeout(touchending);
     touchending = setTimeout(function() {
       touchending = null;
     }, 500);
@@ -118542,8 +118053,7 @@ function drag_default() {
       dx: 0,
       dy: 0,
       dispatch: dispatch2
-    }), d)) == null)
-      return;
+    }), d)) == null) return;
     dx = s.x - p[0] || 0;
     dy = s.y - p[1] || 0;
     return function gesture(type, event2, touch2) {
@@ -118554,6 +118064,7 @@ function drag_default() {
           break;
         case "end":
           delete gestures[identifier], --active;
+        // falls through
         case "drag":
           p = pointer_default(touch2 || event2, container2), n = active;
           break;
@@ -118606,8 +118117,7 @@ function define_default(constructor, factory, prototype) {
 }
 function extend(parent, definition) {
   var prototype = Object.create(parent.prototype);
-  for (var key in definition)
-    prototype[key] = definition[key];
+  for (var key in definition) prototype[key] = definition[key];
   return prototype;
 }
 
@@ -118812,15 +118322,12 @@ function rgbn(n) {
   return new Rgb(n >> 16 & 255, n >> 8 & 255, n & 255, 1);
 }
 function rgba(r, g, b, a) {
-  if (a <= 0)
-    r = g = b = NaN;
+  if (a <= 0) r = g = b = NaN;
   return new Rgb(r, g, b, a);
 }
 function rgbConvert(o) {
-  if (!(o instanceof Color))
-    o = color(o);
-  if (!o)
-    return new Rgb();
+  if (!(o instanceof Color)) o = color(o);
+  if (!o) return new Rgb();
   o = o.rgb();
   return new Rgb(o.r, o.g, o.b, o.opacity);
 }
@@ -118879,32 +118386,22 @@ function hex(value) {
   return (value < 16 ? "0" : "") + value.toString(16);
 }
 function hsla(h, s, l, a) {
-  if (a <= 0)
-    h = s = l = NaN;
-  else if (l <= 0 || l >= 1)
-    h = s = NaN;
-  else if (s <= 0)
-    h = NaN;
+  if (a <= 0) h = s = l = NaN;
+  else if (l <= 0 || l >= 1) h = s = NaN;
+  else if (s <= 0) h = NaN;
   return new Hsl(h, s, l, a);
 }
 function hslConvert(o) {
-  if (o instanceof Hsl)
-    return new Hsl(o.h, o.s, o.l, o.opacity);
-  if (!(o instanceof Color))
-    o = color(o);
-  if (!o)
-    return new Hsl();
-  if (o instanceof Hsl)
-    return o;
+  if (o instanceof Hsl) return new Hsl(o.h, o.s, o.l, o.opacity);
+  if (!(o instanceof Color)) o = color(o);
+  if (!o) return new Hsl();
+  if (o instanceof Hsl) return o;
   o = o.rgb();
   var r = o.r / 255, g = o.g / 255, b = o.b / 255, min = Math.min(r, g, b), max = Math.max(r, g, b), h = NaN, s = max - min, l = (max + min) / 2;
   if (s) {
-    if (r === max)
-      h = (g - b) / s + (g < b) * 6;
-    else if (g === max)
-      h = (b - r) / s + 2;
-    else
-      h = (r - g) / s + 4;
+    if (r === max) h = (g - b) / s + (g < b) * 6;
+    else if (g === max) h = (b - r) / s + 2;
+    else h = (r - g) / s + 4;
     s /= l < 0.5 ? max + min : 2 - max - min;
     h *= 60;
   } else {
@@ -119008,7 +118505,7 @@ function nogamma(a, b) {
 }
 
 // node_modules/d3-interpolate/src/rgb.js
-var rgb_default = function rgbGamma(y) {
+var rgb_default = (function rgbGamma(y) {
   var color2 = gamma(y);
   function rgb2(start2, end) {
     var r = color2((start2 = rgb(start2)).r, (end = rgb(end)).r), g = color2(start2.g, end.g), b = color2(start2.b, end.b), opacity = nogamma(start2.opacity, end.opacity);
@@ -119022,7 +118519,7 @@ var rgb_default = function rgbGamma(y) {
   }
   rgb2.gamma = rgbGamma;
   return rgb2;
-}(1);
+})(1);
 function rgbSpline(spline) {
   return function(colors) {
     var n = colors.length, r = new Array(n), g = new Array(n), b = new Array(n), i, color2;
@@ -119073,16 +118570,12 @@ function string_default(a, b) {
   while ((am = reA.exec(a)) && (bm = reB.exec(b))) {
     if ((bs = bm.index) > bi) {
       bs = b.slice(bi, bs);
-      if (s[i])
-        s[i] += bs;
-      else
-        s[++i] = bs;
+      if (s[i]) s[i] += bs;
+      else s[++i] = bs;
     }
     if ((am = am[0]) === (bm = bm[0])) {
-      if (s[i])
-        s[i] += bm;
-      else
-        s[++i] = bm;
+      if (s[i]) s[i] += bm;
+      else s[++i] = bm;
     } else {
       s[++i] = null;
       q.push({ i, x: number_default(am, bm) });
@@ -119091,14 +118584,11 @@ function string_default(a, b) {
   }
   if (bi < b.length) {
     bs = b.slice(bi);
-    if (s[i])
-      s[i] += bs;
-    else
-      s[++i] = bs;
+    if (s[i]) s[i] += bs;
+    else s[++i] = bs;
   }
   return s.length < 2 ? q[0] ? one(q[0].x) : zero(b) : (b = q.length, function(t) {
-    for (var i2 = 0, o; i2 < b; ++i2)
-      s[(o = q[i2]).i] = o.x(t);
+    for (var i2 = 0, o; i2 < b; ++i2) s[(o = q[i2]).i] = o.x(t);
     return s.join("");
   });
 }
@@ -119115,14 +118605,10 @@ var identity2 = {
 };
 function decompose_default(a, b, c, d, e, f) {
   var scaleX, scaleY, skewX;
-  if (scaleX = Math.sqrt(a * a + b * b))
-    a /= scaleX, b /= scaleX;
-  if (skewX = a * c + b * d)
-    c -= a * skewX, d -= b * skewX;
-  if (scaleY = Math.sqrt(c * c + d * d))
-    c /= scaleY, d /= scaleY, skewX /= scaleY;
-  if (a * d < b * c)
-    a = -a, b = -b, skewX = -skewX, scaleX = -scaleX;
+  if (scaleX = Math.sqrt(a * a + b * b)) a /= scaleX, b /= scaleX;
+  if (skewX = a * c + b * d) c -= a * skewX, d -= b * skewX;
+  if (scaleY = Math.sqrt(c * c + d * d)) c /= scaleY, d /= scaleY, skewX /= scaleY;
+  if (a * d < b * c) a = -a, b = -b, skewX = -skewX, scaleX = -scaleX;
   return {
     translateX: e,
     translateY: f,
@@ -119140,13 +118626,10 @@ function parseCss(value) {
   return m.isIdentity ? identity2 : decompose_default(m.a, m.b, m.c, m.d, m.e, m.f);
 }
 function parseSvg(value) {
-  if (value == null)
-    return identity2;
-  if (!svgNode)
-    svgNode = document.createElementNS("http://www.w3.org/2000/svg", "g");
+  if (value == null) return identity2;
+  if (!svgNode) svgNode = document.createElementNS("http://www.w3.org/2000/svg", "g");
   svgNode.setAttribute("transform", value);
-  if (!(value = svgNode.transform.baseVal.consolidate()))
-    return identity2;
+  if (!(value = svgNode.transform.baseVal.consolidate())) return identity2;
   value = value.matrix;
   return decompose_default(value.a, value.b, value.c, value.d, value.e, value.f);
 }
@@ -119166,10 +118649,8 @@ function interpolateTransform(parse, pxComma, pxParen, degParen) {
   }
   function rotate(a, b, s, q) {
     if (a !== b) {
-      if (a - b > 180)
-        b += 360;
-      else if (b - a > 180)
-        a += 360;
+      if (a - b > 180) b += 360;
+      else if (b - a > 180) a += 360;
       q.push({ i: s.push(pop(s) + "rotate(", null, degParen) - 2, x: number_default(a, b) });
     } else if (b) {
       s.push(pop(s) + "rotate(" + b + degParen);
@@ -119200,8 +118681,7 @@ function interpolateTransform(parse, pxComma, pxParen, degParen) {
     a = b = null;
     return function(t) {
       var i = -1, n = q.length, o;
-      while (++i < n)
-        s[(o = q[i]).i] = o.x(t);
+      while (++i < n) s[(o = q[i]).i] = o.x(t);
       return s.join("");
     };
   };
@@ -119220,7 +118700,7 @@ function sinh(x) {
 function tanh(x) {
   return ((x = Math.exp(2 * x)) - 1) / (x + 1);
 }
-var zoom_default = function zoomRho(rho, rho2, rho4) {
+var zoom_default = (function zoomRho(rho, rho2, rho4) {
   function zoom(p0, p1) {
     var ux0 = p0[0], uy0 = p0[1], w0 = p0[2], ux1 = p1[0], uy1 = p1[1], w1 = p1[2], dx = ux1 - ux0, dy = uy1 - uy0, d2 = dx * dx + dy * dy, i, S;
     if (d2 < epsilon2) {
@@ -119252,7 +118732,7 @@ var zoom_default = function zoomRho(rho, rho2, rho4) {
     return zoomRho(_1, _2, _4);
   };
   return zoom;
-}(Math.SQRT2, 2, 4);
+})(Math.SQRT2, 2, 4);
 
 // node_modules/d3-timer/src/timer.js
 var frame = 0;
@@ -119280,14 +118760,11 @@ function Timer() {
 Timer.prototype = timer.prototype = {
   constructor: Timer,
   restart: function(callback, delay, time) {
-    if (typeof callback !== "function")
-      throw new TypeError("callback is not a function");
+    if (typeof callback !== "function") throw new TypeError("callback is not a function");
     time = (time == null ? now() : +time) + (delay == null ? 0 : +delay);
     if (!this._next && taskTail !== this) {
-      if (taskTail)
-        taskTail._next = this;
-      else
-        taskHead = this;
+      if (taskTail) taskTail._next = this;
+      else taskHead = this;
       taskTail = this;
     }
     this._call = callback;
@@ -119312,8 +118789,7 @@ function timerFlush() {
   ++frame;
   var t = taskHead, e;
   while (t) {
-    if ((e = clockNow - t._time) >= 0)
-      t._call.call(void 0, e);
+    if ((e = clockNow - t._time) >= 0) t._call.call(void 0, e);
     t = t._next;
   }
   --frame;
@@ -119331,15 +118807,13 @@ function wake() {
 }
 function poke() {
   var now2 = clock.now(), delay = now2 - clockLast;
-  if (delay > pokeDelay)
-    clockSkew -= delay, clockLast = now2;
+  if (delay > pokeDelay) clockSkew -= delay, clockLast = now2;
 }
 function nap() {
   var t0, t1 = taskHead, t2, time = Infinity;
   while (t1) {
     if (t1._call) {
-      if (time > t1._time)
-        time = t1._time;
+      if (time > t1._time) time = t1._time;
       t0 = t1, t1 = t1._next;
     } else {
       t2 = t1._next, t1._next = null;
@@ -119350,19 +118824,14 @@ function nap() {
   sleep(time);
 }
 function sleep(time) {
-  if (frame)
-    return;
-  if (timeout)
-    timeout = clearTimeout(timeout);
+  if (frame) return;
+  if (timeout) timeout = clearTimeout(timeout);
   var delay = time - clockNow;
   if (delay > 24) {
-    if (time < Infinity)
-      timeout = setTimeout(wake, time - clock.now() - clockSkew);
-    if (interval)
-      interval = clearInterval(interval);
+    if (time < Infinity) timeout = setTimeout(wake, time - clock.now() - clockSkew);
+    if (interval) interval = clearInterval(interval);
   } else {
-    if (!interval)
-      clockLast = clock.now(), interval = setInterval(poke, pokeDelay);
+    if (!interval) clockLast = clock.now(), interval = setInterval(poke, pokeDelay);
     frame = 1, setFrame(wake);
   }
 }
@@ -119390,10 +118859,8 @@ var ENDING = 5;
 var ENDED = 6;
 function schedule_default(node, name, id2, index, group, timing) {
   var schedules = node.__transition;
-  if (!schedules)
-    node.__transition = {};
-  else if (id2 in schedules)
-    return;
+  if (!schedules) node.__transition = {};
+  else if (id2 in schedules) return;
   create(node, id2, {
     name,
     index,
@@ -119412,20 +118879,17 @@ function schedule_default(node, name, id2, index, group, timing) {
 }
 function init(node, id2) {
   var schedule = get2(node, id2);
-  if (schedule.state > CREATED)
-    throw new Error("too late; already scheduled");
+  if (schedule.state > CREATED) throw new Error("too late; already scheduled");
   return schedule;
 }
 function set2(node, id2) {
   var schedule = get2(node, id2);
-  if (schedule.state > STARTED)
-    throw new Error("too late; already running");
+  if (schedule.state > STARTED) throw new Error("too late; already running");
   return schedule;
 }
 function get2(node, id2) {
   var schedule = node.__transition;
-  if (!schedule || !(schedule = schedule[id2]))
-    throw new Error("transition not found");
+  if (!schedule || !(schedule = schedule[id2])) throw new Error("transition not found");
   return schedule;
 }
 function create(node, id2, self2) {
@@ -119435,19 +118899,15 @@ function create(node, id2, self2) {
   function schedule(elapsed) {
     self2.state = SCHEDULED;
     self2.timer.restart(start2, self2.delay, self2.time);
-    if (self2.delay <= elapsed)
-      start2(elapsed - self2.delay);
+    if (self2.delay <= elapsed) start2(elapsed - self2.delay);
   }
   function start2(elapsed) {
     var i, j, n, o;
-    if (self2.state !== SCHEDULED)
-      return stop();
+    if (self2.state !== SCHEDULED) return stop();
     for (i in schedules) {
       o = schedules[i];
-      if (o.name !== self2.name)
-        continue;
-      if (o.state === STARTED)
-        return timeout_default(start2);
+      if (o.name !== self2.name) continue;
+      if (o.state === STARTED) return timeout_default(start2);
       if (o.state === RUNNING) {
         o.state = ENDED;
         o.timer.stop();
@@ -119469,8 +118929,7 @@ function create(node, id2, self2) {
     });
     self2.state = STARTING;
     self2.on.call("start", node, node.__data__, self2.index, self2.group);
-    if (self2.state !== STARTING)
-      return;
+    if (self2.state !== STARTING) return;
     self2.state = STARTED;
     tween = new Array(n = self2.tween.length);
     for (i = 0, j = -1; i < n; ++i) {
@@ -119494,8 +118953,7 @@ function create(node, id2, self2) {
     self2.state = ENDED;
     self2.timer.stop();
     delete schedules[id2];
-    for (var i in schedules)
-      return;
+    for (var i in schedules) return;
     delete node.__transition;
   }
 }
@@ -119503,8 +118961,7 @@ function create(node, id2, self2) {
 // node_modules/d3-transition/src/interrupt.js
 function interrupt_default(node, name) {
   var schedules = node.__transition, schedule, active, empty2 = true, i;
-  if (!schedules)
-    return;
+  if (!schedules) return;
   name = name == null ? null : name + "";
   for (i in schedules) {
     if ((schedule = schedules[i]).name !== name) {
@@ -119517,8 +118974,7 @@ function interrupt_default(node, name) {
     schedule.on.call(active ? "interrupt" : "cancel", node, node.__data__, schedule.index, schedule.group);
     delete schedules[i];
   }
-  if (empty2)
-    delete node.__transition;
+  if (empty2) delete node.__transition;
 }
 
 // node_modules/d3-transition/src/selection/interrupt.js
@@ -119548,8 +119004,7 @@ function tweenRemove(id2, name) {
 }
 function tweenFunction(id2, name, value) {
   var tween0, tween1;
-  if (typeof value !== "function")
-    throw new Error();
+  if (typeof value !== "function") throw new Error();
   return function() {
     var schedule = set2(this, id2), tween = schedule.tween;
     if (tween !== tween0) {
@@ -119560,8 +119015,7 @@ function tweenFunction(id2, name, value) {
           break;
         }
       }
-      if (i === n)
-        tween1.push(t);
+      if (i === n) tween1.push(t);
     }
     schedule.tween = tween1;
   };
@@ -119626,8 +119080,7 @@ function attrFunction2(name, interpolate, value) {
   var string00, string10, interpolate0;
   return function() {
     var string0, value1 = value(this), string1;
-    if (value1 == null)
-      return void this.removeAttribute(name);
+    if (value1 == null) return void this.removeAttribute(name);
     string0 = this.getAttribute(name);
     string1 = value1 + "";
     return string0 === string1 ? null : string0 === string00 && string1 === string10 ? interpolate0 : (string10 = string1, interpolate0 = interpolate(string00 = string0, value1));
@@ -119637,8 +119090,7 @@ function attrFunctionNS2(fullname, interpolate, value) {
   var string00, string10, interpolate0;
   return function() {
     var string0, value1 = value(this), string1;
-    if (value1 == null)
-      return void this.removeAttributeNS(fullname.space, fullname.local);
+    if (value1 == null) return void this.removeAttributeNS(fullname.space, fullname.local);
     string0 = this.getAttributeNS(fullname.space, fullname.local);
     string1 = value1 + "";
     return string0 === string1 ? null : string0 === string00 && string1 === string10 ? interpolate0 : (string10 = string1, interpolate0 = interpolate(string00 = string0, value1));
@@ -119664,8 +119116,7 @@ function attrTweenNS(fullname, value) {
   var t0, i0;
   function tween() {
     var i = value.apply(this, arguments);
-    if (i !== i0)
-      t0 = (i0 = i) && attrInterpolateNS(fullname, i);
+    if (i !== i0) t0 = (i0 = i) && attrInterpolateNS(fullname, i);
     return t0;
   }
   tween._value = value;
@@ -119675,8 +119126,7 @@ function attrTween(name, value) {
   var t0, i0;
   function tween() {
     var i = value.apply(this, arguments);
-    if (i !== i0)
-      t0 = (i0 = i) && attrInterpolate(name, i);
+    if (i !== i0) t0 = (i0 = i) && attrInterpolate(name, i);
     return t0;
   }
   tween._value = value;
@@ -119684,12 +119134,9 @@ function attrTween(name, value) {
 }
 function attrTween_default(name, value) {
   var key = "attr." + name;
-  if (arguments.length < 2)
-    return (key = this.tween(key)) && key._value;
-  if (value == null)
-    return this.tween(key, null);
-  if (typeof value !== "function")
-    throw new Error();
+  if (arguments.length < 2) return (key = this.tween(key)) && key._value;
+  if (value == null) return this.tween(key, null);
+  if (typeof value !== "function") throw new Error();
   var fullname = namespace_default(name);
   return this.tween(key, (fullname.local ? attrTweenNS : attrTween)(fullname, value));
 }
@@ -119728,8 +119175,7 @@ function duration_default(value) {
 
 // node_modules/d3-transition/src/transition/ease.js
 function easeConstant(id2, value) {
-  if (typeof value !== "function")
-    throw new Error();
+  if (typeof value !== "function") throw new Error();
   return function() {
     set2(this, id2).ease = value;
   };
@@ -119743,21 +119189,18 @@ function ease_default(value) {
 function easeVarying(id2, value) {
   return function() {
     var v = value.apply(this, arguments);
-    if (typeof v !== "function")
-      throw new Error();
+    if (typeof v !== "function") throw new Error();
     set2(this, id2).ease = v;
   };
 }
 function easeVarying_default(value) {
-  if (typeof value !== "function")
-    throw new Error();
+  if (typeof value !== "function") throw new Error();
   return this.each(easeVarying(this._id, value));
 }
 
 // node_modules/d3-transition/src/transition/filter.js
 function filter_default2(match) {
-  if (typeof match !== "function")
-    match = matcher_default(match);
+  if (typeof match !== "function") match = matcher_default(match);
   for (var groups = this._groups, m = groups.length, subgroups = new Array(m), j = 0; j < m; ++j) {
     for (var group = groups[j], n = group.length, subgroup = subgroups[j] = [], node, i = 0; i < n; ++i) {
       if ((node = group[i]) && match.call(node, node.__data__, i, group)) {
@@ -119770,8 +119213,7 @@ function filter_default2(match) {
 
 // node_modules/d3-transition/src/transition/merge.js
 function merge_default2(transition2) {
-  if (transition2._id !== this._id)
-    throw new Error();
+  if (transition2._id !== this._id) throw new Error();
   for (var groups0 = this._groups, groups1 = transition2._groups, m0 = groups0.length, m1 = groups1.length, m = Math.min(m0, m1), merges = new Array(m0), j = 0; j < m; ++j) {
     for (var group0 = groups0[j], group1 = groups1[j], n = group0.length, merge = merges[j] = new Array(n), node, i = 0; i < n; ++i) {
       if (node = group0[i] || group1[i]) {
@@ -119789,8 +119231,7 @@ function merge_default2(transition2) {
 function start(name) {
   return (name + "").trim().split(/^|\s+/).every(function(t) {
     var i = t.indexOf(".");
-    if (i >= 0)
-      t = t.slice(0, i);
+    if (i >= 0) t = t.slice(0, i);
     return !t || t === "start";
   });
 }
@@ -119798,8 +119239,7 @@ function onFunction(id2, name, listener) {
   var on0, on1, sit = start(name) ? init : set2;
   return function() {
     var schedule = sit(this, id2), on = schedule.on;
-    if (on !== on0)
-      (on1 = (on0 = on).copy()).on(name, listener);
+    if (on !== on0) (on1 = (on0 = on).copy()).on(name, listener);
     schedule.on = on1;
   };
 }
@@ -119812,11 +119252,8 @@ function on_default2(name, listener) {
 function removeFunction(id2) {
   return function() {
     var parent = this.parentNode;
-    for (var i in this.__transition)
-      if (+i !== id2)
-        return;
-    if (parent)
-      parent.removeChild(this);
+    for (var i in this.__transition) if (+i !== id2) return;
+    if (parent) parent.removeChild(this);
   };
 }
 function remove_default2() {
@@ -119826,13 +119263,11 @@ function remove_default2() {
 // node_modules/d3-transition/src/transition/select.js
 function select_default3(select) {
   var name = this._name, id2 = this._id;
-  if (typeof select !== "function")
-    select = selector_default(select);
+  if (typeof select !== "function") select = selector_default(select);
   for (var groups = this._groups, m = groups.length, subgroups = new Array(m), j = 0; j < m; ++j) {
     for (var group = groups[j], n = group.length, subgroup = subgroups[j] = new Array(n), node, subnode, i = 0; i < n; ++i) {
       if ((node = group[i]) && (subnode = select.call(node, node.__data__, i, group))) {
-        if ("__data__" in node)
-          subnode.__data__ = node.__data__;
+        if ("__data__" in node) subnode.__data__ = node.__data__;
         subgroup[i] = subnode;
         schedule_default(subgroup[i], name, id2, i, subgroup, get2(node, id2));
       }
@@ -119844,8 +119279,7 @@ function select_default3(select) {
 // node_modules/d3-transition/src/transition/selectAll.js
 function selectAll_default2(select) {
   var name = this._name, id2 = this._id;
-  if (typeof select !== "function")
-    select = selectorAll_default(select);
+  if (typeof select !== "function") select = selectorAll_default(select);
   for (var groups = this._groups, m = groups.length, subgroups = [], parents = [], j = 0; j < m; ++j) {
     for (var group = groups[j], n = group.length, node, i = 0; i < n; ++i) {
       if (node = group[i]) {
@@ -119892,8 +119326,7 @@ function styleFunction2(name, interpolate, value) {
   var string00, string10, interpolate0;
   return function() {
     var string0 = styleValue(this, name), value1 = value(this), string1 = value1 + "";
-    if (value1 == null)
-      string1 = value1 = (this.style.removeProperty(name), styleValue(this, name));
+    if (value1 == null) string1 = value1 = (this.style.removeProperty(name), styleValue(this, name));
     return string0 === string1 ? null : string0 === string00 && string1 === string10 ? interpolate0 : (string10 = string1, interpolate0 = interpolate(string00 = string0, value1));
   };
 }
@@ -119901,8 +119334,7 @@ function styleMaybeRemove(id2, name) {
   var on0, on1, listener0, key = "style." + name, event = "end." + key, remove2;
   return function() {
     var schedule = set2(this, id2), on = schedule.on, listener = schedule.value[key] == null ? remove2 || (remove2 = styleRemove2(name)) : void 0;
-    if (on !== on0 || listener0 !== listener)
-      (on1 = (on0 = on).copy()).on(event, listener0 = listener);
+    if (on !== on0 || listener0 !== listener) (on1 = (on0 = on).copy()).on(event, listener0 = listener);
     schedule.on = on1;
   };
 }
@@ -119921,8 +119353,7 @@ function styleTween(name, value, priority) {
   var t, i0;
   function tween() {
     var i = value.apply(this, arguments);
-    if (i !== i0)
-      t = (i0 = i) && styleInterpolate(name, i, priority);
+    if (i !== i0) t = (i0 = i) && styleInterpolate(name, i, priority);
     return t;
   }
   tween._value = value;
@@ -119930,12 +119361,9 @@ function styleTween(name, value, priority) {
 }
 function styleTween_default(name, value, priority) {
   var key = "style." + (name += "");
-  if (arguments.length < 2)
-    return (key = this.tween(key)) && key._value;
-  if (value == null)
-    return this.tween(key, null);
-  if (typeof value !== "function")
-    throw new Error();
+  if (arguments.length < 2) return (key = this.tween(key)) && key._value;
+  if (value == null) return this.tween(key, null);
+  if (typeof value !== "function") throw new Error();
   return this.tween(key, styleTween(name, value, priority == null ? "" : priority));
 }
 
@@ -119965,8 +119393,7 @@ function textTween(value) {
   var t0, i0;
   function tween() {
     var i = value.apply(this, arguments);
-    if (i !== i0)
-      t0 = (i0 = i) && textInterpolate(i);
+    if (i !== i0) t0 = (i0 = i) && textInterpolate(i);
     return t0;
   }
   tween._value = value;
@@ -119974,12 +119401,9 @@ function textTween(value) {
 }
 function textTween_default(value) {
   var key = "text";
-  if (arguments.length < 1)
-    return (key = this.tween(key)) && key._value;
-  if (value == null)
-    return this.tween(key, null);
-  if (typeof value !== "function")
-    throw new Error();
+  if (arguments.length < 1) return (key = this.tween(key)) && key._value;
+  if (value == null) return this.tween(key, null);
+  if (typeof value !== "function") throw new Error();
   return this.tween(key, textTween(value));
 }
 
@@ -120007,8 +119431,7 @@ function end_default() {
   var on0, on1, that = this, id2 = that._id, size = that.size();
   return new Promise(function(resolve, reject) {
     var cancel = { value: reject }, end = { value: function() {
-      if (--size === 0)
-        resolve();
+      if (--size === 0) resolve();
     } };
     that.each(function() {
       var schedule = set2(this, id2), on = schedule.on;
@@ -120020,8 +119443,7 @@ function end_default() {
       }
       schedule.on = on1;
     });
-    if (size === 0)
-      resolve();
+    if (size === 0) resolve();
   });
 }
 
@@ -120180,9 +119602,7 @@ Transform.prototype = {
 var identity3 = new Transform(1, 0, 0);
 transform.prototype = Transform.prototype;
 function transform(node) {
-  while (!node.__zoom)
-    if (!(node = node.parentNode))
-      return identity3;
+  while (!node.__zoom) if (!(node = node.parentNode)) return identity3;
   return node.__zoom;
 }
 
@@ -120291,8 +119711,7 @@ function zoom_default2() {
     }).tween("zoom", function() {
       var that = this, args = arguments, g = gesture(that, args).event(event), e = extent.apply(that, args), p = point == null ? centroid(e) : typeof point === "function" ? point.apply(that, args) : point, w = Math.max(e[1][0] - e[0][0], e[1][1] - e[0][1]), a = that.__zoom, b = typeof transform2 === "function" ? transform2.apply(that, args) : transform2, i = interpolate(a.invert(p).concat(w / a.k), b.invert(p).concat(w / b.k));
       return function(t) {
-        if (t === 1)
-          t = b;
+        if (t === 1) t = b;
         else {
           var l = i(t), k = w / l[2];
           t = new Transform(k, p[0] - l[0] * k, p[1] - l[1] * k);
@@ -120314,8 +119733,7 @@ function zoom_default2() {
   }
   Gesture.prototype = {
     event: function(event) {
-      if (event)
-        this.sourceEvent = event;
+      if (event) this.sourceEvent = event;
       return this;
     },
     start: function() {
@@ -120326,12 +119744,9 @@ function zoom_default2() {
       return this;
     },
     zoom: function(key, transform2) {
-      if (this.mouse && key !== "mouse")
-        this.mouse[1] = transform2.invert(this.mouse[0]);
-      if (this.touch0 && key !== "touch")
-        this.touch0[1] = transform2.invert(this.touch0[0]);
-      if (this.touch1 && key !== "touch")
-        this.touch1[1] = transform2.invert(this.touch1[0]);
+      if (this.mouse && key !== "mouse") this.mouse[1] = transform2.invert(this.mouse[0]);
+      if (this.touch0 && key !== "touch") this.touch0[1] = transform2.invert(this.touch0[0]);
+      if (this.touch1 && key !== "touch") this.touch1[1] = transform2.invert(this.touch1[0]);
       this.that.__zoom = transform2;
       this.emit("zoom");
       return this;
@@ -120360,16 +119775,14 @@ function zoom_default2() {
     }
   };
   function wheeled(event, ...args) {
-    if (!filter2.apply(this, arguments))
-      return;
+    if (!filter2.apply(this, arguments)) return;
     var g = gesture(this, args).event(event), t = this.__zoom, k = Math.max(scaleExtent[0], Math.min(scaleExtent[1], t.k * Math.pow(2, wheelDelta2.apply(this, arguments)))), p = pointer_default(event);
     if (g.wheel) {
       if (g.mouse[0][0] !== p[0] || g.mouse[0][1] !== p[1]) {
         g.mouse[1] = t.invert(g.mouse[0] = p);
       }
       clearTimeout(g.wheel);
-    } else if (t.k === k)
-      return;
+    } else if (t.k === k) return;
     else {
       g.mouse = [p, t.invert(p)];
       interrupt_default(this);
@@ -120384,8 +119797,7 @@ function zoom_default2() {
     }
   }
   function mousedowned(event, ...args) {
-    if (touchending || !filter2.apply(this, arguments))
-      return;
+    if (touchending || !filter2.apply(this, arguments)) return;
     var currentTarget = event.currentTarget, g = gesture(this, args, true).event(event), v = select_default2(event.view).on("mousemove.zoom", mousemoved, true).on("mouseup.zoom", mouseupped, true), p = pointer_default(event, currentTarget), x0 = event.clientX, y0 = event.clientY;
     nodrag_default(event.view);
     nopropagation2(event);
@@ -120408,50 +119820,39 @@ function zoom_default2() {
     }
   }
   function dblclicked(event, ...args) {
-    if (!filter2.apply(this, arguments))
-      return;
+    if (!filter2.apply(this, arguments)) return;
     var t0 = this.__zoom, p0 = pointer_default(event.changedTouches ? event.changedTouches[0] : event, this), p1 = t0.invert(p0), k1 = t0.k * (event.shiftKey ? 0.5 : 2), t1 = constrain(translate(scale(t0, k1), p0, p1), extent.apply(this, args), translateExtent);
     noevent_default2(event);
-    if (duration > 0)
-      select_default2(this).transition().duration(duration).call(schedule, t1, p0, event);
-    else
-      select_default2(this).call(zoom.transform, t1, p0, event);
+    if (duration > 0) select_default2(this).transition().duration(duration).call(schedule, t1, p0, event);
+    else select_default2(this).call(zoom.transform, t1, p0, event);
   }
   function touchstarted(event, ...args) {
-    if (!filter2.apply(this, arguments))
-      return;
+    if (!filter2.apply(this, arguments)) return;
     var touches = event.touches, n = touches.length, g = gesture(this, args, event.changedTouches.length === n).event(event), started, i, t, p;
     nopropagation2(event);
     for (i = 0; i < n; ++i) {
       t = touches[i], p = pointer_default(t, this);
       p = [p, this.__zoom.invert(p), t.identifier];
-      if (!g.touch0)
-        g.touch0 = p, started = true, g.taps = 1 + !!touchstarting;
-      else if (!g.touch1 && g.touch0[2] !== p[2])
-        g.touch1 = p, g.taps = 0;
+      if (!g.touch0) g.touch0 = p, started = true, g.taps = 1 + !!touchstarting;
+      else if (!g.touch1 && g.touch0[2] !== p[2]) g.touch1 = p, g.taps = 0;
     }
-    if (touchstarting)
-      touchstarting = clearTimeout(touchstarting);
+    if (touchstarting) touchstarting = clearTimeout(touchstarting);
     if (started) {
-      if (g.taps < 2)
-        touchfirst = p[0], touchstarting = setTimeout(function() {
-          touchstarting = null;
-        }, touchDelay);
+      if (g.taps < 2) touchfirst = p[0], touchstarting = setTimeout(function() {
+        touchstarting = null;
+      }, touchDelay);
       interrupt_default(this);
       g.start();
     }
   }
   function touchmoved(event, ...args) {
-    if (!this.__zooming)
-      return;
+    if (!this.__zooming) return;
     var g = gesture(this, args).event(event), touches = event.changedTouches, n = touches.length, i, t, p, l;
     noevent_default2(event);
     for (i = 0; i < n; ++i) {
       t = touches[i], p = pointer_default(t, this);
-      if (g.touch0 && g.touch0[2] === t.identifier)
-        g.touch0[0] = p;
-      else if (g.touch1 && g.touch1[2] === t.identifier)
-        g.touch1[0] = p;
+      if (g.touch0 && g.touch0[2] === t.identifier) g.touch0[0] = p;
+      else if (g.touch1 && g.touch1[2] === t.identifier) g.touch1[0] = p;
     }
     t = g.that.__zoom;
     if (g.touch1) {
@@ -120459,41 +119860,32 @@ function zoom_default2() {
       t = scale(t, Math.sqrt(dp / dl));
       p = [(p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2];
       l = [(l0[0] + l1[0]) / 2, (l0[1] + l1[1]) / 2];
-    } else if (g.touch0)
-      p = g.touch0[0], l = g.touch0[1];
-    else
-      return;
+    } else if (g.touch0) p = g.touch0[0], l = g.touch0[1];
+    else return;
     g.zoom("touch", constrain(translate(t, p, l), g.extent, translateExtent));
   }
   function touchended(event, ...args) {
-    if (!this.__zooming)
-      return;
+    if (!this.__zooming) return;
     var g = gesture(this, args).event(event), touches = event.changedTouches, n = touches.length, i, t;
     nopropagation2(event);
-    if (touchending)
-      clearTimeout(touchending);
+    if (touchending) clearTimeout(touchending);
     touchending = setTimeout(function() {
       touchending = null;
     }, touchDelay);
     for (i = 0; i < n; ++i) {
       t = touches[i];
-      if (g.touch0 && g.touch0[2] === t.identifier)
-        delete g.touch0;
-      else if (g.touch1 && g.touch1[2] === t.identifier)
-        delete g.touch1;
+      if (g.touch0 && g.touch0[2] === t.identifier) delete g.touch0;
+      else if (g.touch1 && g.touch1[2] === t.identifier) delete g.touch1;
     }
-    if (g.touch1 && !g.touch0)
-      g.touch0 = g.touch1, delete g.touch1;
-    if (g.touch0)
-      g.touch0[1] = this.__zoom.invert(g.touch0[0]);
+    if (g.touch1 && !g.touch0) g.touch0 = g.touch1, delete g.touch1;
+    if (g.touch0) g.touch0[1] = this.__zoom.invert(g.touch0[0]);
     else {
       g.end();
       if (g.taps === 2) {
         t = pointer_default(t, this);
         if (Math.hypot(touchfirst[0] - t[0], touchfirst[1] - t[1]) < tapDistance) {
           var p = select_default2(this).on("dblclick.zoom");
-          if (p)
-            p.apply(this, arguments);
+          if (p) p.apply(this, arguments);
         }
       }
     }
@@ -124913,8 +124305,7 @@ var ALLOWED_MOUTHS = [
 ].join(",");
 function personaAvatarUrl(persona, style2 = "avataaars", size = 36) {
   const cached = avatar_cache_default[persona];
-  if (cached)
-    return cached;
+  if (cached) return cached;
   const base = `https://api.dicebear.com/9.x/${style2}/svg?seed=${encodeURIComponent(persona)}&size=${size}&backgroundColor=transparent`;
   if (style2 === "avataaars") {
     return base + `&top=${PROFESSIONAL_TOPS}&mouth=${ALLOWED_MOUTHS}&clothing=collarAndSweater&skinColor=ae5d29,d08b5b,edb98a,ffdbb4&accessories=kurt,prescription01,prescription02,round,sunglasses,wayfarers`;
@@ -125234,31 +124625,23 @@ function NamedEdge({
 var import_react15 = __toESM(require_react());
 var import_jsx_runtime9 = __toESM(require_jsx_runtime());
 function formatDuration(ms) {
-  if (ms == null)
-    return "--";
-  if (ms < 1)
-    return "<1ms";
-  if (ms < 1e3)
-    return `${Math.round(ms)}ms`;
-  if (ms < 6e4)
-    return `${(ms / 1e3).toFixed(1)}s`;
+  if (ms == null) return "--";
+  if (ms < 1) return "<1ms";
+  if (ms < 1e3) return `${Math.round(ms)}ms`;
+  if (ms < 6e4) return `${(ms / 1e3).toFixed(1)}s`;
   const m = Math.floor(ms / 6e4);
   const s = Math.round(ms % 6e4 / 1e3);
   return `${m}m ${s}s`;
 }
 function formatTokens(count) {
-  if (count == null)
-    return null;
+  if (count == null) return null;
   const n = Number(count);
-  if (isNaN(n))
-    return null;
-  if (n >= 1e3)
-    return `${(n / 1e3).toFixed(1)}k`;
+  if (isNaN(n)) return null;
+  if (n >= 1e3) return `${(n / 1e3).toFixed(1)}k`;
   return String(n);
 }
 function tryParseJson(str) {
-  if (typeof str !== "string")
-    return null;
+  if (typeof str !== "string") return null;
   const trimmed = str.trim();
   if (trimmed.startsWith("{") && trimmed.endsWith("}") || trimmed.startsWith("[") && trimmed.endsWith("]")) {
     try {
@@ -125276,13 +124659,11 @@ function parseLangChainMessage(obj) {
   const idTail = (obj.id[obj.id.length - 1] || "").toLowerCase();
   const role = idTail.includes("system") ? "system" : "user";
   let content = obj.kwargs.content;
-  if (content == null)
-    return null;
+  if (content == null) return null;
   if (Array.isArray(content)) {
     content = content.filter((p) => typeof p === "string" || p && p.type === "text").map((p) => typeof p === "string" ? p : p.text || "").join("\n\n");
   }
-  if (typeof content !== "string")
-    content = JSON.stringify(content);
+  if (typeof content !== "string") content = JSON.stringify(content);
   return { role, content };
 }
 function extractContent(inputValue, outputValue) {
@@ -125343,8 +124724,7 @@ function extractContent(inputValue, outputValue) {
             prompt = typeof kc === "string" ? kc : JSON.stringify(kc);
           } else {
             prompt = parsed.prompt || parsed.input || parsed.query || inputValue;
-            if (typeof prompt !== "string")
-              prompt = JSON.stringify(prompt);
+            if (typeof prompt !== "string") prompt = JSON.stringify(prompt);
           }
         }
       }
@@ -125380,8 +124760,7 @@ function extractContent(inputValue, outputValue) {
           response = parsed.content || parsed.text || parsed.output || outputValue;
         }
       }
-      if (typeof response !== "string")
-        response = JSON.stringify(response);
+      if (typeof response !== "string") response = JSON.stringify(response);
     } else {
       response = outputValue;
     }
@@ -125417,8 +124796,7 @@ function extractLLMCalls(spans) {
         span.attributes["input.value"],
         span.attributes["output.value"]
       );
-      if (_isObserverCall(systemPrompt))
-        return;
+      if (_isObserverCall(systemPrompt)) return;
       calls.push({
         id: span.span_id,
         model: span.attributes["llm.model_name"] || "Claude",
@@ -125440,25 +124818,20 @@ function extractLLMCalls(spans) {
 function extractBlockName(spans) {
   for (const span of spans || []) {
     const bn = span.attributes?.block_name || span.attributes?.["block_name"];
-    if (bn)
-      return bn;
+    if (bn) return bn;
     const m = (span.name || "").match(/\[([^\]]+)\]/);
-    if (m)
-      return m[1];
+    if (m) return m[1];
     for (const child of span.children || []) {
       const cbn = child.attributes?.block_name || child.attributes?.["block_name"];
-      if (cbn)
-        return cbn;
+      if (cbn) return cbn;
       const cm = (child.name || "").match(/\[([^\]]+)\]/);
-      if (cm)
-        return cm[1];
+      if (cm) return cm[1];
     }
   }
   return null;
 }
 function regroupTraces(traceData) {
-  if (!traceData || traceData.length === 0)
-    return [];
+  if (!traceData || traceData.length === 0) return [];
   const isTrajectory = traceData[0]?.trajectory === true || Array.isArray(traceData[0]?.steps);
   const groups = traceData.map((group) => ({
     ...group,
@@ -125486,10 +124859,8 @@ function regroupTraces(traceData) {
   const blockNames = new Set(groups.map((g) => g.blockName).filter(Boolean));
   const hasMultipleBlocks = blockNames.size > 1;
   function attemptDurMs(g) {
-    if (g.duration_s)
-      return g.duration_s * 1e3;
-    if (g.duration_ms)
-      return g.duration_ms;
+    if (g.duration_s) return g.duration_s * 1e3;
+    if (g.duration_ms) return g.duration_ms;
     return getAttemptDuration(g.spans);
   }
   const seenKeys = /* @__PURE__ */ new Map();
@@ -125518,8 +124889,7 @@ function regroupTraces(traceData) {
     let label = hasMultipleBlocks ? `${(g.blockName || "unknown").replace(/_/g, " ")} \xB7 Attempt ${g.attempt}` : groups.length === 1 ? "Run" : `Attempt ${g.attempt}`;
     if (isRepeat) {
       const parts = [];
-      if (roundNum != null)
-        parts.push(`Round ${roundNum}`);
+      if (roundNum != null) parts.push(`Round ${roundNum}`);
       parts.push(`Iter ${count}`);
       label += ` \xB7 ${parts.join(" \xB7 ")}`;
     }
@@ -125542,29 +124912,25 @@ function regroupTraces(traceData) {
   });
 }
 function getAttemptDuration(spans) {
-  if (!spans || spans.length === 0)
-    return null;
+  if (!spans || spans.length === 0) return null;
   let total = 0;
   for (const s of spans) {
     if (s.duration_ms) {
       total += s.duration_ms;
     } else if (s.children && s.children.length) {
       for (const c of s.children) {
-        if (c.duration_ms)
-          total += c.duration_ms;
+        if (c.duration_ms) total += c.duration_ms;
       }
     }
   }
   return total || null;
 }
 function getAttemptStatus(spans) {
-  if (!spans || spans.length === 0)
-    return "unset";
+  if (!spans || spans.length === 0) return "unset";
   return spans.some((s) => s.status === "error") ? "error" : "ok";
 }
 function markdownToHtml(md) {
-  if (!md)
-    return "";
+  if (!md) return "";
   const segments = md.split(/(```[\s\S]*?```)/g);
   return segments.map((seg) => {
     if (seg.startsWith("```") && seg.endsWith("```")) {
@@ -125648,11 +125014,9 @@ function markdownToHtml(md) {
   }).join("");
 }
 function _tryParseJson(text) {
-  if (!text || typeof text !== "string")
-    return null;
+  if (!text || typeof text !== "string") return null;
   const trimmed = text.trim();
-  if (!trimmed)
-    return null;
+  if (!trimmed) return null;
   const first = trimmed[0];
   const last = trimmed[trimmed.length - 1];
   if (!(first === "{" && last === "}" || first === "[" && last === "]")) {
@@ -125668,17 +125032,14 @@ function _highlightJsonHtml(jsonStr) {
   const escaped = jsonStr.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   return escaped.replace(
     /("(\\.|[^"\\])*")\s*:|("(\\.|[^"\\])*")|\b(true|false|null)\b|\b(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\b/g,
-    (match, key, _k2, str, _s2, kw, num) => {
+    (match, key, _k2, str, _s2, kw, num2) => {
       if (key) {
         const k = key.replace(/:$/, "").trim();
         return `<span class="json-key">${k}</span>:`;
       }
-      if (str)
-        return `<span class="json-string">${str}</span>`;
-      if (kw)
-        return `<span class="json-${kw}">${kw}</span>`;
-      if (num)
-        return `<span class="json-number">${num}</span>`;
+      if (str) return `<span class="json-string">${str}</span>`;
+      if (kw) return `<span class="json-${kw}">${kw}</span>`;
+      if (num2) return `<span class="json-number">${num2}</span>`;
       return match;
     }
   );
@@ -125695,8 +125056,7 @@ var _REASONING_KEYS = [
 var _ACTION_KEYS = ["action", "decision", "next_step", "suggested_fix"];
 function FormattedText({ text, maxCollapsed = 2e3, autoJson = true }) {
   const [expanded, setExpanded] = (0, import_react15.useState)(false);
-  if (!text)
-    return /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-no-content", children: "No content" });
+  if (!text) return /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-no-content", children: "No content" });
   const parsed = autoJson ? _tryParseJson(text) : null;
   if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
     let reasoningKey = null;
@@ -125852,18 +125212,13 @@ function ToolRunCard({ run, index, total }) {
 }
 function ResultSummaryCard({ metrics, index, total }) {
   const entries = Object.entries(metrics || {}).filter(([, v]) => v != null);
-  if (!entries.length)
-    return null;
+  if (!entries.length) return null;
   function fmt(key, value) {
-    if (value == null)
-      return "\u2014";
-    if (typeof value === "boolean")
-      return value ? "\u2713 yes" : "\u2717 no";
+    if (value == null) return "\u2014";
+    if (typeof value === "boolean") return value ? "\u2713 yes" : "\u2717 no";
     if (Array.isArray(value)) {
-      if (value.length === 0)
-        return "(none)";
-      if (value.length <= 4)
-        return value.join(", ");
+      if (value.length === 0) return "(none)";
+      if (value.length <= 4) return value.join(", ");
       return `${value.slice(0, 3).join(", ")}, +${value.length - 3} more`;
     }
     if (key === "dashboard_path" || key === "path" || key === "log_path" || key === "layout_2d_png_path" || key === "viewer_path") {
@@ -125872,14 +125227,12 @@ function ResultSummaryCard({ metrics, index, total }) {
     }
     if (key === "html_size" || key === "size" || key === "stdout_bytes") {
       const n = Number(value);
-      if (!Number.isFinite(n))
-        return String(value);
+      if (!Number.isFinite(n)) return String(value);
       return n > 1024 ? `${(n / 1024).toFixed(1)} KB` : `${n} B`;
     }
     if (key === "utilization_pct") {
       const n = Number(value);
-      if (Number.isFinite(n))
-        return `${n.toFixed(1)}%`;
+      if (Number.isFinite(n)) return `${n.toFixed(1)}%`;
     }
     if (key === "confidence") {
       const n = Number(value);
@@ -125889,10 +125242,8 @@ function ResultSummaryCard({ metrics, index, total }) {
       }
     }
     if (typeof value === "number") {
-      if (Math.abs(value) >= 1e3)
-        return value.toLocaleString();
-      if (Number.isInteger(value))
-        return String(value);
+      if (Math.abs(value) >= 1e3) return value.toLocaleString();
+      if (Number.isInteger(value)) return String(value);
       return value.toFixed(3);
     }
     return String(value);
@@ -125984,7 +125335,7 @@ function ResultSummaryCard({ metrics, index, total }) {
     }) })
   ] });
 }
-function TrajectorySteps({ steps }) {
+function TrajectorySteps({ steps, onOpenCall }) {
   const total = steps.length;
   return /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "llm-call-list trajectory-steps", children: steps.map((step, i) => {
     if (step.type === "tool_run") {
@@ -125995,6 +125346,7 @@ function TrajectorySteps({ steps }) {
     }
     const call = {
       id: step._span?.id || `step-${i}`,
+      callId: step.call_id || null,
       model: step.model || "LLM",
       runName: step.run_name || "",
       heartbeats: step.heartbeats || [],
@@ -126009,7 +125361,7 @@ function TrajectorySteps({ steps }) {
       response: step.response || "",
       streaming: step.streaming
     };
-    return call.streaming ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(StreamingLLMCard, { call }, `stream-${i}`) : /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(LLMCallCard, { call, index: i, total }, `llm-${i}`);
+    return call.streaming ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(StreamingLLMCard, { call }, `stream-${i}`) : /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(LLMCallCard, { call, index: i, total, onOpenCall }, `llm-${i}`);
   }) });
 }
 var _TURN_META = {
@@ -126049,7 +125401,7 @@ function CodexTurn({ turn, index }) {
     open && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("pre", { className: "codex-turn-full", children: fullJson })
   ] });
 }
-function LLMCallCard({ call, index, total }) {
+function LLMCallCard({ call, index, total, onOpenCall }) {
   const statusSymbol = call.status === "ok" ? "\u2713" : call.status === "error" ? "\u2717" : "\u2014";
   const statusCls = call.status === "ok" ? "ok" : call.status === "error" ? "error" : "unset";
   const tokenLabel = formatTokens(call.totalTokens);
@@ -126071,7 +125423,17 @@ function LLMCallCard({ call, index, total }) {
               tokenLabel,
               " tok"
             ] }),
-            /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: `llm-stat llm-stat-${statusCls}`, children: statusSymbol })
+            /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: `llm-stat llm-stat-${statusCls}`, children: statusSymbol }),
+            call.callId && onOpenCall && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(
+              "button",
+              {
+                type: "button",
+                className: "rv-btn rv-btn-small llm-open-verbose",
+                onClick: () => onOpenCall(call.callId),
+                title: "Open the verbose call viewer (full prompts, every command and file write)",
+                children: "Verbose"
+              }
+            )
           ] })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "llm-step-chain", children: [
@@ -126175,8 +125537,7 @@ function AttemptSummary({ spans, steps, llmCount, hasStreamingCalls }) {
     for (const s of steps) {
       if (s.type === "tool_run") {
         toolN++;
-        if (s.return_code != null && s.return_code !== 0)
-          toolErr++;
+        if (s.return_code != null && s.return_code !== 0) toolErr++;
       } else if (s.type === "result_summary") {
         resultN++;
         const m = s.metrics || {};
@@ -126187,8 +125548,7 @@ function AttemptSummary({ spans, steps, llmCount, hasStreamingCalls }) {
         llmN++;
       }
       const d = s.duration_ms || (s.duration_s ? s.duration_s * 1e3 : 0);
-      if (d)
-        stepDurMs += d;
+      if (d) stepDurMs += d;
     }
   }
   const duration = stepDurMs || getAttemptDuration(spans);
@@ -126257,13 +125617,11 @@ function HITLPanel({ node }) {
         setLoading(false);
       }
     }).catch(() => {
-      if (!cancelled)
-        setLoading(false);
+      if (!cancelled) setLoading(false);
     });
     const interval2 = setInterval(() => {
       fetch("/api/interrupts").then((r) => r.json()).then((data) => {
-        if (!cancelled)
-          setInterruptData(data);
+        if (!cancelled) setInterruptData(data);
       }).catch(() => {
       });
     }, 5e3);
@@ -126511,13 +125869,36 @@ var DetailPanel = import_react15.default.memo(function DetailPanel2({
   onRequestTraces,
   onClose,
   width,
-  flowLayout
+  flowLayout,
+  onOpenBlock,
+  onOpenCall
 }) {
   const [activeTabKey, setActiveTabKey] = (0, import_react15.useState)(null);
+  const [blockFilter, setBlockFilter] = (0, import_react15.useState)(null);
   const scrollRef = (0, import_react15.useRef)(null);
   const savedScrollRef = (0, import_react15.useRef)(0);
   const isHITLNode = node?.uses_interrupt === true;
-  const tabGroups = import_react15.default.useMemo(() => regroupTraces(traceData), [traceData]);
+  const allGroups = import_react15.default.useMemo(() => regroupTraces(traceData), [traceData]);
+  const blockNames = import_react15.default.useMemo(() => {
+    const names = [];
+    for (const g of allGroups) {
+      if (g.blockName && !names.includes(g.blockName)) names.push(g.blockName);
+    }
+    return names;
+  }, [allGroups]);
+  const effectiveBlock = import_react15.default.useMemo(() => {
+    if (blockNames.length <= 1) return null;
+    if (blockFilter && blockNames.includes(blockFilter)) return blockFilter;
+    if (node?.block && blockNames.includes(node.block)) return node.block;
+    return blockNames[blockNames.length - 1];
+  }, [blockNames, blockFilter, node?.block]);
+  const tabGroups = import_react15.default.useMemo(() => {
+    if (!effectiveBlock) return allGroups;
+    return allGroups.filter((g) => g.blockName === effectiveBlock);
+  }, [allGroups, effectiveBlock]);
+  (0, import_react15.useEffect)(() => {
+    setBlockFilter(null);
+  }, [node?.id, node?.block]);
   (0, import_react15.useLayoutEffect)(() => {
     if (scrollRef.current) {
       savedScrollRef.current = scrollRef.current.scrollTop;
@@ -126564,15 +125945,13 @@ var DetailPanel = import_react15.default.memo(function DetailPanel2({
   const shouldPoll = isLive || isWaitingForData;
   const refreshMs = hasStreaming ? 2e3 : isWaitingForData ? 3e3 : 5e3;
   (0, import_react15.useEffect)(() => {
-    if (!shouldPoll || !onRequestTraces || !node)
-      return;
+    if (!shouldPoll || !onRequestTraces || !node) return;
     const interval2 = setInterval(() => {
       onRequestTraces(node.label || node.id);
     }, refreshMs);
     return () => clearInterval(interval2);
   }, [shouldPoll, onRequestTraces, node, refreshMs]);
-  if (!node)
-    return null;
+  if (!node) return null;
   const activeGroup = tabGroups.find((g) => g.key === activeTabKey);
   const llmCalls = activeGroup ? extractLLMCalls(activeGroup.spans) : [];
   return /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)(
@@ -126601,6 +125980,18 @@ var DetailPanel = import_react15.default.memo(function DetailPanel2({
           ] })
         ] }),
         node.description && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "llm-description", children: node.description }),
+        blockNames.length > 1 && /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "detail-block-select", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { children: "Block" }),
+          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("select", { value: effectiveBlock || "", onChange: (e) => setBlockFilter(e.target.value), children: blockNames.map((b) => /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("option", { value: b, children: b.replace(/_/g, " ") }, b)) }),
+          onOpenBlock && effectiveBlock && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("button", { type: "button", className: "rv-btn rv-btn-small", onClick: () => onOpenBlock(effectiveBlock, "trajectory"), title: "Open this block in the Blocks view", children: "Open block" })
+        ] }),
+        blockNames.length === 1 && onOpenBlock && /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "detail-block-select", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("span", { children: [
+            "Block: ",
+            blockNames[0].replace(/_/g, " ")
+          ] }),
+          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("button", { type: "button", className: "rv-btn rv-btn-small", onClick: () => onOpenBlock(blockNames[0], "trajectory"), title: "Open this block in the Blocks view", children: "Open block" })
+        ] }),
         /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "trace-section", children: [
           traceData === null && /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "trace-loading", children: [
             /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "trace-spinner" }),
@@ -126663,7 +126054,7 @@ var DetailPanel = import_react15.default.memo(function DetailPanel2({
                 hasStreamingCalls: llmCalls.some((c) => c.streaming)
               }
             ),
-            /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "trace-content", ref: scrollRef, children: activeGroup?.steps && activeGroup.steps.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(TrajectorySteps, { steps: activeGroup.steps }) : llmCalls.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "llm-call-list", children: llmCalls.map((call, i) => call.streaming ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(StreamingLLMCard, { call }, call.id || `stream-${i}`) : /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(
+            /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "trace-content", ref: scrollRef, children: activeGroup?.steps && activeGroup.steps.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(TrajectorySteps, { steps: activeGroup.steps, onOpenCall }) : llmCalls.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "llm-call-list", children: llmCalls.map((call, i) => call.streaming ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(StreamingLLMCard, { call }, call.id || `stream-${i}`) : /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(
               LLMCallCard,
               {
                 call,
@@ -126701,14 +126092,10 @@ async function applyElkLayout(nodes, edges, direction = "RIGHT") {
   const entryNodeIds = /* @__PURE__ */ new Set();
   const exitNodeIds = /* @__PURE__ */ new Set();
   for (const e of validEdges) {
-    if (virtualIds.has(e.source) && !nodeIds.has(e.source))
-      referencedVirtual.add(e.source);
-    if (virtualIds.has(e.target) && !nodeIds.has(e.target))
-      referencedVirtual.add(e.target);
-    if (e.source === "__start__" && nodeIds.has(e.target))
-      entryNodeIds.add(e.target);
-    if (e.target === "__end__" && nodeIds.has(e.source))
-      exitNodeIds.add(e.source);
+    if (virtualIds.has(e.source) && !nodeIds.has(e.source)) referencedVirtual.add(e.source);
+    if (virtualIds.has(e.target) && !nodeIds.has(e.target)) referencedVirtual.add(e.target);
+    if (e.source === "__start__" && nodeIds.has(e.target)) entryNodeIds.add(e.target);
+    if (e.target === "__end__" && nodeIds.has(e.source)) exitNodeIds.add(e.source);
   }
   const groupNodeIds = /* @__PURE__ */ new Set();
   const childToParent = {};
@@ -126754,8 +126141,7 @@ async function applyElkLayout(nodes, edges, direction = "RIGHT") {
       elkNode.edges = [];
     }
     if (parent && !isGroup) {
-      if (!childrenByGroup[parent])
-        childrenByGroup[parent] = [];
+      if (!childrenByGroup[parent]) childrenByGroup[parent] = [];
       childrenByGroup[parent].push(elkNode);
     } else {
       topLevelElkNodes.push(elkNode);
@@ -126768,10 +126154,8 @@ async function applyElkLayout(nodes, edges, direction = "RIGHT") {
   }
   for (const vid of referencedVirtual) {
     const opts = {};
-    if (vid === "__start__")
-      opts["elk.layered.layerConstraint"] = "FIRST";
-    if (vid === "__end__")
-      opts["elk.layered.layerConstraint"] = "LAST";
+    if (vid === "__start__") opts["elk.layered.layerConstraint"] = "FIRST";
+    if (vid === "__end__") opts["elk.layered.layerConstraint"] = "LAST";
     topLevelElkNodes.push({
       id: vid,
       width: 1,
@@ -126827,8 +126211,7 @@ async function applyElkLayout(nodes, edges, direction = "RIGHT") {
   const positionMap = {};
   const sizeMap = {};
   const childIdSet = /* @__PURE__ */ new Set();
-  for (const id2 in childToParent)
-    childIdSet.add(id2);
+  for (const id2 in childToParent) childIdSet.add(id2);
   function collectPositions(elkChildren, offsetX = 0, offsetY = 0, depth = 0) {
     for (const child of elkChildren || []) {
       const isReactFlowChild = childIdSet.has(child.id);
@@ -126854,8 +126237,7 @@ async function applyElkLayout(nodes, edges, direction = "RIGHT") {
   return nodes.map((node) => {
     const pos = positionMap[node.id];
     const size = sizeMap[node.id];
-    if (!pos)
-      return node;
+    if (!pos) return node;
     const isGroup = groupNodeIds.has(node.id);
     const result = {
       ...node,
@@ -126916,7 +126298,7 @@ var HIDDEN_NODES = /* @__PURE__ */ new Set(["Abort"]);
 function _defaultDirection(_name) {
   return "RIGHT";
 }
-function GraphCanvas({ graphData, graphName, executionStatus, onNodeCogwheel, traceData, onRequestTraces, detailWidth, onDetailResize }) {
+function GraphCanvas({ graphData, graphName, executionStatus, onNodeCogwheel, traceData, onRequestTraces, detailWidth, onDetailResize, onOpenBlock, onOpenCall }) {
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
   const [selectedNode, setSelectedNode] = (0, import_react16.useState)(null);
@@ -126928,8 +126310,7 @@ function GraphCanvas({ graphData, graphName, executionStatus, onNodeCogwheel, tr
   const layoutGraphRef = (0, import_react16.useRef)(null);
   const reactFlow = useReactFlow();
   const { rfNodes, rfEdges } = (0, import_react16.useMemo)(() => {
-    if (!graphData)
-      return { rfNodes: [], rfEdges: [] };
+    if (!graphData) return { rfNodes: [], rfEdges: [] };
     const rfNodes2 = graphData.nodes.filter((n) => !HIDDEN_NODES.has(n.id)).map((n) => ({
       id: n.id,
       type: NODE_TYPE_MAP[n.type] || "activityNode",
@@ -126967,22 +126348,19 @@ function GraphCanvas({ graphData, graphName, executionStatus, onNodeCogwheel, tr
     return { rfNodes: rfNodes2, rfEdges: filteredEdges };
   }, [graphData, graphName, onNodeCogwheel, direction]);
   (0, import_react16.useEffect)(() => {
-    if (!executionStatus || Object.keys(executionStatus).length === 0)
-      return;
+    if (!executionStatus || Object.keys(executionStatus).length === 0) return;
     setNodes(
       (prev) => prev.map((n) => {
         const status = executionStatus[n.id];
         const cls = status ? `status-${status}` : "";
-        if (n.className === cls)
-          return n;
+        if (n.className === cls) return n;
         return { ...n, className: cls, data: { ...n.data, status } };
       })
     );
   }, [executionStatus, setNodes]);
   const doLayout = (0, import_react16.useCallback)(
     (dir) => {
-      if (rfNodes.length === 0)
-        return;
+      if (rfNodes.length === 0) return;
       setLayoutDone(false);
       applyElkLayout(rfNodes, rfEdges, dir || direction).then((layoutedNodes) => {
         setNodes(layoutedNodes);
@@ -127010,21 +126388,17 @@ function GraphCanvas({ graphData, graphName, executionStatus, onNodeCogwheel, tr
     }
   }, [graphData, doLayout, direction]);
   (0, import_react16.useEffect)(() => {
-    if (!layoutDone)
-      return;
+    if (!layoutDone) return;
     const tid = setTimeout(() => {
       try {
         const wrapper = document.querySelector(".graph-canvas-wrapper");
-        if (!wrapper)
-          return;
+        if (!wrapper) return;
         const W = wrapper.clientWidth;
         const H = wrapper.clientHeight;
         const rfNodesNow = reactFlow.getNodes();
-        if (!rfNodesNow || rfNodesNow.length === 0)
-          return;
+        if (!rfNodesNow || rfNodesNow.length === 0) return;
         const bounds = getRectOfNodes(rfNodesNow);
-        if (!bounds.width || !bounds.height)
-          return;
+        if (!bounds.width || !bounds.height) return;
         const PADDING = 40;
         const fitX = (W - PADDING * 2) / bounds.width;
         const fitY = (H - PADDING * 2) / bounds.height;
@@ -127123,7 +126497,9 @@ function GraphCanvas({ graphData, graphName, executionStatus, onNodeCogwheel, tr
           traceData,
           onRequestTraces,
           onClose: () => setSelectedNode(null),
-          width: detailWidth
+          width: detailWidth,
+          onOpenBlock,
+          onOpenCall
         }
       )
     ] })
@@ -127190,21 +126566,16 @@ function getSegColor(nodeName) {
   return SEGMENT_COLORS[nodeName] || DEFAULT_COLOR;
 }
 function formatDuration2(seconds) {
-  if (seconds == null)
-    return "--";
-  if (seconds === 0)
-    return "< 1ms";
-  if (seconds < 1)
-    return `${Math.round(seconds * 1e3)}ms`;
-  if (seconds < 60)
-    return `${seconds.toFixed(1)}s`;
+  if (seconds == null) return "--";
+  if (seconds === 0) return "< 1ms";
+  if (seconds < 1) return `${Math.round(seconds * 1e3)}ms`;
+  if (seconds < 60) return `${seconds.toFixed(1)}s`;
   const m = Math.floor(seconds / 60);
   const s = Math.round(seconds % 60);
   return `${m}m ${s}s`;
 }
 function generateTicks(totalDuration) {
-  if (totalDuration <= 0)
-    return [];
+  if (totalDuration <= 0) return [];
   const targets = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600];
   let interval2 = targets.find((t) => totalDuration / t <= 12) || Math.ceil(totalDuration / 10);
   const ticks = [];
@@ -127295,8 +126666,7 @@ function GanttRow({ block, toPercent, effectiveEnd, onSegmentClick, selectedSegK
   const isFailed = block.status === "failed";
   const handleHover = (0, import_react17.useCallback)((seg, e) => {
     const rect = rowRef.current?.getBoundingClientRect();
-    if (!rect)
-      return;
+    if (!rect) return;
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
     setTooltip({ segment: seg, x, y });
@@ -127337,8 +126707,7 @@ function GanttRow({ block, toPercent, effectiveEnd, onSegmentClick, selectedSegK
     /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "gantt-track", children: [
       block.attempts.slice(1).map((a) => {
         const firstSeg = a.segments[0];
-        if (!firstSeg)
-          return null;
+        if (!firstSeg) return null;
         return /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
           "div",
           {
@@ -127447,7 +126816,7 @@ function Legend({ graphType }) {
     ] })
   ] });
 }
-function GanttTimeline({ timelineData, traceData, onRequestTraces, graphName, detailWidth, onDetailResize, nodeDescriptions }) {
+function GanttTimeline({ timelineData, traceData, onRequestTraces, graphName, detailWidth, onDetailResize, nodeDescriptions, onOpenBlock, onOpenCall }) {
   const [now2, setNow] = (0, import_react17.useState)(Date.now() / 1e3);
   const [selectedSeg, setSelectedSeg] = (0, import_react17.useState)(null);
   const [selectedSegKey, setSelectedSegKey] = (0, import_react17.useState)(null);
@@ -127459,8 +126828,7 @@ function GanttTimeline({ timelineData, traceData, onRequestTraces, graphName, de
   const secondsSinceLastEvent = lastEventTs > 0 ? Date.now() / 1e3 - lastEventTs : Infinity;
   const isHistoricalRun = secondsSinceLastEvent > 60;
   const hasActiveWork = !isHistoricalRun && (timelineData?.blocks?.some((b) => {
-    if (b.status !== "running")
-      return false;
+    if (b.status !== "running") return false;
     const segs = b.attempts?.flatMap((a) => a.segments) ?? [];
     const hasOpenWaiting = segs.some((s) => !s.end_ts && s.status === "waiting");
     const hasOpenRunning = segs.some((s) => !s.end_ts && s.status === "running");
@@ -127478,8 +126846,7 @@ function GanttTimeline({ timelineData, traceData, onRequestTraces, graphName, de
     }
   });
   (0, import_react17.useEffect)(() => {
-    if (!hasActiveWork)
-      return;
+    if (!hasActiveWork) return;
     const interval2 = setInterval(() => setNow(Date.now() / 1e3), 1e3);
     return () => clearInterval(interval2);
   }, [hasActiveWork]);
@@ -127491,7 +126858,9 @@ function GanttTimeline({ timelineData, traceData, onRequestTraces, graphName, de
       return;
     }
     const isHITL = HITL_NODES.has(segment.node);
+    const traceBlock = block.graph === "frontend" || block.graph === "backend" ? block.name : void 0;
     setSelectedSeg({
+      traceBlock,
       label: segment.node,
       id: segment.node,
       type: isHITL ? "human_review" : "activity",
@@ -127506,7 +126875,7 @@ function GanttTimeline({ timelineData, traceData, onRequestTraces, graphName, de
     });
     setSelectedSegKey(key);
     if (onRequestTraces) {
-      onRequestTraces(segment.node);
+      onRequestTraces(segment.node, traceBlock);
     }
   }, [selectedSegKey, onRequestTraces]);
   const handleClosePanel = (0, import_react17.useCallback)(() => {
@@ -127514,10 +126883,8 @@ function GanttTimeline({ timelineData, traceData, onRequestTraces, graphName, de
     setSelectedSegKey(null);
   }, []);
   const handleChartMouseDown = (0, import_react17.useCallback)((e) => {
-    if (e.button !== 0)
-      return;
-    if (e.target.closest(".gantt-segment") || e.target.closest(".gantt-label"))
-      return;
+    if (e.button !== 0) return;
+    if (e.target.closest(".gantt-segment") || e.target.closest(".gantt-label")) return;
     const track = e.currentTarget.querySelector(".gantt-time-track") || e.currentTarget;
     const rect = track.getBoundingClientRect();
     const x = e.clientX - rect.left;
@@ -127525,8 +126892,7 @@ function GanttTimeline({ timelineData, traceData, onRequestTraces, graphName, de
     setDragState({ startX: e.clientX, trackLeft: rect.left, trackWidth: rect.width, anchorFrac: frac });
   }, []);
   (0, import_react17.useEffect)(() => {
-    if (!dragState)
-      return;
+    if (!dragState) return;
     const onMouseMove = (e) => {
       const { trackLeft, trackWidth, anchorFrac } = dragState;
       const currentFrac = Math.max(0, Math.min(1, (e.clientX - trackLeft) / trackWidth));
@@ -127573,8 +126939,7 @@ function GanttTimeline({ timelineData, traceData, onRequestTraces, graphName, de
     for (const a of b.attempts || []) {
       for (const s of a.segments || []) {
         const ts = s.end_ts || s.start_ts;
-        if (ts > latest)
-          latest = ts;
+        if (ts > latest) latest = ts;
       }
     }
     return latest;
@@ -127585,8 +126950,7 @@ function GanttTimeline({ timelineData, traceData, onRequestTraces, graphName, de
   const zoomEnd = zoomRange ? pipeline_start + zoomRange.end * totalDuration : effectiveEnd;
   const zoomDuration = zoomEnd - zoomStart;
   const toPercent = (ts) => {
-    if (zoomDuration <= 0)
-      return 0;
+    if (zoomDuration <= 0) return 0;
     return (ts - zoomStart) / zoomDuration * 100;
   };
   const ticks = generateTicks(zoomDuration).map((t) => t + (zoomStart - pipeline_start)).filter((t) => t >= zoomStart - pipeline_start && t <= zoomEnd - pipeline_start);
@@ -127692,8 +127056,7 @@ function GanttTimeline({ timelineData, traceData, onRequestTraces, graphName, de
               const grouped = /* @__PURE__ */ new Map();
               for (const b of blocks) {
                 const g = b.graph || "other";
-                if (!grouped.has(g))
-                  grouped.set(g, []);
+                if (!grouped.has(g)) grouped.set(g, []);
                 grouped.get(g).push(b);
               }
               const orderedPhases = [
@@ -127751,10 +127114,12 @@ function GanttTimeline({ timelineData, traceData, onRequestTraces, graphName, de
             description: selectedSeg.description || nodeDescriptions?.[selectedSeg.label] || nodeDescriptions?.[selectedSeg.id]
           },
           traceData,
-          onRequestTraces,
+          onRequestTraces: (nodeId) => onRequestTraces && onRequestTraces(nodeId, selectedSeg.traceBlock),
           onClose: handleClosePanel,
           width: panelWidth,
-          flowLayout: true
+          flowLayout: true,
+          onOpenBlock,
+          onOpenCall
         }
       )
     ] })
@@ -127813,10 +127178,8 @@ var TYPE_ICONS = {
   // lightning
 };
 function getTypeColor(nodeType) {
-  if (nodeType in TYPE_COLORS)
-    return TYPE_COLORS[nodeType];
-  if (!nodeType)
-    return "rgba(234, 234, 234, 0.86)";
+  if (nodeType in TYPE_COLORS) return TYPE_COLORS[nodeType];
+  if (!nodeType) return "rgba(234, 234, 234, 0.86)";
   const len = nodeType.length;
   const r = len * 10 % 256;
   const g = nodeType.charCodeAt(0) * 5 % 256;
@@ -128026,8 +127389,7 @@ function BlockDiagramCanvas({ diagramData }) {
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
   const [layoutDone, setLayoutDone] = (0, import_react18.useState)(false);
   (0, import_react18.useEffect)(() => {
-    if (!diagramData?.architecture)
-      return;
+    if (!diagramData?.architecture) return;
     const arch = diagramData.architecture;
     const subsystemIds = new Set(
       (arch.systemNodes || []).filter((n) => n.data?.is_subsystem).map((n) => n.id)
@@ -128183,35 +127545,10 @@ function BlockDiagramCanvas({ diagramData }) {
 
 // src/webview/components/CollateralViewer.jsx
 var import_react19 = __toESM(require_react());
-var import_jsx_runtime13 = __toESM(require_jsx_runtime());
-var TEXT_EXTS = /* @__PURE__ */ new Set([
-  ".v",
-  ".sv",
-  ".py",
-  ".sdc",
-  ".ys",
-  ".tcl",
-  ".txt",
-  ".json",
-  ".md",
-  ".rpt",
-  ".log",
-  ".def",
-  ".html",
-  ".htm",
-  ".csv",
-  ".map"
-]);
-function _extOf(name) {
-  const i = name.lastIndexOf(".");
-  return i < 0 ? "" : name.slice(i).toLowerCase();
-}
-function _formatBytes(n) {
-  if (n < 1024)
-    return `${n} B`;
-  if (n < 1024 * 1024)
-    return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+
+// src/webview/utils/highlight.js
+function escHtml(s) {
+  return String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 var VERILOG_KEYWORDS = /* @__PURE__ */ new Set([
   "module",
@@ -128289,14 +127626,12 @@ var VERILOG_KEYWORDS = /* @__PURE__ */ new Set([
   "randc",
   "constraint",
   "property",
-  "sequence"
+  "sequence",
+  "signed",
+  "unsigned"
 ]);
-function _escHtml(s) {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
 function highlightVerilog(text) {
-  if (!text)
-    return "";
+  if (!text) return "";
   const out = [];
   let i = 0;
   const n = text.length;
@@ -128305,19 +127640,16 @@ function highlightVerilog(text) {
     const c2 = text[i + 1];
     if (c === "/" && c2 === "/") {
       let j = text.indexOf("\n", i);
-      if (j < 0)
-        j = n;
-      out.push(`<span class="syntax-comment">${_escHtml(text.slice(i, j))}</span>`);
+      if (j < 0) j = n;
+      out.push(`<span class="syntax-comment">${escHtml(text.slice(i, j))}</span>`);
       i = j;
       continue;
     }
     if (c === "/" && c2 === "*") {
       let j = text.indexOf("*/", i + 2);
-      if (j < 0)
-        j = n;
-      else
-        j += 2;
-      out.push(`<span class="syntax-comment">${_escHtml(text.slice(i, j))}</span>`);
+      if (j < 0) j = n;
+      else j += 2;
+      out.push(`<span class="syntax-comment">${escHtml(text.slice(i, j))}</span>`);
       i = j;
       continue;
     }
@@ -128334,44 +127666,53 @@ function highlightVerilog(text) {
         }
         j++;
       }
-      out.push(`<span class="syntax-string">${_escHtml(text.slice(i, j))}</span>`);
+      out.push(`<span class="syntax-string">${escHtml(text.slice(i, j))}</span>`);
       i = j;
       continue;
     }
-    const sizedMatch = text.slice(i).match(/^\d+'(?:[bdoh])[0-9a-fA-F_xz?]+/);
+    if (c === "`") {
+      const m = text.slice(i).match(/^`[A-Za-z_][A-Za-z0-9_]*/);
+      if (m) {
+        out.push(`<span class="syntax-attr">${escHtml(m[0])}</span>`);
+        i += m[0].length;
+        continue;
+      }
+    }
+    const sizedMatch = text.slice(i).match(/^\d*'(?:[bdohBDOH])[0-9a-fA-F_xzXZ?]+/);
     if (sizedMatch) {
-      out.push(`<span class="syntax-number">${_escHtml(sizedMatch[0])}</span>`);
+      out.push(`<span class="syntax-number">${escHtml(sizedMatch[0])}</span>`);
       i += sizedMatch[0].length;
       continue;
     }
     if (/[0-9]/.test(c)) {
       const numMatch = text.slice(i).match(/^\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/);
       if (numMatch) {
-        out.push(`<span class="syntax-number">${_escHtml(numMatch[0])}</span>`);
+        out.push(`<span class="syntax-number">${escHtml(numMatch[0])}</span>`);
         i += numMatch[0].length;
         continue;
       }
     }
-    if (/[a-zA-Z_]/.test(c)) {
-      const idMatch = text.slice(i).match(/^[a-zA-Z_][a-zA-Z0-9_$]*/);
+    if (/[a-zA-Z_$]/.test(c)) {
+      const idMatch = text.slice(i).match(/^[a-zA-Z_$][a-zA-Z0-9_$]*/);
       if (idMatch) {
         const ident = idMatch[0];
         if (VERILOG_KEYWORDS.has(ident)) {
           out.push(`<span class="syntax-keyword">${ident}</span>`);
+        } else if (ident.startsWith("$")) {
+          out.push(`<span class="syntax-attr">${escHtml(ident)}</span>`);
         } else {
-          out.push(_escHtml(ident));
+          out.push(escHtml(ident));
         }
         i += ident.length;
         continue;
       }
     }
-    out.push(_escHtml(c));
+    out.push(escHtml(c));
     i++;
   }
   return out.join("");
 }
 var TCL_KEYWORDS = /* @__PURE__ */ new Set([
-  // Core Tcl
   "set",
   "unset",
   "if",
@@ -128415,7 +127756,6 @@ var TCL_KEYWORDS = /* @__PURE__ */ new Set([
   "incr",
   "append",
   "concat",
-  // SDC commands
   "create_clock",
   "create_generated_clock",
   "set_input_delay",
@@ -128451,7 +127791,11 @@ var TCL_KEYWORDS = /* @__PURE__ */ new Set([
   "read_sdc",
   "write_sdc",
   "check_timing",
-  // Yosys-ish
+  "report_checks",
+  "report_wns",
+  "report_tns",
+  "read_liberty",
+  "link_design",
   "design",
   "read_verilog",
   "synth",
@@ -128460,15 +127804,18 @@ var TCL_KEYWORDS = /* @__PURE__ */ new Set([
   "abc",
   "write_verilog",
   "hierarchy",
-  "proc",
   "memory",
   "opt_clean",
   "stat",
-  "check"
+  "check",
+  "dfflibmap",
+  "blackbox",
+  "chparam",
+  "memory_bram",
+  "memory_map"
 ]);
 function highlightTcl(text) {
-  if (!text)
-    return "";
+  if (!text) return "";
   const out = [];
   let i = 0;
   const n = text.length;
@@ -128476,29 +127823,26 @@ function highlightTcl(text) {
     const c = text[i];
     if (c === "#" && (i === 0 || /\s/.test(text[i - 1]))) {
       let j = text.indexOf("\n", i);
-      if (j < 0)
-        j = n;
-      out.push(`<span class="syntax-comment">${_escHtml(text.slice(i, j))}</span>`);
+      if (j < 0) j = n;
+      out.push(`<span class="syntax-comment">${escHtml(text.slice(i, j))}</span>`);
       i = j;
       continue;
     }
     if (c === '"') {
       let j = i + 1;
       while (j < n && text[j] !== '"') {
-        if (text[j] === "\\")
-          j += 2;
-        else
-          j++;
+        if (text[j] === "\\") j += 2;
+        else j++;
       }
       j = Math.min(j + 1, n);
-      out.push(`<span class="syntax-string">${_escHtml(text.slice(i, j))}</span>`);
+      out.push(`<span class="syntax-string">${escHtml(text.slice(i, j))}</span>`);
       i = j;
       continue;
     }
     if (c === "$" && /[A-Za-z_]/.test(text[i + 1] || "")) {
       const m = text.slice(i).match(/^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?/);
       if (m) {
-        out.push(`<span class="syntax-attr">${_escHtml(m[0])}</span>`);
+        out.push(`<span class="syntax-attr">${escHtml(m[0])}</span>`);
         i += m[0].length;
         continue;
       }
@@ -128506,7 +127850,7 @@ function highlightTcl(text) {
     if (/[0-9]/.test(c)) {
       const m = text.slice(i).match(/^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/);
       if (m) {
-        out.push(`<span class="syntax-number">${_escHtml(m[0])}</span>`);
+        out.push(`<span class="syntax-number">${escHtml(m[0])}</span>`);
         i += m[0].length;
         continue;
       }
@@ -128518,28 +127862,134 @@ function highlightTcl(text) {
         if (TCL_KEYWORDS.has(ident)) {
           out.push(`<span class="syntax-keyword">${ident}</span>`);
         } else {
-          out.push(_escHtml(ident));
+          out.push(escHtml(ident));
         }
         i += ident.length;
         continue;
       }
     }
-    out.push(_escHtml(c));
+    out.push(escHtml(c));
+    i++;
+  }
+  return out.join("");
+}
+var PY_KEYWORDS = /* @__PURE__ */ new Set([
+  "False",
+  "None",
+  "True",
+  "and",
+  "as",
+  "assert",
+  "async",
+  "await",
+  "break",
+  "class",
+  "continue",
+  "def",
+  "del",
+  "elif",
+  "else",
+  "except",
+  "finally",
+  "for",
+  "from",
+  "global",
+  "if",
+  "import",
+  "in",
+  "is",
+  "lambda",
+  "nonlocal",
+  "not",
+  "or",
+  "pass",
+  "raise",
+  "return",
+  "try",
+  "while",
+  "with",
+  "yield"
+]);
+function highlightPython(text) {
+  if (!text) return "";
+  const out = [];
+  let i = 0;
+  const n = text.length;
+  while (i < n) {
+    const c = text[i];
+    if (c === "#") {
+      let j = text.indexOf("\n", i);
+      if (j < 0) j = n;
+      out.push(`<span class="syntax-comment">${escHtml(text.slice(i, j))}</span>`);
+      i = j;
+      continue;
+    }
+    const triple = text.startsWith('"""', i) ? '"""' : text.startsWith("'''", i) ? "'''" : null;
+    if (triple) {
+      let j = text.indexOf(triple, i + 3);
+      if (j < 0) j = n;
+      else j += 3;
+      out.push(`<span class="syntax-string">${escHtml(text.slice(i, j))}</span>`);
+      i = j;
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      let j = i + 1;
+      while (j < n && text[j] !== c && text[j] !== "\n") {
+        if (text[j] === "\\") j += 2;
+        else j++;
+      }
+      j = Math.min(j + 1, n);
+      out.push(`<span class="syntax-string">${escHtml(text.slice(i, j))}</span>`);
+      i = j;
+      continue;
+    }
+    if (c === "@" && /[A-Za-z_]/.test(text[i + 1] || "")) {
+      const m = text.slice(i).match(/^@[A-Za-z_][A-Za-z0-9_.]*/);
+      if (m) {
+        out.push(`<span class="syntax-attr">${escHtml(m[0])}</span>`);
+        i += m[0].length;
+        continue;
+      }
+    }
+    if (/[0-9]/.test(c) && !/[A-Za-z0-9_]/.test(text[i - 1] || "")) {
+      const m = text.slice(i).match(/^(?:0[xX][0-9a-fA-F_]+|0[bB][01_]+|\d[\d_]*(?:\.\d+)?(?:[eE][+-]?\d+)?)/);
+      if (m) {
+        out.push(`<span class="syntax-number">${escHtml(m[0])}</span>`);
+        i += m[0].length;
+        continue;
+      }
+    }
+    if (/[A-Za-z_]/.test(c)) {
+      const m = text.slice(i).match(/^[A-Za-z_][A-Za-z0-9_]*/);
+      if (m) {
+        const ident = m[0];
+        if (PY_KEYWORDS.has(ident)) {
+          out.push(`<span class="syntax-keyword">${ident}</span>`);
+        } else if (text[i + ident.length] === "(" && /^(def|class)\s/.test(text.slice(Math.max(0, i - 6), i))) {
+          out.push(`<span class="syntax-tag">${escHtml(ident)}</span>`);
+        } else {
+          out.push(escHtml(ident));
+        }
+        i += ident.length;
+        continue;
+      }
+    }
+    out.push(escHtml(c));
     i++;
   }
   return out.join("");
 }
 function highlightMarkdown(text) {
-  if (!text)
-    return "";
+  if (!text) return "";
   const lines = text.split("\n");
   const out = [];
   let inFence = false;
   let fenceLang = "";
   let fenceBuf = [];
   function flushFence() {
-    const inner = _escHtml(fenceBuf.join("\n"));
-    const langTag = fenceLang ? ` <span class="syntax-attr">${_escHtml(fenceLang)}</span>` : "";
+    const inner = escHtml(fenceBuf.join("\n"));
+    const langTag = fenceLang ? ` <span class="syntax-attr">${escHtml(fenceLang)}</span>` : "";
     out.push(`<span class="syntax-md-code-block"><span class="syntax-md-fence">\`\`\`${langTag}</span>
 ${inner}
 <span class="syntax-md-fence">\`\`\`</span></span>`);
@@ -128548,8 +127998,7 @@ ${inner}
   }
   for (const line of lines) {
     if (inFence) {
-      const m = line.match(/^```\s*$/);
-      if (m) {
+      if (/^```\s*$/.test(line)) {
         flushFence();
         inFence = false;
       } else {
@@ -128563,25 +128012,23 @@ ${inner}
       fenceLang = fenceStart[1];
       continue;
     }
-    const heading = line.match(/^(#{1,6})\s+(.*)$/);
-    if (heading) {
-      out.push(`<span class="syntax-md-heading">${_escHtml(line)}</span>`);
+    if (/^(#{1,6})\s+(.*)$/.test(line)) {
+      out.push(`<span class="syntax-md-heading">${escHtml(line)}</span>`);
       continue;
     }
     const list = line.match(/^(\s*)([-*+]|\d+\.)\s/);
     if (list) {
       const lead = line.slice(0, list[0].length);
       const rest = line.slice(list[0].length);
-      out.push(`<span class="syntax-md-list">${_escHtml(lead)}</span>${_inlineMd(rest)}`);
+      out.push(`<span class="syntax-md-list">${escHtml(lead)}</span>${inlineMd(rest)}`);
       continue;
     }
-    out.push(_inlineMd(line));
+    out.push(inlineMd(line));
   }
-  if (inFence)
-    flushFence();
+  if (inFence) flushFence();
   return out.join("\n");
 }
-function _inlineMd(line) {
+function inlineMd(line) {
   const out = [];
   let i = 0;
   const n = line.length;
@@ -128590,7 +128037,7 @@ function _inlineMd(line) {
     if (c === "`") {
       const end = line.indexOf("`", i + 1);
       if (end > i) {
-        out.push(`<span class="syntax-md-code">${_escHtml(line.slice(i, end + 1))}</span>`);
+        out.push(`<span class="syntax-md-code">${escHtml(line.slice(i, end + 1))}</span>`);
         i = end + 1;
         continue;
       }
@@ -128598,8 +128045,7 @@ function _inlineMd(line) {
     if (c === "*" && line[i + 1] === "*") {
       const end = line.indexOf("**", i + 2);
       if (end > i + 2) {
-        const inner = _escHtml(line.slice(i + 2, end));
-        out.push(`<span class="syntax-md-bold">**${inner}**</span>`);
+        out.push(`<span class="syntax-md-bold">**${escHtml(line.slice(i + 2, end))}**</span>`);
         i = end + 2;
         continue;
       }
@@ -128607,7 +128053,7 @@ function _inlineMd(line) {
     if (c === "*") {
       const end = line.indexOf("*", i + 1);
       if (end > i + 1 && !/^\s/.test(line[i + 1])) {
-        out.push(`<span class="syntax-md-em">${_escHtml(line.slice(i, end + 1))}</span>`);
+        out.push(`<span class="syntax-md-em">${escHtml(line.slice(i, end + 1))}</span>`);
         i = end + 1;
         continue;
       }
@@ -128616,20 +128062,19 @@ function _inlineMd(line) {
       const closeBr = line.indexOf("](", i + 1);
       const endParen = closeBr > i ? line.indexOf(")", closeBr + 2) : -1;
       if (closeBr > i && endParen > closeBr) {
-        out.push(`<span class="syntax-md-link">${_escHtml(line.slice(i, endParen + 1))}</span>`);
+        out.push(`<span class="syntax-md-link">${escHtml(line.slice(i, endParen + 1))}</span>`);
         i = endParen + 1;
         continue;
       }
     }
-    out.push(_escHtml(c));
+    out.push(escHtml(c));
     i++;
   }
   return out.join("");
 }
 function highlightHtml(text) {
-  if (!text)
-    return "";
-  let escaped = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  if (!text) return "";
+  let escaped = escHtml(text);
   escaped = escaped.replace(
     /(&lt;\/?)([a-zA-Z][a-zA-Z0-9-]*)/g,
     (m, lead, tag) => `${lead}<span class="syntax-tag">${tag}</span>`
@@ -128645,25 +128090,100 @@ function highlightHtml(text) {
   return escaped;
 }
 function highlightJson(text) {
-  if (!text)
-    return "";
-  let escaped = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  if (!text) return "";
+  const escaped = escHtml(text);
   return escaped.replace(
     /("(\\.|[^"\\])*")\s*:|("(\\.|[^"\\])*")|\b(true|false|null)\b|\b(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\b/g,
-    (match, key, _k2, str, _s2, kw, num) => {
+    (match, key, _k2, str, _s2, kw, num2) => {
       if (key) {
         const k = key.replace(/:$/, "").trim();
         return `<span class="json-key">${k}</span>:`;
       }
-      if (str)
-        return `<span class="json-string">${str}</span>`;
-      if (kw)
-        return `<span class="json-${kw}">${kw}</span>`;
-      if (num)
-        return `<span class="json-number">${num}</span>`;
+      if (str) return `<span class="json-string">${str}</span>`;
+      if (kw) return `<span class="json-${kw}">${kw}</span>`;
+      if (num2) return `<span class="json-number">${num2}</span>`;
       return match;
     }
   );
+}
+function highlightLog(text) {
+  if (!text) return "";
+  return text.split("\n").map((line) => {
+    const e = escHtml(line);
+    if (/^=== .* ===\s*$/.test(line) || /^\d+(\.\d+)*\. /.test(line)) return `<span class="syntax-log-header">${e}</span>`;
+    if (/TESTS=\d+ PASS=\d+ FAIL=0\b/.test(line)) return `<span class="syntax-log-pass">${e}</span>`;
+    if (/TESTS=\d+ PASS=\d+ FAIL=[1-9]/.test(line)) return `<span class="syntax-log-error">${e}</span>`;
+    if (/%Error|\bERROR\b|Traceback|AssertionError|\bFAIL\b|\bFAILED\b/.test(line)) return `<span class="syntax-log-error">${e}</span>`;
+    if (/%Warning|\bWARNING\b|\bWARN\b/.test(line)) return `<span class="syntax-log-warn">${e}</span>`;
+    if (/\bPASS\b|\bPASSED\b/.test(line)) return `<span class="syntax-log-pass">${e}</span>`;
+    if (/^(Command|Return code|Block|Attempt|Timestamp):/.test(line)) return `<span class="syntax-log-meta">${e}</span>`;
+    return e;
+  }).join("\n");
+}
+function highlightFor(extOrLang, text) {
+  switch ((extOrLang || "").toLowerCase()) {
+    case ".v":
+    case ".sv":
+    case ".vh":
+    case "verilog":
+      return highlightVerilog(text);
+    case ".py":
+    case "python":
+      return highlightPython(text);
+    case ".json":
+    case ".map":
+    case "json":
+      return highlightJson(text);
+    case ".sdc":
+    case ".tcl":
+    case ".ys":
+    case "tcl":
+      return highlightTcl(text);
+    case ".md":
+    case "markdown":
+      return highlightMarkdown(text);
+    case ".html":
+    case ".htm":
+    case "html":
+      return highlightHtml(text);
+    case ".log":
+    case ".txt":
+    case ".rpt":
+    case "log":
+      return highlightLog(text);
+    default:
+      return escHtml(text);
+  }
+}
+
+// src/webview/components/CollateralViewer.jsx
+var import_jsx_runtime13 = __toESM(require_jsx_runtime());
+var TEXT_EXTS = /* @__PURE__ */ new Set([
+  ".v",
+  ".sv",
+  ".py",
+  ".sdc",
+  ".ys",
+  ".tcl",
+  ".txt",
+  ".json",
+  ".md",
+  ".rpt",
+  ".log",
+  ".def",
+  ".html",
+  ".htm",
+  ".csv",
+  ".map"
+]);
+function _extOf(name) {
+  const i = name.lastIndexOf(".");
+  return i < 0 ? "" : name.slice(i).toLowerCase();
+}
+function _formatBytes(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 function SurferWaveformViewer({ relPath }) {
   const iframeRef = (0, import_react19.useRef)(null);
@@ -128671,8 +128191,7 @@ function SurferWaveformViewer({ relPath }) {
   const vcdUrl = `${location.origin}/api/artifacts/${relPath}`;
   (0, import_react19.useEffect)(() => {
     const iframe = iframeRef.current;
-    if (!iframe)
-      return;
+    if (!iframe) return;
     const handleLoad = () => {
       setTimeout(() => {
         try {
@@ -128707,8 +128226,7 @@ function FileViewer({ file }) {
   const [error, setError] = (0, import_react19.useState)(null);
   const [loading, setLoading] = (0, import_react19.useState)(false);
   (0, import_react19.useEffect)(() => {
-    if (!file)
-      return;
+    if (!file) return;
     const ext2 = _extOf(file.name);
     if (ext2 === ".html" || ext2 === ".htm" || ext2 === ".vcd" || ext2 === ".fst" || ext2 === ".ghw" || ext2 === ".png" || ext2 === ".jpg" || ext2 === ".jpeg" || ext2 === ".gif" || ext2 === ".svg" || ext2 === ".webp") {
       setContent(null);
@@ -128724,8 +128242,7 @@ function FileViewer({ file }) {
     setLoading(true);
     setError(null);
     fetch(`/api/artifacts/${file.rel_path}`).then(async (r) => {
-      if (!r.ok)
-        throw new Error(`HTTP ${r.status}`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
       return r.text();
     }).then((txt) => {
       const MAX = 256 * 1024;
@@ -128753,18 +128270,13 @@ function FileViewer({ file }) {
   const isImage = ext === ".png" || ext === ".jpg" || ext === ".jpeg" || ext === ".gif" || ext === ".svg" || ext === ".webp";
   let highlighted = null;
   if (content && !isHtmlPreview) {
-    if (ext === ".v" || ext === ".sv")
-      highlighted = highlightVerilog(content);
-    else if (ext === ".json" || ext === ".map")
-      highlighted = highlightJson(content);
-    else if (ext === ".sdc" || ext === ".tcl" || ext === ".ys")
-      highlighted = highlightTcl(content);
-    else if (ext === ".md")
-      highlighted = highlightMarkdown(content);
-    else if (ext === ".html" || ext === ".htm")
-      highlighted = highlightHtml(content);
-    else
-      highlighted = content.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    if (ext === ".v" || ext === ".sv") highlighted = highlightVerilog(content);
+    else if (ext === ".json" || ext === ".map") highlighted = highlightJson(content);
+    else if (ext === ".sdc" || ext === ".tcl" || ext === ".ys") highlighted = highlightTcl(content);
+    else if (ext === ".md") highlighted = highlightMarkdown(content);
+    else if (ext === ".py") highlighted = highlightPython(content);
+    else if (ext === ".html" || ext === ".htm") highlighted = highlightHtml(content);
+    else highlighted = content.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
   return /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { className: "collateral-content", children: [
     /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { className: "collateral-content-header", children: [
@@ -128837,20 +128349,17 @@ function _buildTree(files) {
   const sortNode = (n) => {
     n.children = new Map([...n.children.entries()].sort((a, b) => a[0].localeCompare(b[0])));
     n.files.sort((a, b) => a.displayName.localeCompare(b.displayName));
-    for (const child of n.children.values())
-      sortNode(child);
+    for (const child of n.children.values()) sortNode(child);
   };
   sortNode(root3);
   return root3;
 }
 function TreeNode({ node, depth, selected, onSelect, defaultOpen, filterTokens }) {
   const [open, setOpen] = (0, import_react19.useState)(defaultOpen);
-  if (!node)
-    return null;
+  if (!node) return null;
   const indent = { paddingLeft: 6 + depth * 12 };
   const matchesFilter = (text) => {
-    if (!filterTokens || filterTokens.length === 0)
-      return true;
+    if (!filterTokens || filterTokens.length === 0) return true;
     const t = text.toLowerCase();
     return filterTokens.every((q) => t.includes(q));
   };
@@ -128906,23 +128415,19 @@ function TreeNode({ node, depth, selected, onSelect, defaultOpen, filterTokens }
   ] });
 }
 function _treeHasMatches(node, filterTokens) {
-  if (!filterTokens || filterTokens.length === 0)
-    return true;
+  if (!filterTokens || filterTokens.length === 0) return true;
   for (const f of node.files) {
     const t = f.rel_path.toLowerCase();
-    if (filterTokens.every((q) => t.includes(q)))
-      return true;
+    if (filterTokens.every((q) => t.includes(q))) return true;
   }
   for (const child of node.children.values()) {
-    if (_treeHasMatches(child, filterTokens))
-      return true;
+    if (_treeHasMatches(child, filterTokens)) return true;
   }
   return false;
 }
 function _treeFileCount(node, filterTokens) {
   let n = node.files.filter((f) => {
-    if (!filterTokens || filterTokens.length === 0)
-      return true;
+    if (!filterTokens || filterTokens.length === 0) return true;
     const t = f.rel_path.toLowerCase();
     return filterTokens.every((q) => t.includes(q));
   }).length;
@@ -128933,22 +128438,14 @@ function _treeFileCount(node, filterTokens) {
 }
 function _fileIcon(name) {
   const ext = _extOf(name);
-  if (ext === ".v" || ext === ".sv")
-    return "\u26A1";
-  if (ext === ".vcd" || ext === ".fst" || ext === ".ghw")
-    return "\u3030";
-  if (ext === ".html" || ext === ".htm")
-    return "\u{1F310}";
-  if (ext === ".json")
-    return "{ }";
-  if (ext === ".md")
-    return "\u{1F4C4}";
-  if (ext === ".rpt" || ext === ".log" || ext === ".txt")
-    return "\u{1F4CB}";
-  if (ext === ".sdc" || ext === ".tcl" || ext === ".ys")
-    return "\u2699";
-  if (ext === ".png" || ext === ".jpg" || ext === ".jpeg" || ext === ".svg" || ext === ".gif")
-    return "\u{1F5BC}";
+  if (ext === ".v" || ext === ".sv") return "\u26A1";
+  if (ext === ".vcd" || ext === ".fst" || ext === ".ghw") return "\u3030";
+  if (ext === ".html" || ext === ".htm") return "\u{1F310}";
+  if (ext === ".json") return "{ }";
+  if (ext === ".md") return "\u{1F4C4}";
+  if (ext === ".rpt" || ext === ".log" || ext === ".txt") return "\u{1F4CB}";
+  if (ext === ".sdc" || ext === ".tcl" || ext === ".ys") return "\u2699";
+  if (ext === ".png" || ext === ".jpg" || ext === ".jpeg" || ext === ".svg" || ext === ".gif") return "\u{1F5BC}";
   return "\xB7";
 }
 function CollateralViewer() {
@@ -128960,14 +128457,12 @@ function CollateralViewer() {
     fetch("/api/collateral").then((r) => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`)).then(setData).catch((e) => setError(String(e)));
   }, []);
   const { tree, totalFiles } = (0, import_react19.useMemo)(() => {
-    if (!data)
-      return { tree: null, totalFiles: 0 };
+    if (!data) return { tree: null, totalFiles: 0 };
     const all = [];
     const seen = /* @__PURE__ */ new Set();
     for (const k of ["rtl", "tb", "syn", "pnr", "waveforms", "reports"]) {
       for (const f of data[k] || []) {
-        if (seen.has(f.rel_path))
-          continue;
+        if (seen.has(f.rel_path)) continue;
         seen.add(f.rel_path);
         all.push({ ...f, kind: k });
       }
@@ -129029,8 +128524,7 @@ var TYPE_LABELS = {
 };
 function NodePromptModal({ node, onClose }) {
   const [activeTab, setActiveTab] = (0, import_react20.useState)("prompt");
-  if (!node)
-    return null;
+  if (!node) return null;
   const typeLabel = TYPE_LABELS[node.type] || node.type;
   const info = getPersona(node.graphName, node.id);
   const persona = info?.persona;
@@ -129041,8 +128535,7 @@ function NodePromptModal({ node, onClose }) {
     { key: "source", label: "Source" }
   ];
   return /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { className: "prompt-panel-mask", onClick: (e) => {
-    if (e.target === e.currentTarget)
-      onClose();
+    if (e.target === e.currentTarget) onClose();
   }, children: /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { className: "prompt-panel", children: [
     /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { className: "prompt-panel-header", children: [
       /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { className: "modal-title", children: [
@@ -129130,8 +128623,7 @@ function NodePromptModal({ node, onClose }) {
 var import_react21 = __toESM(require_react());
 var import_jsx_runtime15 = __toESM(require_jsx_runtime());
 function markdownToHtml2(md) {
-  if (!md)
-    return "";
+  if (!md) return "";
   const segments = md.split(/(```[\s\S]*?```)/g);
   return segments.map((seg) => {
     if (seg.startsWith("```") && seg.endsWith("```")) {
@@ -129235,8 +128727,7 @@ function markdownToHtml2(md) {
   }).join("");
 }
 function formatTimestamp(epoch) {
-  if (!epoch)
-    return "";
+  if (!epoch) return "";
   const d = new Date(epoch * 1e3);
   const hh = String(d.getHours()).padStart(2, "0");
   const mm = String(d.getMinutes()).padStart(2, "0");
@@ -129382,19 +128873,14 @@ function BlockBackendCard({ block, targetClock }) {
     attempts = 0
   } = block;
   const formatNum = (n, decimals = 1) => {
-    if (n === void 0 || n === null)
-      return "--";
-    if (typeof n !== "number")
-      return String(n);
-    if (Math.abs(n) >= 1e6)
-      return (n / 1e6).toFixed(1) + "M";
-    if (Math.abs(n) >= 1e3)
-      return (n / 1e3).toFixed(1) + "k";
+    if (n === void 0 || n === null) return "--";
+    if (typeof n !== "number") return String(n);
+    if (Math.abs(n) >= 1e6) return (n / 1e6).toFixed(1) + "M";
+    if (Math.abs(n) >= 1e3) return (n / 1e3).toFixed(1) + "k";
     return n.toFixed(decimals);
   };
   const fmtGates = (n) => {
-    if (!n)
-      return "--";
+    if (!n) return "--";
     return n.toLocaleString();
   };
   const timingStatus = timing_met === true ? "pass" : timing_met === false ? "fail" : void 0;
@@ -129610,8 +129096,7 @@ var SummaryPanel = import_react21.default.memo(function SummaryPanel2({
   const savedScrollRef = (0, import_react21.useRef)(0);
   (0, import_react21.useLayoutEffect)(() => {
     const el = scrollRef.current;
-    if (!el)
-      return;
+    if (!el) return;
     const saved = savedScrollRef.current;
     if (saved > 0) {
       el.scrollTop = Math.min(saved, el.scrollHeight - el.clientHeight);
@@ -129655,8 +129140,7 @@ var SummaryPanel = import_react21.default.memo(function SummaryPanel2({
         }
       );
     }
-    if (hideSummaryCard)
-      return null;
+    if (hideSummaryCard) return null;
     return content ? /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(
       "div",
       {
@@ -129687,8 +129171,7 @@ var STATUS_META = {
   idle: { label: "Idle", cls: "pill-idle" }
 };
 function StatusBar({ info }) {
-  if (!info)
-    return null;
+  if (!info) return null;
   const {
     pipelineStatus,
     currentBlock,
@@ -129717,9 +129200,2208 @@ function StatusBar({ info }) {
   ] });
 }
 
-// src/webview/App.jsx
+// src/webview/components/review/RunOverview.jsx
+var import_react25 = __toESM(require_react());
+
+// src/webview/utils/api.js
+var import_react23 = __toESM(require_react());
+async function getJson(url, opts = {}) {
+  const res = await fetch(url, opts);
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`;
+    try {
+      const j = await res.json();
+      if (j && j.error) msg = j.error;
+    } catch {
+    }
+    throw new Error(msg);
+  }
+  return res.json();
+}
+function useJson(url, { enabled = true, pollMs = 0 } = {}) {
+  const [state, setState] = (0, import_react23.useState)({ data: null, error: null, loading: !!url && enabled });
+  const [tick, setTick] = (0, import_react23.useState)(0);
+  const reload = (0, import_react23.useCallback)(() => setTick((t) => t + 1), []);
+  const urlRef = (0, import_react23.useRef)(url);
+  (0, import_react23.useEffect)(() => {
+    const urlChanged = urlRef.current !== url;
+    urlRef.current = url;
+    if (!url || !enabled) {
+      setState({ data: null, error: null, loading: false });
+      return void 0;
+    }
+    let cancelled = false;
+    const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+    setState((s) => ({ data: urlChanged ? null : s.data, loading: true, error: null }));
+    getJson(url, ctrl ? { signal: ctrl.signal } : {}).then((data) => {
+      if (!cancelled) setState({ data, error: null, loading: false });
+    }).catch((err) => {
+      if (cancelled || err && err.name === "AbortError") return;
+      setState((s) => ({ data: s.data, error: err.message || String(err), loading: false }));
+    });
+    let timer2 = null;
+    if (pollMs > 0) {
+      timer2 = setInterval(() => setTick((t) => t + 1), pollMs);
+    }
+    return () => {
+      cancelled = true;
+      if (ctrl) ctrl.abort();
+      if (timer2) clearInterval(timer2);
+    };
+  }, [url, enabled, tick]);
+  return { ...state, reload };
+}
+var api = {
+  overview: () => "/api/run/overview",
+  blocks: () => "/api/run/blocks",
+  decisions: () => "/api/run/decisions",
+  settings: () => "/api/run/settings",
+  integration: () => "/api/run/integration",
+  trajectory: (block) => `/api/block/${encodeURIComponent(block)}/trajectory`,
+  review: (block) => `/api/block/${encodeURIComponent(block)}/review`,
+  files: (block) => `/api/block/${encodeURIComponent(block)}/files`,
+  call: (id2) => `/api/llm_call/${id2}`,
+  turn: (id2, idx) => `/api/llm_call/${id2}/turn/${idx}`,
+  text: (rel, { offset = 0, limit = 400, tail = false } = {}) => `/api/text?path=${encodeURIComponent(rel)}&offset=${offset}&limit=${limit}${tail ? "&tail=1" : ""}`,
+  textSearch: (rel, q) => `/api/text_search?path=${encodeURIComponent(rel)}&q=${encodeURIComponent(q)}`,
+  diff: (a, b) => `/api/diff?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}`,
+  artifact: (rel) => `/api/artifacts/${rel.split("/").map(encodeURIComponent).join("/")}`
+};
+
+// src/webview/utils/format.js
+function fmtDuration(seconds) {
+  if (seconds == null || Number.isNaN(Number(seconds))) return "--";
+  const s = Number(seconds);
+  if (s < 1e-3) return "< 1ms";
+  if (s < 1) return `${Math.round(s * 1e3)}ms`;
+  if (s < 60) return `${s.toFixed(1)}s`;
+  if (s < 3600) {
+    const m2 = Math.floor(s / 60);
+    const r = Math.round(s % 60);
+    return `${m2}m ${r}s`;
+  }
+  const h = Math.floor(s / 3600);
+  const m = Math.round(s % 3600 / 60);
+  return `${h}h ${m}m`;
+}
+function fmtNum(n, digits = 0) {
+  if (n == null || n === "" || Number.isNaN(Number(n))) return "--";
+  const v = Number(n);
+  if (Number.isInteger(v) && digits === 0) return v.toLocaleString();
+  return v.toLocaleString(void 0, { maximumFractionDigits: digits, minimumFractionDigits: 0 });
+}
+function fmtTokens(n) {
+  if (n == null || Number.isNaN(Number(n))) return "--";
+  const v = Number(n);
+  if (v >= 1e9) return `${(v / 1e9).toFixed(2)}G`;
+  if (v >= 1e6) return `${(v / 1e6).toFixed(2)}M`;
+  if (v >= 1e3) return `${(v / 1e3).toFixed(1)}k`;
+  return String(v);
+}
+function fmtBytes(n) {
+  if (n == null) return "--";
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+function pad2(n) {
+  return String(n).padStart(2, "0");
+}
+function fmtTime(ts) {
+  if (ts == null) return "--";
+  const d = new Date(Number(ts) * 1e3);
+  if (Number.isNaN(d.getTime())) return "--";
+  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+}
+function fmtDateTime(ts) {
+  if (ts == null) return "--";
+  const d = new Date(Number(ts) * 1e3);
+  if (Number.isNaN(d.getTime())) return "--";
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${fmtTime(ts)}`;
+}
+function fmtOffset(ts, startTs) {
+  if (ts == null || startTs == null) return "--";
+  return `+${fmtDuration(Number(ts) - Number(startTs))}`;
+}
+function fmtPct(n, digits = 1) {
+  if (n == null || Number.isNaN(Number(n))) return "--";
+  return `${Number(n).toFixed(digits)}%`;
+}
+function blockLabel(name) {
+  return (name || "").replace(/_/g, " ");
+}
+function statusTone(status) {
+  switch ((status || "").toLowerCase()) {
+    case "passed":
+    case "done":
+    case "ok":
+    case "approve":
+    case "approved":
+    case "pass":
+      return "ok";
+    case "failed":
+    case "error":
+    case "fail":
+    case "timeout":
+    case "abort":
+      return "fail";
+    case "running":
+    case "streaming":
+      return "running";
+    case "waiting":
+    case "incomplete":
+    case "in_progress":
+    case "revise":
+    case "skipped":
+    case "not_run":
+      return "warn";
+    default:
+      return "muted";
+  }
+}
+function extOf(name) {
+  const i = (name || "").lastIndexOf(".");
+  return i < 0 ? "" : name.slice(i).toLowerCase();
+}
+
+// src/webview/components/review/common.jsx
+var import_react24 = __toESM(require_react());
 var import_jsx_runtime17 = __toESM(require_jsx_runtime());
-var ErrorBoundary = class extends import_react23.Component {
+function Badge({ tone = "muted", children: children2, title, className = "" }) {
+  return /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("span", { className: `rv-badge rv-badge-${tone} ${className}`, title, children: children2 });
+}
+function StatusBadge({ status }) {
+  if (!status) return /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(Badge, { tone: "muted", children: "--" });
+  return /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(Badge, { tone: statusTone(status), children: String(status).replace(/_/g, " ") });
+}
+function PassFail({ value, yes = "pass", no = "fail", none: none2 = "n/a" }) {
+  if (value === true || value === 1) return /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)(Badge, { tone: "ok", children: [
+    "\u2713",
+    " ",
+    yes
+  ] });
+  if (value === false || value === 0) return /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)(Badge, { tone: "fail", children: [
+    "\u2717",
+    " ",
+    no
+  ] });
+  return /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)(Badge, { tone: "muted", children: [
+    "\u2014",
+    " ",
+    none2
+  ] });
+}
+function StatTile({ label, value, sub, tone, title, onClick }) {
+  return /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)(
+    "div",
+    {
+      className: `rv-stat ${tone ? `rv-stat-${tone}` : ""} ${onClick ? "rv-stat-clickable" : ""}`,
+      title,
+      onClick,
+      role: onClick ? "button" : void 0,
+      tabIndex: onClick ? 0 : void 0,
+      onKeyDown: onClick ? (e) => {
+        if (e.key === "Enter" || e.key === " ") onClick();
+      } : void 0,
+      children: [
+        /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { className: "rv-stat-value", children: value ?? "--" }),
+        /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { className: "rv-stat-label", children: label }),
+        sub && /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { className: "rv-stat-sub", children: sub })
+      ]
+    }
+  );
+}
+function BudgetCell({ measured, budget, unit = "", digits = 0, tolerance = 1 }) {
+  if (measured == null) return /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("span", { className: "rv-muted", children: "--" });
+  const m = Number(measured);
+  const b = budget != null ? Number(budget) : null;
+  const ratio = b ? m / b : null;
+  const tone = ratio == null ? "muted" : ratio > tolerance ? "fail" : ratio > 0.9 * tolerance ? "warn" : "ok";
+  return /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("span", { className: `rv-budget rv-budget-${tone}`, title: b != null ? `${fmtNum(m, digits)} / ${fmtNum(b, digits)} ${unit}` : void 0, children: [
+    /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("span", { className: "rv-budget-measured", children: [
+      fmtNum(m, digits),
+      unit ? ` ${unit}` : ""
+    ] }),
+    b != null && /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("span", { className: "rv-budget-of", children: [
+      " / ",
+      fmtNum(b, digits),
+      " (",
+      Math.round(ratio * 100),
+      "%)"
+    ] })
+  ] });
+}
+function KV({ rows, className = "" }) {
+  const items = (rows || []).filter((r) => r && r.length >= 2 && r[1] !== void 0 && r[1] !== null && r[1] !== "");
+  if (!items.length) return null;
+  return /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("table", { className: `rv-kv ${className}`, children: /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("tbody", { children: items.map(([k, v, opts], i) => /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("tr", { children: [
+    /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("th", { children: k }),
+    /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("td", { className: opts?.mono ? "rv-mono" : "", children: renderValue(v) })
+  ] }, `${k}-${i}`)) }) });
+}
+function renderValue(v) {
+  if (import_react24.default.isValidElement(v)) return v;
+  if (typeof v === "boolean") return /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(PassFail, { value: v, yes: "yes", no: "no" });
+  if (Array.isArray(v)) {
+    if (!v.length) return /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("span", { className: "rv-muted", children: "(none)" });
+    if (v.every((x) => typeof x !== "object")) return v.join(", ");
+    return /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("pre", { className: "rv-pre-inline", children: JSON.stringify(v, null, 2) });
+  }
+  if (v && typeof v === "object") return /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("pre", { className: "rv-pre-inline", children: JSON.stringify(v, null, 2) });
+  if (typeof v === "number") return fmtNum(v, Number.isInteger(v) ? 0 : 4);
+  return String(v);
+}
+function Table({ columns, rows, rowKey, onRowClick, selectedKey, empty: empty2 = "No rows.", className = "", dense }) {
+  if (!rows || !rows.length) return /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { className: "rv-empty", children: empty2 });
+  return /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { className: `rv-table-wrap ${className}`, children: /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("table", { className: `rv-table ${dense ? "rv-table-dense" : ""}`, children: [
+    /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("thead", { children: /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("tr", { children: columns.map((c) => /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("th", { className: c.align ? `rv-align-${c.align}` : "", title: c.title, children: c.label }, c.key)) }) }),
+    /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("tbody", { children: rows.map((r, i) => {
+      const k = rowKey ? rowKey(r, i) : i;
+      return /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(
+        "tr",
+        {
+          className: `${onRowClick ? "rv-row-clickable" : ""} ${selectedKey != null && selectedKey === k ? "rv-row-selected" : ""}`,
+          onClick: onRowClick ? () => onRowClick(r) : void 0,
+          children: columns.map((c) => /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("td", { className: c.align ? `rv-align-${c.align}` : "", children: c.render ? c.render(r) : renderValue(r[c.key]) }, c.key))
+        },
+        k
+      );
+    }) })
+  ] }) });
+}
+function Collapsible2({ title, subtitle, right, defaultOpen = false, open: controlled, onToggle, children: children2, className = "", id: id2, level = 3 }) {
+  const [openState, setOpen] = (0, import_react24.useState)(defaultOpen);
+  const open = controlled != null ? controlled : openState;
+  const toggle = () => {
+    if (onToggle) onToggle(!open);
+    if (controlled == null) setOpen(!open);
+  };
+  return /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("section", { className: `rv-collapsible ${open ? "rv-open" : ""} ${className}`, id: id2, children: [
+    /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)(
+      "div",
+      {
+        className: "rv-collapsible-header",
+        role: "button",
+        tabIndex: 0,
+        "aria-expanded": open,
+        onClick: toggle,
+        onKeyDown: (e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            toggle();
+          }
+        },
+        children: [
+          /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("span", { className: "rv-chev", children: open ? "\u25BE" : "\u25B8" }),
+          /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("span", { className: `rv-collapsible-title rv-h${level}`, children: title }),
+          subtitle && /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("span", { className: "rv-collapsible-sub", children: subtitle }),
+          right && /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("span", { className: "rv-collapsible-right", onClick: (e) => e.stopPropagation(), onKeyDown: (e) => e.stopPropagation(), children: right })
+        ]
+      }
+    ),
+    open && /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { className: "rv-collapsible-body", children: children2 })
+  ] });
+}
+function Section({ id: id2, title, subtitle, right, children: children2, className = "" }) {
+  return /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("section", { className: `rv-section ${className}`, id: id2, children: [
+    /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("div", { className: "rv-section-header", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("h3", { className: "rv-section-title", children: title }),
+      subtitle && /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("span", { className: "rv-section-sub", children: subtitle }),
+      right && /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("span", { className: "rv-section-right", children: right })
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { className: "rv-section-body", children: children2 })
+  ] });
+}
+function Empty({ children: children2, icon }) {
+  return /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("div", { className: "rv-empty", children: [
+    icon && /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("span", { className: "rv-empty-icon", children: icon }),
+    /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("span", { children: children2 })
+  ] });
+}
+function ErrorBanner({ error, prefix = "Error" }) {
+  if (!error) return null;
+  return /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("div", { className: "rv-error-banner", children: [
+    prefix,
+    ": ",
+    String(error)
+  ] });
+}
+function Spinner({ label = "Loading\u2026" }) {
+  return /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("div", { className: "rv-loading", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("span", { className: "rv-spinner" }),
+    /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("span", { children: label })
+  ] });
+}
+function CopyButton({ text, getText, label = "Copy", className = "" }) {
+  const [state, setState] = (0, import_react24.useState)("idle");
+  const onClick = async (e) => {
+    e.stopPropagation();
+    const value = getText ? getText() : text;
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(value ?? "");
+      } else {
+        const ta = document.createElement("textarea");
+        ta.value = value ?? "";
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+      }
+      setState("done");
+    } catch {
+      setState("fail");
+    }
+    setTimeout(() => setState("idle"), 1200);
+  };
+  return /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("button", { type: "button", className: `rv-btn rv-btn-small ${className}`, onClick, title: "Copy to clipboard", children: state === "done" ? "Copied" : state === "fail" ? "Copy failed" : label });
+}
+function LinkButton({ onClick, children: children2, className = "", title }) {
+  return /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("button", { type: "button", className: `rv-link ${className}`, onClick, title, children: children2 });
+}
+function buildHighlightedHtml(text, query, highlighter) {
+  const base = highlighter ? highlighter(text) : escHtml(text);
+  if (!query) return { html: base, count: 0 };
+  const q = query.toLowerCase();
+  let count = 0;
+  const parts = base.split(/(<[^>]+>)/g);
+  const out = parts.map((p) => {
+    if (p.startsWith("<")) return p;
+    const lower2 = p.toLowerCase();
+    if (!lower2.includes(q)) return p;
+    let res = "";
+    let i = 0;
+    while (true) {
+      const j = lower2.indexOf(q, i);
+      if (j < 0) {
+        res += p.slice(i);
+        break;
+      }
+      res += p.slice(i, j) + `<mark class="rv-mark" data-m="${count}">${p.slice(j, j + q.length)}</mark>`;
+      count++;
+      i = j + q.length;
+    }
+    return res;
+  });
+  return { html: out.join(""), count };
+}
+function LongText({ text, highlighter, initialChars = 8e3, mono = true, className = "", searchable = true, wrap = true }) {
+  const [expanded, setExpanded] = (0, import_react24.useState)(false);
+  const [query, setQuery] = (0, import_react24.useState)("");
+  const [current, setCurrent] = (0, import_react24.useState)(0);
+  const ref = (0, import_react24.useRef)(null);
+  const full = text || "";
+  const isLong = full.length > initialChars;
+  const shown = expanded || !isLong ? full : full.slice(0, initialChars);
+  const effective = query ? full : shown;
+  const { html, count } = (0, import_react24.useMemo)(() => buildHighlightedHtml(effective, query, highlighter), [effective, query, highlighter]);
+  (0, import_react24.useEffect)(() => {
+    setCurrent(0);
+  }, [query]);
+  (0, import_react24.useEffect)(() => {
+    if (!query || !ref.current) return;
+    const marks = ref.current.querySelectorAll("mark.rv-mark");
+    marks.forEach((m2) => m2.classList.remove("rv-mark-current"));
+    const m = marks[current];
+    if (m) {
+      m.classList.add("rv-mark-current");
+      m.scrollIntoView({ block: "center", behavior: "smooth" });
+    }
+  }, [current, html, query]);
+  if (!full) return /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("span", { className: "rv-muted", children: "(empty)" });
+  return /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("div", { className: `rv-longtext ${className}`, children: [
+    /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("div", { className: "rv-longtext-bar", children: [
+      searchable && /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("span", { className: "rv-search", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(
+          "input",
+          {
+            className: "rv-input",
+            placeholder: "Search\u2026",
+            value: query,
+            onChange: (e) => setQuery(e.target.value),
+            onKeyDown: (e) => {
+              if (e.key === "Enter" && count) setCurrent((c) => e.shiftKey ? (c - 1 + count) % count : (c + 1) % count);
+              if (e.key === "Escape") setQuery("");
+            }
+          }
+        ),
+        query && /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("span", { className: "rv-search-nav", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("span", { className: "rv-search-count", children: count ? `${current + 1}/${count}` : "0" }),
+          /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("button", { type: "button", className: "rv-btn rv-btn-small", disabled: !count, onClick: () => setCurrent((c) => (c - 1 + count) % count), children: "\u25B2" }),
+          /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("button", { type: "button", className: "rv-btn rv-btn-small", disabled: !count, onClick: () => setCurrent((c) => (c + 1) % count), children: "\u25BC" })
+        ] })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("span", { className: "rv-longtext-meta", children: [
+        fmtNum(full.length),
+        " chars"
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(CopyButton, { text: full })
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(
+      "pre",
+      {
+        ref,
+        className: `rv-longtext-body ${mono ? "rv-mono" : "rv-prose"} ${wrap ? "rv-wrap" : ""}`,
+        dangerouslySetInnerHTML: { __html: html }
+      }
+    ),
+    isLong && !query && /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("button", { type: "button", className: "rv-btn rv-btn-small rv-expand", onClick: () => setExpanded((v) => !v), children: expanded ? "Show less" : `Show all (${fmtNum(full.length)} chars)` })
+  ] });
+}
+function Tabs({ tabs, active, onChange, className = "" }) {
+  return /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { className: `rv-tabs ${className}`, role: "tablist", children: tabs.map((t) => /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)(
+    "button",
+    {
+      type: "button",
+      role: "tab",
+      "aria-selected": active === t.key,
+      className: `rv-tab ${active === t.key ? "rv-tab-active" : ""}`,
+      onClick: () => onChange(t.key),
+      title: t.title,
+      children: [
+        t.label,
+        t.count != null && /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("span", { className: "rv-tab-count", children: t.count })
+      ]
+    },
+    t.key
+  )) });
+}
+function MiniToc({ items, containerRef }) {
+  const [active, setActive] = (0, import_react24.useState)(items[0]?.id);
+  const onJump = (0, import_react24.useCallback)((id2) => {
+    const el = document.getElementById(id2);
+    if (el) el.scrollIntoView({ block: "start", behavior: "smooth" });
+    setActive(id2);
+  }, []);
+  (0, import_react24.useEffect)(() => {
+    const root3 = containerRef?.current;
+    if (!root3) return void 0;
+    const onScroll = () => {
+      let best = items[0]?.id;
+      for (const it of items) {
+        const el = document.getElementById(it.id);
+        if (!el) continue;
+        const top = el.getBoundingClientRect().top - root3.getBoundingClientRect().top;
+        if (top <= 80) best = it.id;
+      }
+      setActive(best);
+    };
+    root3.addEventListener("scroll", onScroll, { passive: true });
+    return () => root3.removeEventListener("scroll", onScroll);
+  }, [items, containerRef]);
+  return /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("nav", { className: "rv-toc", "aria-label": "Sections", children: items.map((it) => /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)(
+    "button",
+    {
+      type: "button",
+      className: `rv-toc-item ${active === it.id ? "rv-toc-active" : ""}`,
+      onClick: () => onJump(it.id),
+      children: [
+        it.label,
+        it.badge && /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("span", { className: "rv-toc-badge", children: it.badge })
+      ]
+    },
+    it.id
+  )) });
+}
+function Drawer({ title, onClose, children: children2, width = "min(900px, 70vw)" }) {
+  (0, import_react24.useEffect)(() => {
+    const onKey = (e) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { className: "rv-drawer-mask", onClick: (e) => {
+    if (e.target === e.currentTarget) onClose();
+  }, children: /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("div", { className: "rv-drawer", style: { width }, role: "dialog", "aria-label": typeof title === "string" ? title : "Details", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("div", { className: "rv-drawer-header", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { className: "rv-drawer-title", children: title }),
+      /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("button", { type: "button", className: "rv-btn rv-btn-small", onClick: onClose, title: "Close (Esc)", children: "\u2715" })
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { className: "rv-drawer-body", children: children2 })
+  ] }) });
+}
+
+// src/webview/components/review/RunOverview.jsx
+var import_jsx_runtime18 = __toESM(require_jsx_runtime());
+function WnsCell({ v }) {
+  if (v == null) return /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { className: "rv-muted", children: "--" });
+  return /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { className: v < 0 ? "rv-fail-text" : "rv-ok-text", children: fmtNum(v, 3) });
+}
+function segmentSummary(s) {
+  const ex = s.exit || {};
+  const parts = [];
+  for (const k of ["action", "decision", "success", "passed", "issues_found", "new_tier_index", "completed_so_far", "passed_so_far", "test_count", "category", "recommended_action", "blocks_passed", "blocks_total", "top_fmax_mhz", "chip_top_synthesizable", "lint_clean"]) {
+    if (ex[k] === void 0 || ex[k] === null || ex[k] === "") continue;
+    parts.push(`${k.replace(/_/g, " ")}: ${typeof ex[k] === "boolean" ? ex[k] ? "yes" : "no" : ex[k]}`);
+  }
+  return parts.join(" \xB7 ");
+}
+function RunOverview({ onOpenBlock, onOpenCall, onOpenFile }) {
+  const ov = useJson(api.overview(), { pollMs: 1e4 });
+  const dec = useJson(api.decisions());
+  const integ = useJson(api.integration());
+  const settings = useJson(api.settings());
+  const [decFilter, setDecFilter] = (0, import_react25.useState)("");
+  const o = ov.data;
+  const decisions = (0, import_react25.useMemo)(() => {
+    const list = dec.data?.decisions || [];
+    const q = decFilter.trim().toLowerCase();
+    if (!q) return list;
+    return list.filter((d) => [d.type, d.action, d.reasoning, ...d.blocks || []].filter(Boolean).join(" ").toLowerCase().includes(q));
+  }, [dec.data, decFilter]);
+  if (ov.error) return /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { className: "rv-page", children: /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(ErrorBanner, { error: ov.error }) });
+  if (!o) return /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { className: "rv-page", children: /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(Spinner, { label: "Loading run overview\u2026" }) });
+  const t = o.totals;
+  const u = t.usage || {};
+  const passed = t.status_counts?.passed || 0;
+  const signoff = o.signoff;
+  const st = settings.data;
+  const ig = integ.data;
+  const blockCols = [
+    { key: "name", label: "Block", render: (b) => /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { className: "rv-block-link", children: blockLabel(b.name) }) },
+    { key: "tier", label: "Tier", align: "right" },
+    { key: "subsystem", label: "Subsystem" },
+    { key: "status", label: "Status", render: (b) => /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(StatusBadge, { status: b.status }) },
+    { key: "rounds", label: "Rounds", align: "right", title: "Init Block re-entries (integration-review revisions)" },
+    { key: "rtl_attempts", label: "RTL att.", align: "right", title: "max Generate RTL attempt within a round" },
+    { key: "llm_calls", label: "LLM calls", align: "right", render: (b) => `${b.llm_calls} (${fmtDuration(b.llm_time_s)})` },
+    { key: "dv", label: "DV", render: (b) => b.dv?.tests_total != null ? /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("span", { className: b.dv.passed ? "rv-ok-text" : "rv-fail-text", children: [
+      b.dv.tests_passed,
+      "/",
+      b.dv.tests_total
+    ] }) : /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(PassFail, { value: b.dv?.passed, none: "--" }) },
+    { key: "coverage_pct", label: "Cov", align: "right", render: (b) => b.coverage_pct != null ? /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { className: b.coverage_passed === false ? "rv-fail-text" : "", children: fmtPct(b.coverage_pct) }) : "--" },
+    { key: "throughput", label: "Thr", render: (b) => b.throughput?.applicable ? /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(PassFail, { value: b.throughput.passed, yes: `${fmtNum(b.throughput.measured, 0)} cyc`, no: `${fmtNum(b.throughput.measured, 0)} cyc` }) : /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { className: "rv-muted", children: "n/a" }) },
+    { key: "cells", label: "Cells", align: "right", render: (b) => /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(BudgetCell, { measured: b.cells, budget: b.budgets?.estimated_gates }) },
+    { key: "ff", label: "FF", align: "right", render: (b) => /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(BudgetCell, { measured: b.ff, budget: b.budgets?.flip_flop_budget }) },
+    { key: "area_um2", label: "Area \xB5m\xB2", align: "right", render: (b) => /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(BudgetCell, { measured: b.area_um2, budget: b.budgets?.area_budget_um2 }) },
+    { key: "wns_ns", label: "WNS ns", align: "right", render: (b) => /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(WnsCell, { v: b.wns_ns }) },
+    { key: "ppa_ok", label: "PPA", render: (b) => /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(PassFail, { value: b.ppa_ok == null ? null : !!b.ppa_ok, none: "--" }) },
+    { key: "gate_sim", label: "Gate sim", render: (b) => b.gate_sim ? /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(Badge, { tone: b.gate_sim === "passed" ? "ok" : b.gate_sim === "failed" ? "fail" : "muted", children: b.gate_sim.replace(/_/g, " ") }) : "--" },
+    { key: "conformance_ok", label: "Contract", render: (b) => /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(PassFail, { value: b.conformance_ok, none: "--" }) },
+    { key: "mem_price_ok", label: "Mem", render: (b) => /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(PassFail, { value: b.mem_price_ok, none: "--" }) },
+    { key: "open", label: "", render: (b) => /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(LinkButton, { onClick: (e) => {
+      e.stopPropagation();
+      onOpenBlock(b.name, "trajectory");
+    }, children: "trajectory" }) }
+  ];
+  return /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("div", { className: "rv-page", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("div", { className: "rv-run-head", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("div", { className: "rv-run-title", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("h2", { children: [
+          o.design_name || "Run",
+          " ",
+          /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { className: "rv-muted", children: "review" })
+        ] }),
+        o.is_live ? /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(Badge, { tone: "running", children: "LIVE" }) : /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(Badge, { tone: "muted", children: "historical" }),
+        signoff?.status && /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)(Badge, { tone: signoff.status === "PASS" ? "ok" : "fail", children: [
+          "signoff ",
+          signoff.status
+        ] })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("div", { className: "rv-run-meta", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("span", { children: [
+          "engine ",
+          /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("code", { children: o.engine_sha || "?" })
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("span", { children: [
+          o.model || "?",
+          " via ",
+          o.provider || "?"
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("span", { children: [
+          "started ",
+          fmtDateTime(o.pipeline_start)
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("span", { children: [
+          "last event ",
+          fmtDateTime(o.pipeline_end)
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("span", { children: [
+          "wall time ",
+          /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("b", { children: fmtDuration(o.wall_time_s) })
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { className: "rv-mono rv-muted", title: "run directory", children: o.project_root })
+      ] })
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("div", { className: "rv-tiles", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(StatTile, { label: "Blocks passed", value: `${passed}/${t.blocks}`, tone: passed === t.blocks && t.blocks ? "ok" : "warn", sub: Object.entries(t.status_counts || {}).map(([k, v]) => `${v} ${k.replace(/_/g, " ")}`).join(" \xB7 ") }),
+      /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(StatTile, { label: "LLM calls", value: fmtNum(t.llm_calls), sub: `${fmtDuration(t.llm_time_s)} summed \xB7 ${t.timeouts} timeouts \xB7 ${t.errors} errors`, tone: t.timeouts || t.errors ? "warn" : void 0 }),
+      /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(StatTile, { label: "Input tokens", value: fmtTokens(u.input_tokens), sub: `${fmtTokens(u.cached_input_tokens)} cached` }),
+      /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(StatTile, { label: "Output tokens", value: fmtTokens(u.output_tokens), sub: `${fmtTokens(u.reasoning_output_tokens)} reasoning` }),
+      /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(StatTile, { label: "Agent commands", value: fmtNum(t.codex_commands), sub: `${fmtNum(t.codex_file_changes)} file writes \xB7 ${t.codex_sessions} sessions` }),
+      /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(StatTile, { label: "Rounds", value: fmtNum(t.rounds), sub: "block loop re-entries" }),
+      /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(StatTile, { label: "Chip-lead decisions", value: fmtNum(t.decisions), sub: `${t.interrupts} interrupts` }),
+      /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(StatTile, { label: "Events", value: fmtNum(t.events), sub: "pipeline_events.jsonl" })
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)(Section, { id: "ov-blocks", title: "Blocks", subtitle: "click a row for the design review; 'trajectory' for what the LLM did", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(
+        Table,
+        {
+          columns: blockCols,
+          rows: o.blocks,
+          rowKey: (b) => b.name,
+          onRowClick: (b) => onOpenBlock(b.name, "design"),
+          empty: "No blocks recorded."
+        }
+      ),
+      /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { className: "rv-tier-strip", children: o.tiers.map((tier) => /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("div", { className: "rv-tier", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("div", { className: "rv-tier-head", children: [
+          "Tier ",
+          tier.tier
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { className: "rv-tier-blocks", children: tier.blocks.map((b) => {
+          const row = o.blocks.find((x) => x.name === b);
+          return /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("button", { type: "button", className: `rv-tier-block rv-tier-block-${row?.status || "unknown"}`, onClick: () => onOpenBlock(b, "design"), title: row?.status, children: blockLabel(b) }, b);
+        }) })
+      ] }, tier.tier)) })
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)(Section, { id: "ov-integration", title: "Integration & validation", subtitle: "tier-level nodes, chip_top integration, validation DV, final signoff", children: [
+      integ.error && /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(ErrorBanner, { error: integ.error }),
+      !ig && !integ.error && /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(Spinner, {}),
+      ig && /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)(import_jsx_runtime18.Fragment, { children: [
+        signoff && /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("div", { className: "rv-tiles", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(StatTile, { label: "Signoff", value: signoff.status, tone: signoff.status === "PASS" ? "ok" : "fail", sub: signoff.status_reason || "" }),
+          /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(StatTile, { label: "Blocks", value: `${signoff.blocks_passed}/${signoff.blocks_total}` }),
+          /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(StatTile, { label: "Integration DV", value: signoff.integration_dv || "--", tone: signoff.integration_dv === "pass" ? "ok" : signoff.integration_dv ? "fail" : void 0 }),
+          /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(StatTile, { label: "Validation DV", value: signoff.validation_dv || "--", tone: signoff.validation_dv === "pass" ? "ok" : signoff.validation_dv ? "fail" : void 0 }),
+          /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(StatTile, { label: "Coverage", value: fmtPct(signoff.coverage_aggregate_pct), sub: `min ${fmtPct(signoff.coverage_min_pct)} \xB7 floor ${signoff.coverage_floor}%` }),
+          /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(StatTile, { label: "Top WNS / Fmax", value: signoff.top_wns_ns != null ? `${fmtNum(signoff.top_wns_ns, 3)} ns` : "n/a", sub: signoff.top_fmax_mhz != null ? `${signoff.top_fmax_mhz} MHz` : "not measured" }),
+          /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(StatTile, { label: "chip_top synthesizable", value: signoff.chip_top_synthesizable == null ? "--" : signoff.chip_top_synthesizable ? "yes" : "no", tone: signoff.chip_top_synthesizable ? "ok" : void 0 })
+        ] }),
+        ig.integration_result && /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(KV, { rows: [
+          ["Top module", ig.integration_result.top_module],
+          ["Blocks integrated", ig.integration_result.block_count],
+          ["Lint clean", ig.integration_result.lint_clean],
+          ["Errors / warnings", `${ig.integration_result.error_count} / ${ig.integration_result.warning_count}`],
+          ["Mismatches", ig.integration_result.mismatches?.length ? ig.integration_result.mismatches : "none"],
+          ["Top RTL", ig.integration_result.top_rtl_rel_path ? /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(LinkButton, { onClick: () => onOpenFile(ig.integration_result.top_rtl_rel_path, { lang: "verilog" }), children: ig.integration_result.top_rtl_rel_path }) : null],
+          ["Lint log", ig.integration_result.lint_log_rel_path ? /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(LinkButton, { onClick: () => onOpenFile(ig.integration_result.lint_log_rel_path, { lang: "log" }), children: "open" }) : null]
+        ] }),
+        ig.chip_throughput && /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(KV, { rows: [
+          ["Chip throughput gate", ig.chip_throughput.applicable ? /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(PassFail, { value: ig.chip_throughput.passed }) : `not applicable \u2014 ${ig.chip_throughput.reason || ""}`],
+          ["Measured cyc/op", ig.chip_throughput.measured_cyc_per_op_chip],
+          ["Budget cyc/op", ig.chip_throughput.budget_cyc_per_op]
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("h4", { children: "Tier-level nodes" }),
+        /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(Table, { dense: true, columns: [
+          { key: "enter_ts", label: "Time", render: (s) => `${fmtTime(s.enter_ts)} (${fmtOffset(s.enter_ts, o.pipeline_start)})` },
+          { key: "node", label: "Node" },
+          { key: "tier", label: "Tier" },
+          { key: "status", label: "Status", render: (s) => /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(StatusBadge, { status: s.status }) },
+          { key: "duration_s", label: "Duration", render: (s) => fmtDuration(s.duration_s) },
+          { key: "summary", label: "Outcome", render: (s) => /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { className: "rv-clip", title: JSON.stringify(s.exit), children: segmentSummary(s) }) },
+          { key: "calls", label: "LLM", render: (s) => (s.calls || []).map((c) => /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)(LinkButton, { onClick: () => onOpenCall(c.call_id), title: c.run_name, children: [
+            "call #",
+            c.call_id
+          ] }, c.call_id)) }
+        ], rows: ig.segments, rowKey: (s) => s.seg_id, empty: "No tier-level nodes recorded." }),
+        ig.logs?.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("p", { className: "rv-muted", children: [
+          "Integration logs: ",
+          ig.logs.map((l) => /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)(LinkButton, { onClick: () => onOpenFile(l.rel_path, { lang: "log", tail: true }), children: [
+            l.name,
+            " (",
+            fmtBytes(l.size),
+            ")"
+          ] }, l.rel_path))
+        ] }),
+        ig.carried_forward_defects?.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(Collapsible2, { title: "Carried-forward defects", subtitle: `${ig.carried_forward_defects.length}`, defaultOpen: false, children: /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(Table, { dense: true, columns: [
+          { key: "gate", label: "Gate" },
+          { key: "kind", label: "Kind" },
+          { key: "first_divergence_block", label: "Block", render: (d) => d.first_divergence_block ? /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(LinkButton, { onClick: () => onOpenBlock(d.first_divergence_block, "design"), children: blockLabel(d.first_divergence_block) }) : "" },
+          { key: "advisory", label: "Advisory", render: (d) => d.advisory ? "yes" : "no" },
+          { key: "detail", label: "Detail", render: (d) => /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { className: "rv-clip", title: d.detail, children: d.detail || d.unmodeled }) }
+        ], rows: ig.carried_forward_defects, rowKey: (d, i) => i }) }),
+        ig.final_report?.md_rel_path && /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("p", { children: /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(LinkButton, { onClick: () => onOpenFile(ig.final_report.md_rel_path, { lang: "markdown" }), children: "open final_report.md" }) })
+      ] })
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)(Section, { id: "ov-decisions", title: "Chip-lead decisions", subtitle: `${dec.data?.decisions?.length ?? 0} decisions (in-graph chip lead)`, right: /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("input", { className: "rv-input", placeholder: "Filter decisions\u2026", value: decFilter, onChange: (e) => setDecFilter(e.target.value) }), children: [
+      dec.error && /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(ErrorBanner, { error: dec.error }),
+      dec.data && decisions.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(Empty, { children: "No chip-lead decisions recorded." }),
+      decisions.map((d) => /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("div", { className: "rv-decision", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("div", { className: "rv-decision-head", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("span", { className: "rv-decision-idx", children: [
+            "#",
+            d.decision_index
+          ] }),
+          /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(Badge, { tone: /approve|override|fix|retry/.test(d.action || "") ? "ok" : "warn", children: d.action }),
+          /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(Badge, { tone: "muted", children: d.type }),
+          /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { className: "rv-muted", children: d.ts ? `${fmtDateTime(d.ts)} (${fmtOffset(d.ts, o.pipeline_start)})` : "no timestamp" }),
+          d.blocks?.map((b) => /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(LinkButton, { onClick: () => onOpenBlock(b, "design"), children: blockLabel(b) }, b)),
+          d.call_id && /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)(LinkButton, { onClick: () => onOpenCall(d.call_id), title: "Open the chip-lead LLM call", children: [
+            "call #",
+            d.call_id,
+            d.duration_s ? ` \xB7 ${fmtDuration(d.duration_s)}` : ""
+          ] })
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(LongText, { text: d.reasoning || "", initialChars: 500, mono: false, searchable: false })
+      ] }, d.decision_index))
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(Section, { id: "ov-interrupts", title: "Interrupt history", subtitle: `${dec.data?.interrupts?.length ?? 0} human-in-the-loop / escalation points`, children: /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(Table, { dense: true, columns: [
+      { key: "ts", label: "Time", render: (r) => `${fmtDateTime(r.ts)} (${fmtOffset(r.ts, o.pipeline_start)})` },
+      { key: "node", label: "Node / event", render: (r) => r.node || r.event },
+      { key: "block", label: "Block", render: (r) => r.block ? /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(LinkButton, { onClick: () => onOpenBlock(r.block, "trajectory"), children: blockLabel(r.block) }) : /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { className: "rv-muted", children: "run" }) },
+      { key: "round", label: "Round", align: "right" },
+      { key: "action", label: "Resolution", render: (r) => r.action || r.detail?.reason || r.detail?.action || "" },
+      { key: "status", label: "Status", render: (r) => /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(StatusBadge, { status: r.status }) },
+      { key: "waited", label: "Waited", render: (r) => r.end_ts ? fmtDuration(r.end_ts - r.ts) : "" }
+    ], rows: dec.data?.interrupts || [], rowKey: (r, i) => i, empty: "No interrupts recorded." }) }),
+    /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)(Section, { id: "ov-engine", title: "Engine & settings", children: [
+      settings.error && /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(ErrorBanner, { error: settings.error }),
+      st && /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)(import_jsx_runtime18.Fragment, { children: [
+        /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(KV, { rows: [
+          ["Engine SHA", st.engine_sha, { mono: true }],
+          ["Engine SHA first seen", st.engine_sha_first_seen ? fmtDateTime(Number(st.engine_sha_first_seen)) : null],
+          ["Engine changed mid-run", st.engine_sha_changed],
+          ["Project state", st.has_sqlite ? "project.sqlite (canonical) + JSON views" : "JSON files only (pre-sqlite engine)"],
+          ["Recorded under", st.original_roots?.join(", ") || null, { mono: true }],
+          ["Daemon", st.daemon?.pid ? `pid ${st.daemon.pid} on port ${st.daemon.port}, started ${fmtDateTime(st.daemon.started_at)}` : null],
+          ["Target clock", st.target_clock_mhz ? `${st.target_clock_mhz} MHz` : null]
+        ] }),
+        Object.keys(st.settings || {}).length > 0 && /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(Collapsible2, { title: "settings table", defaultOpen: false, children: /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(KV, { rows: Object.entries(st.settings).map(([k, v]) => [k, v, { mono: true }]) }) }),
+        st.env?.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(Collapsible2, { title: "Run environment (.coresmith/env)", subtitle: `${st.env.length} variables \xB7 secrets redacted`, defaultOpen: false, children: /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(KV, { rows: st.env.map((e) => [e.key, e.value, { mono: true }]) }) })
+      ] })
+    ] })
+  ] });
+}
+
+// src/webview/components/review/BlocksView.jsx
+var import_react31 = __toESM(require_react());
+
+// src/webview/components/review/BlockTrajectory.jsx
+var import_react28 = __toESM(require_react());
+
+// src/webview/components/review/LLMCallViewer.jsx
+var import_react26 = __toESM(require_react());
+var import_jsx_runtime19 = __toESM(require_jsx_runtime());
+var KIND_META = {
+  agent_message: { label: "Message", icon: "\u{1F4AC}" },
+  reasoning: { label: "Reasoning", icon: "\u{1F9E0}" },
+  command_execution: { label: "Command", icon: "$" },
+  file_change: { label: "File change", icon: "\u270E" },
+  todo_list: { label: "Plan", icon: "\u2611" },
+  web_search: { label: "Web search", icon: "\u{1F50D}" },
+  error: { label: "Error", icon: "\u2717" }
+};
+function shortCommand(cmd) {
+  if (!cmd) return "";
+  const m = cmd.match(/^\/bin\/(?:ba)?sh\s+-lc\s+(['"])([\s\S]*)\1$/);
+  return m ? m[2] : cmd;
+}
+function TurnCard({ turn, callId, index, onOpenFile, defaultOpen }) {
+  const meta = KIND_META[turn.kind] || { label: turn.kind, icon: "\xB7" };
+  const [output, setOutput] = (0, import_react26.useState)(turn.output);
+  const [truncated, setTruncated] = (0, import_react26.useState)(!!turn.truncated);
+  const [loadingFull, setLoadingFull] = (0, import_react26.useState)(false);
+  const failed = turn.kind === "command_execution" && turn.exit_code != null && turn.exit_code !== 0;
+  const [open, setOpen] = (0, import_react26.useState)(defaultOpen ?? (failed || turn.kind === "command_execution" && (turn.output_len || 0) <= 1500));
+  const loadFull = (0, import_react26.useCallback)(() => {
+    setLoadingFull(true);
+    getJson(api.turn(callId, turn.index)).then((full) => {
+      setOutput(full.output);
+      setTruncated(false);
+    }).catch(() => {
+    }).finally(() => setLoadingFull(false));
+  }, [callId, turn.index]);
+  return /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)("div", { className: `rv-turn rv-turn-${turn.kind} ${failed ? "rv-turn-failed" : ""} ${turn.state !== "completed" ? "rv-turn-inprogress" : ""}`, id: `turn-${index}`, children: [
+    /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)("div", { className: "rv-turn-head", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("span", { className: "rv-turn-idx", children: index + 1 }),
+      /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("span", { className: "rv-turn-icon", "aria-hidden": "true", children: meta.icon }),
+      /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("span", { className: "rv-turn-kind", children: meta.label }),
+      turn.kind === "command_execution" && /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)(import_jsx_runtime19.Fragment, { children: [
+        /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("code", { className: "rv-turn-cmd", title: turn.command, children: shortCommand(turn.command) }),
+        /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)("span", { className: "rv-turn-right", children: [
+          turn.exit_code != null && /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)(Badge, { tone: turn.exit_code === 0 ? "ok" : "fail", children: [
+            "rc=",
+            turn.exit_code
+          ] }),
+          turn.state !== "completed" && /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(Badge, { tone: "running", children: "in progress" }),
+          /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)("span", { className: "rv-muted", children: [
+            fmtNum(turn.output_len || 0),
+            " chars"
+          ] }),
+          /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("button", { type: "button", className: "rv-btn rv-btn-small", onClick: () => setOpen((v) => !v), children: open ? "Hide output" : "Show output" }),
+          /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(CopyButton, { text: shortCommand(turn.command), label: "Copy cmd" })
+        ] })
+      ] }),
+      turn.kind === "file_change" && /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("span", { className: "rv-turn-files", children: (turn.changes || []).map((c, i) => /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)("span", { className: "rv-file-chip", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(Badge, { tone: c.kind === "delete" ? "fail" : c.kind === "add" ? "ok" : "info", children: c.kind }),
+        c.exists && onOpenFile ? /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(LinkButton, { onClick: () => onOpenFile(c.rel_path), title: "Open the file as it exists in the run directory now", children: c.rel_path }) : /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("span", { className: "rv-muted", title: "This path is no longer present in the run directory (codex workspace was cleaned up)", children: c.path })
+      ] }, i)) }),
+      turn.kind === "web_search" && /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("span", { className: "rv-turn-text", children: turn.query }),
+      turn.kind === "error" && /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("span", { className: "rv-turn-text rv-fail-text", children: turn.message })
+    ] }),
+    turn.kind === "agent_message" && /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("div", { className: "rv-turn-body rv-prose", dangerouslySetInnerHTML: { __html: highlightMarkdown(turn.text || "") } }),
+    turn.kind === "reasoning" && /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("div", { className: "rv-turn-body rv-prose rv-reasoning", children: turn.text }),
+    turn.kind === "todo_list" && /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("ul", { className: "rv-todo", children: (turn.items || []).map((it, i) => /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)("li", { className: it.completed ? "rv-todo-done" : "", children: [
+      it.completed ? "\u2611" : "\u2610",
+      " ",
+      it.text
+    ] }, i)) }),
+    turn.kind === "command_execution" && open && /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)("div", { className: "rv-turn-output", children: [
+      output ? /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("pre", { className: "rv-mono rv-wrap", children: output }) : /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("span", { className: "rv-muted", children: "(no output)" }),
+      truncated && /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("button", { type: "button", className: "rv-btn rv-btn-small", onClick: loadFull, disabled: loadingFull, children: loadingFull ? "Loading\u2026" : `Load full output (${fmtNum(turn.output_len)} chars)` })
+    ] })
+  ] });
+}
+function LLMCallViewer({ callId, onOpenFile, onOpenBlock, embedded }) {
+  const { data, error, loading } = useJson(callId ? api.call(callId) : null);
+  const [filter2, setFilter] = (0, import_react26.useState)("all");
+  const [q, setQ] = (0, import_react26.useState)("");
+  const turns = (0, import_react26.useMemo)(() => {
+    if (!data) return [];
+    const ql = q.trim().toLowerCase();
+    return data.turns.filter((t) => {
+      if (filter2 === "command" && t.kind !== "command_execution") return false;
+      if (filter2 === "file" && t.kind !== "file_change") return false;
+      if (filter2 === "message" && t.kind !== "agent_message" && t.kind !== "reasoning") return false;
+      if (filter2 === "failed" && !(t.kind === "command_execution" && t.exit_code != null && t.exit_code !== 0)) return false;
+      if (ql) {
+        const hay = [t.command, t.output, t.text, t.query, (t.changes || []).map((c) => c.path).join(" ")].filter(Boolean).join("\n").toLowerCase();
+        if (!hay.includes(ql)) return false;
+      }
+      return true;
+    });
+  }, [data, filter2, q]);
+  if (!callId) return /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(Empty, { icon: "\u2726", children: "Select an LLM call to inspect it." });
+  if (loading && !data) return /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(Spinner, { label: "Loading LLM call\u2026" });
+  if (error) return /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(ErrorBanner, { error });
+  if (!data) return null;
+  const u = data.usage || {};
+  const failedCmds = data.turns.filter((t) => t.kind === "command_execution" && t.exit_code != null && t.exit_code !== 0).length;
+  const counts = {
+    all: data.turns.length,
+    message: data.turns.filter((t) => t.kind === "agent_message" || t.kind === "reasoning").length,
+    command: data.turns.filter((t) => t.kind === "command_execution").length,
+    file: data.turns.filter((t) => t.kind === "file_change").length,
+    failed: failedCmds
+  };
+  return /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)("div", { className: `rv-call ${embedded ? "rv-call-embedded" : ""}`, children: [
+    /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)("div", { className: "rv-call-head", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)("div", { className: "rv-call-title", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("span", { className: "rv-call-name", children: data.run_name || `LLM call #${data.call_id}` }),
+        /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(StatusBadge, { status: data.status }),
+        data.timed_out && /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)(Badge, { tone: "fail", children: [
+          "timed out after ",
+          fmtDuration(data.timeout_s)
+        ] })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)("div", { className: "rv-call-meta", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)(Badge, { tone: "info", title: "call id (line in llm_calls.jsonl)", children: [
+          "#",
+          data.call_id
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)("span", { className: "rv-meta-item", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("b", { children: data.model }),
+          " \xB7 ",
+          data.provider
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("span", { className: "rv-meta-item", children: fmtDuration(data.duration_s) }),
+        /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)("span", { className: "rv-meta-item", title: `started ${fmtDateTime(data.start_ts)}`, children: [
+          "started ",
+          fmtDateTime(data.start_ts)
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)("span", { className: "rv-meta-item", title: "input tokens (cached) / output tokens (reasoning)", children: [
+          "in ",
+          fmtTokens(u.input_tokens),
+          u.cached_input_tokens != null ? ` (${fmtTokens(u.cached_input_tokens)} cached)` : "",
+          " \xB7 ",
+          "out ",
+          fmtTokens(u.output_tokens),
+          u.reasoning_output_tokens != null ? ` (${fmtTokens(u.reasoning_output_tokens)} reasoning)` : ""
+        ] })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)("div", { className: "rv-call-context", children: [
+        data.block && /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)(LinkButton, { onClick: onOpenBlock ? () => onOpenBlock(data.block, "trajectory") : void 0, title: "Open this block's trajectory", children: [
+          "block: ",
+          /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("b", { children: blockLabel(data.block) })
+        ] }),
+        data.node && /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)("span", { className: "rv-meta-item", children: [
+          "node: ",
+          /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("b", { children: data.node })
+        ] }),
+        data.round != null && /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)("span", { className: "rv-meta-item", children: [
+          "round ",
+          data.round
+        ] }),
+        data.attempt != null && /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)("span", { className: "rv-meta-item", children: [
+          "attempt ",
+          data.attempt
+        ] }),
+        data.segment && /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)("span", { className: "rv-meta-item", children: [
+          "node outcome: ",
+          /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(StatusBadge, { status: data.segment.status })
+        ] })
+      ] }),
+      data.error && /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(ErrorBanner, { error: data.error, prefix: "LLM error" }),
+      data.timed_out && !data.error && /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)("div", { className: "rv-error-banner", children: [
+        "The call exceeded its ",
+        fmtDuration(data.timeout_s),
+        " timeout; the response below is whatever the engine captured."
+      ] })
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(Collapsible2, { title: "System prompt", subtitle: `${fmtNum(data.system_prompt.length)} chars`, defaultOpen: false, children: /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(LongText, { text: data.system_prompt, highlighter: highlightMarkdown, initialChars: 6e3 }) }),
+    /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(Collapsible2, { title: "User prompt", subtitle: `${fmtNum(data.user_prompt.length)} chars`, defaultOpen: true, children: /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(LongText, { text: data.user_prompt, highlighter: highlightMarkdown, initialChars: 6e3 }) }),
+    /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)(
+      Collapsible2,
+      {
+        title: "Agent transcript",
+        subtitle: data.session ? `${counts.all} items \xB7 ${counts.command} commands${failedCmds ? ` (${failedCmds} failed)` : ""} \xB7 ${counts.file} file changes \xB7 ${counts.message} messages` : "no codex transcript recorded for this call",
+        defaultOpen: true,
+        right: data.session && /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)("span", { className: "rv-filter-bar", children: [
+          ["all", "message", "command", "failed", "file"].map((k) => /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)("button", { type: "button", className: `rv-chip ${filter2 === k ? "rv-chip-active" : ""}`, onClick: () => setFilter(k), children: [
+            k,
+            " ",
+            /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("span", { className: "rv-chip-count", children: counts[k] })
+          ] }, k)),
+          /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("input", { className: "rv-input", placeholder: "Filter transcript\u2026", value: q, onChange: (e) => setQ(e.target.value) })
+        ] }),
+        children: [
+          !data.session && /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(Empty, { children: "This run did not persist a Codex turn stream for this call (older engine, or a non-codex provider), so only the prompt and final response are available." }),
+          data.session && turns.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(Empty, { children: "No transcript items match the current filter." }),
+          turns.map((t) => /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(TurnCard, { turn: t, callId: data.call_id, index: t.index, onOpenFile }, t.id || t.index))
+        ]
+      }
+    ),
+    /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(Collapsible2, { title: "Response", subtitle: `${fmtNum(data.response.length)} chars`, defaultOpen: true, children: data.response ? /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(LongText, { text: data.response, highlighter: highlightMarkdown, initialChars: 12e3 }) : /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(Empty, { children: "No response text recorded." }) }),
+    /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(Collapsible2, { title: "Usage & session", defaultOpen: false, children: /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(KV, { rows: [
+      ["Model", data.model],
+      ["Provider", data.provider],
+      ["Graph", data.graph],
+      ["Duration", fmtDuration(data.duration_s)],
+      ["Timeout", data.timeout_s != null ? fmtDuration(data.timeout_s) : null],
+      ["Input tokens", u.input_tokens],
+      ["Cached input tokens", u.cached_input_tokens],
+      ["Output tokens", u.output_tokens],
+      ["Reasoning tokens", u.reasoning_output_tokens],
+      ["Session id", data.session_id, { mono: true }],
+      ["Codex pid", data.session?.pid],
+      ["Codex turns", data.session?.turn_count],
+      ["System prompt", `${fmtNum(data.system_prompt_len)} chars`],
+      ["User prompt", `${fmtNum(data.user_prompt_len)} chars`],
+      ["Response", `${fmtNum(data.response_len)} chars`],
+      ["Files touched", data.files_changed]
+    ] }) })
+  ] });
+}
+
+// src/webview/components/review/CodeView.jsx
+var import_react27 = __toESM(require_react());
+var import_jsx_runtime20 = __toESM(require_jsx_runtime());
+var PAGE = 400;
+function CodeView({ relPath, lang, tail = false, pageSize = PAGE, title, maxHeight, highlightLine, onLoaded }) {
+  const [state, setState] = (0, import_react27.useState)({ data: null, error: null, loading: true });
+  const [window_, setWindow] = (0, import_react27.useState)({ offset: 0, tail });
+  const [query, setQuery] = (0, import_react27.useState)("");
+  const [hits, setHits] = (0, import_react27.useState)(null);
+  const [hitLine, setHitLine] = (0, import_react27.useState)(highlightLine ?? null);
+  const bodyRef = (0, import_react27.useRef)(null);
+  const ext = extOf(relPath || "");
+  const language = lang || ext;
+  (0, import_react27.useEffect)(() => {
+    setWindow({ offset: 0, tail });
+    setQuery("");
+    setHits(null);
+    setHitLine(highlightLine ?? null);
+  }, [relPath, tail, highlightLine]);
+  (0, import_react27.useEffect)(() => {
+    if (!relPath) return void 0;
+    let cancelled = false;
+    setState((s) => ({ ...s, loading: true, error: null }));
+    getJson(api.text(relPath, { offset: window_.offset, limit: pageSize, tail: window_.tail })).then((data2) => {
+      if (cancelled) return;
+      setState({ data: data2, error: null, loading: false });
+      if (onLoaded) onLoaded(data2);
+    }).catch((err) => {
+      if (!cancelled) setState({ data: null, error: err.message, loading: false });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [relPath, window_.offset, window_.tail, pageSize]);
+  const data = state.data;
+  const html = (0, import_react27.useMemo)(() => {
+    if (!data) return "";
+    return highlightFor(language, data.lines.join("\n"));
+  }, [data, language]);
+  const htmlLines = (0, import_react27.useMemo)(() => html ? html.split("\n") : [], [html]);
+  (0, import_react27.useEffect)(() => {
+    if (hitLine == null || !bodyRef.current || !data) return;
+    const el = bodyRef.current.querySelector(`[data-line="${hitLine}"]`);
+    if (el) el.scrollIntoView({ block: "center" });
+  }, [hitLine, data]);
+  const runSearch = (0, import_react27.useCallback)(() => {
+    if (!query || !relPath) {
+      setHits(null);
+      return;
+    }
+    getJson(api.textSearch(relPath, query)).then((res) => setHits(res)).catch((err) => setHits({ error: err.message, hits: [] }));
+  }, [query, relPath]);
+  const gotoLine = (line) => {
+    const offset2 = Math.max(0, line - Math.floor(pageSize / 2));
+    setWindow({ offset: offset2, tail: false });
+    setHitLine(line);
+  };
+  if (!relPath) return null;
+  const total = data?.total_lines ?? 0;
+  const offset = data?.offset ?? 0;
+  const end = offset + (data?.count ?? 0);
+  const canPrev = offset > 0;
+  const canNext = data ? !data.eof : false;
+  return /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { className: "rv-code", style: maxHeight ? { maxHeight } : void 0, children: [
+    /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { className: "rv-code-bar", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "rv-code-title", title: relPath, children: title || relPath }),
+      data && /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("span", { className: "rv-code-meta", children: [
+        fmtBytes(data.size),
+        " \xB7 ",
+        fmtNum(total),
+        " lines \xB7 showing ",
+        fmtNum(offset + 1),
+        "\u2013",
+        fmtNum(end)
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("span", { className: "rv-code-actions", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime20.jsx)(
+          "input",
+          {
+            className: "rv-input",
+            placeholder: "Search file\u2026",
+            value: query,
+            onChange: (e) => setQuery(e.target.value),
+            onKeyDown: (e) => {
+              if (e.key === "Enter") runSearch();
+              if (e.key === "Escape") {
+                setQuery("");
+                setHits(null);
+              }
+            }
+          }
+        ),
+        /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("button", { type: "button", className: "rv-btn rv-btn-small", onClick: runSearch, disabled: !query, children: "Find" }),
+        /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("button", { type: "button", className: "rv-btn rv-btn-small", disabled: !canPrev, onClick: () => setWindow({ offset: Math.max(0, offset - pageSize), tail: false }), title: "Previous page", children: "\u25C0" }),
+        /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("button", { type: "button", className: "rv-btn rv-btn-small", disabled: !canNext, onClick: () => setWindow({ offset: end, tail: false }), title: "Next page", children: "\u25B6" }),
+        /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("button", { type: "button", className: "rv-btn rv-btn-small", onClick: () => setWindow({ offset: 0, tail: false }), title: "Jump to start", children: "Head" }),
+        /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("button", { type: "button", className: "rv-btn rv-btn-small", onClick: () => setWindow({ offset: 0, tail: true }), title: "Jump to end", children: "Tail" }),
+        /* @__PURE__ */ (0, import_jsx_runtime20.jsx)(CopyButton, { getText: () => data ? data.lines.join("\n") : "", label: "Copy page" }),
+        /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("a", { className: "rv-btn rv-btn-small", href: api.artifact(relPath), target: "_blank", rel: "noreferrer", children: "Raw" })
+      ] })
+    ] }),
+    hits && /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { className: "rv-code-hits", children: [
+      hits.error && /* @__PURE__ */ (0, import_jsx_runtime20.jsx)(ErrorBanner, { error: hits.error }),
+      !hits.error && /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)(import_jsx_runtime20.Fragment, { children: [
+        /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("span", { className: "rv-code-hits-count", children: [
+          hits.hits.length,
+          hits.truncated ? "+" : "",
+          " match",
+          hits.hits.length === 1 ? "" : "es",
+          " for \u201C",
+          hits.query,
+          "\u201D"
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("div", { className: "rv-code-hits-list", children: hits.hits.map((h) => /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("button", { type: "button", className: `rv-code-hit ${hitLine === h.line ? "rv-code-hit-active" : ""}`, onClick: () => gotoLine(h.line), children: [
+          /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "rv-code-hit-line", children: h.line + 1 }),
+          /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "rv-code-hit-text", children: h.text })
+        ] }, h.line)) })
+      ] })
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime20.jsx)(ErrorBanner, { error: state.error }),
+    state.loading && !data && /* @__PURE__ */ (0, import_jsx_runtime20.jsx)(Spinner, {}),
+    data && /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { className: `rv-code-body ${state.loading ? "rv-dim" : ""}`, ref: bodyRef, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("table", { className: "rv-code-table", children: /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("tbody", { children: htmlLines.map((ln, i) => {
+        const lineNo = offset + i;
+        return /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("tr", { "data-line": lineNo, className: hitLine === lineNo ? "rv-code-line-hit" : "", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("td", { className: "rv-code-gutter", children: lineNo + 1 }),
+          /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("td", { className: "rv-code-line", children: /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("code", { dangerouslySetInnerHTML: { __html: ln || " " } }) })
+        ] }, lineNo);
+      }) }) }),
+      canNext && /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("button", { type: "button", className: "rv-btn rv-btn-small rv-code-more", onClick: () => setWindow({ offset: end, tail: false }), children: [
+        "Load next ",
+        fmtNum(Math.min(pageSize, total - end)),
+        " lines"
+      ] })
+    ] })
+  ] });
+}
+
+// src/webview/components/review/BlockTrajectory.jsx
+var import_jsx_runtime21 = __toESM(require_jsx_runtime());
+var EXIT_SUMMARY_KEYS = [
+  "lint_clean",
+  "sim_passed",
+  "success",
+  "passed",
+  "gate_count",
+  "chip_area_um2",
+  "category",
+  "confidence",
+  "decision",
+  "action",
+  "tb_fixes_attempted",
+  "local_fixes_attempted",
+  "needs_human",
+  "repeat_count",
+  "issues_found",
+  "new_tier_index"
+];
+function exitSummary(exit) {
+  if (!exit) return [];
+  const out = [];
+  for (const k of EXIT_SUMMARY_KEYS) {
+    if (exit[k] === void 0 || exit[k] === null || exit[k] === "") continue;
+    out.push([k, exit[k]]);
+  }
+  return out;
+}
+function ExitChips({ exit }) {
+  const items = exitSummary(exit);
+  if (!items.length) return null;
+  return /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("span", { className: "rv-exit-chips", children: items.map(([k, v]) => {
+    let tone = "muted";
+    if (typeof v === "boolean") tone = v ? "ok" : "fail";
+    else if (k === "decision" || k === "action") tone = /escalate|ask_human|abort|revise/.test(String(v)) ? "warn" : "info";
+    else if (k === "category") tone = "warn";
+    const label = typeof v === "boolean" ? `${k.replace(/_/g, " ")} ${v ? "\u2713" : "\u2717"}` : `${k.replace(/_/g, " ")}: ${typeof v === "number" ? fmtNum(v, 2) : String(v)}`;
+    return /* @__PURE__ */ (0, import_jsx_runtime21.jsx)(Badge, { tone, children: label }, k);
+  }) });
+}
+function eventSummary(step) {
+  const f = step.fields || {};
+  switch (step.event) {
+    case "gate_result":
+      return `${step.node || "gate"}: ${f.status || (f.passed ? "passed" : "failed")}${f.reason ? ` \u2014 ${String(f.reason).slice(0, 140)}` : ""}`;
+    case "mem_price":
+      return `memory price ${f.ok ? "ok" : "over budget"} \xB7 ${f.n_memories} memories \xB7 ${f.total_area_mm2} mm\xB2 (${f.trajectory})`;
+    case "lint_retry_bypass":
+    case "ppa_retry_bypass":
+      return `${step.event.replace(/_/g, " ")} (attempt ${f.attempt}) \u2014 previous RTL backed up`;
+    case "llm_timed out":
+      return `LLM call timed out after ${fmtDuration(f.elapsed_s)}`;
+    case "gate_failed":
+      return `gate failed: ${(f.deviations || []).length} deviations`;
+    case "uarch_feasibility_blocked":
+      return `uArch feasibility blocked: ${(f.blocking_issues || []).length} issue(s)`;
+    case "uarch_feasibility_resume":
+      return `uArch feasibility resumed: ${f.action}`;
+    case "interrupt":
+      return `interrupt: ${f.reason || ""}`;
+    default:
+      return step.event;
+  }
+}
+function StepRow({ step, selected, onSelect, pipelineStart }) {
+  const key = stepKey(step);
+  const cls = `rv-step rv-step-${step.type} ${selected ? "rv-step-selected" : ""}`;
+  if (step.type === "llm_call") {
+    const u = step.usage || {};
+    return /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("button", { type: "button", className: cls, "data-key": key, onClick: () => onSelect(step), children: [
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("span", { className: "rv-step-icon", children: "\u2726" }),
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("span", { className: "rv-step-main", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("span", { className: "rv-step-title", children: step.run_name || `LLM call #${step.call_id}` }),
+        /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("span", { className: "rv-step-sub", children: [
+          step.model,
+          " \xB7 ",
+          fmtDuration(step.duration_s),
+          " \xB7 out ",
+          fmtTokens(u.output_tokens),
+          " tok",
+          step.n_commands ? ` \xB7 ${step.n_commands} cmds` : "",
+          step.n_file_changes ? ` \xB7 ${step.n_file_changes} file writes` : ""
+        ] })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("span", { className: "rv-step-right", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("span", { className: "rv-step-time", children: fmtTime(step.ts) }),
+        /* @__PURE__ */ (0, import_jsx_runtime21.jsx)(StatusBadge, { status: step.status })
+      ] })
+    ] });
+  }
+  if (step.type === "tool_run") {
+    return /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("button", { type: "button", className: cls, "data-key": key, onClick: () => onSelect(step), children: [
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("span", { className: "rv-step-icon", children: "\u{1F527}" }),
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("span", { className: "rv-step-main", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("span", { className: "rv-step-title", children: step.name }),
+        /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("span", { className: "rv-step-sub", children: [
+          step.step,
+          " log \xB7 ",
+          fmtBytes(step.size)
+        ] })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("span", { className: "rv-step-right", children: /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("span", { className: "rv-step-time", children: fmtTime(step.mtime) }) })
+    ] });
+  }
+  return /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("button", { type: "button", className: cls, "data-key": key, onClick: () => onSelect(step), children: [
+    /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("span", { className: "rv-step-icon", children: "\u2022" }),
+    /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("span", { className: "rv-step-main", children: /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("span", { className: "rv-step-title rv-step-event", children: eventSummary(step) }) }),
+    /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("span", { className: "rv-step-right", children: /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("span", { className: "rv-step-time", children: fmtTime(step.ts) }) })
+  ] });
+}
+function stepKey(step) {
+  if (step.type === "llm_call") return `call:${step.call_id}`;
+  if (step.type === "tool_run") return `tool:${step.rel_path}`;
+  return `event:${step.event}:${step.ts}`;
+}
+function SegmentBlock({ seg, index, selectedKey, onSelect }) {
+  const key = `seg:${seg.seg_id}`;
+  const hasSteps = seg.steps && seg.steps.length > 0;
+  return /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("div", { className: `rv-seg rv-seg-${seg.status} ${seg.hitl ? "rv-seg-hitl" : ""}`, children: [
+    /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("button", { type: "button", className: `rv-seg-head ${selectedKey === key ? "rv-step-selected" : ""}`, "data-key": key, onClick: () => onSelect({ type: "segment", ...seg }), children: [
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("span", { className: "rv-seg-idx", children: index + 1 }),
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("span", { className: "rv-seg-node", children: seg.node }),
+      seg.attempt != null && /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)(Badge, { tone: "info", title: "RTL attempt within this round", children: [
+        "attempt ",
+        seg.attempt
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsx)(StatusBadge, { status: seg.status }),
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("span", { className: "rv-seg-dur", children: seg.instant ? "" : fmtDuration(seg.duration_s) }),
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("span", { className: "rv-seg-counts", children: [
+        seg.n_calls > 0 && /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("span", { title: "LLM calls", children: [
+          "\u2726",
+          seg.n_calls
+        ] }),
+        seg.n_tool_runs > 0 && /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("span", { title: "tool logs", children: [
+          "\u{1F527}",
+          seg.n_tool_runs
+        ] })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("span", { className: "rv-seg-time", children: fmtTime(seg.enter_ts) })
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("div", { className: "rv-seg-chips", children: /* @__PURE__ */ (0, import_jsx_runtime21.jsx)(ExitChips, { exit: seg.exit }) }),
+    hasSteps && /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("div", { className: "rv-seg-steps", children: seg.steps.map((st) => /* @__PURE__ */ (0, import_jsx_runtime21.jsx)(StepRow, { step: st, selected: selectedKey === stepKey(st), onSelect }, stepKey(st))) })
+  ] });
+}
+function RoundBlock({ round, selectedKey, onSelect, defaultOpen }) {
+  const [open, setOpen] = (0, import_react28.useState)(defaultOpen);
+  const outcomeTone = round.outcome === "passed" ? "ok" : round.outcome === "failed" ? "fail" : "warn";
+  return /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("div", { className: `rv-round ${open ? "rv-open" : ""}`, children: [
+    /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("button", { type: "button", className: "rv-round-head", onClick: () => setOpen((v) => !v), "aria-expanded": open, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("span", { className: "rv-chev", children: open ? "\u25BE" : "\u25B8" }),
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("span", { className: "rv-round-title", children: [
+        "Round ",
+        round.round
+      ] }),
+      round.tier && /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)(Badge, { tone: "muted", children: [
+        "tier ",
+        round.tier
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsx)(Badge, { tone: outcomeTone, children: round.outcome || "in progress" }),
+      round.decision && /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)(Badge, { tone: /escalate|ask_human|abort/.test(round.decision) ? "warn" : "info", children: [
+        "route: ",
+        round.decision
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("span", { className: "rv-round-meta", children: [
+        fmtTime(round.start_ts),
+        " \xB7 ",
+        fmtDuration(round.duration_s),
+        " \xB7 ",
+        round.n_calls,
+        " LLM call",
+        round.n_calls === 1 ? "" : "s",
+        " (",
+        fmtDuration(round.llm_time_s),
+        ")"
+      ] })
+    ] }),
+    open && /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("div", { className: "rv-round-body", children: round.segments.map((seg, i) => /* @__PURE__ */ (0, import_jsx_runtime21.jsx)(SegmentBlock, { seg, index: i, selectedKey, onSelect }, seg.seg_id)) })
+  ] });
+}
+function ToolRunDetail({ step, onOpenFile }) {
+  const [header, setHeader] = (0, import_react28.useState)(null);
+  const isSim = step.step === "simulate" || /sim/.test(step.step);
+  return /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("div", { className: "rv-detail-tool", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("div", { className: "rv-detail-head", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("h3", { children: step.name }),
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("span", { className: "rv-muted", children: [
+        step.step,
+        " log \xB7 attempt ",
+        step.attempt ?? "?",
+        " \xB7 ",
+        fmtBytes(step.size),
+        " \xB7 written ",
+        fmtTime(step.mtime)
+      ] })
+    ] }),
+    header && /* @__PURE__ */ (0, import_jsx_runtime21.jsx)(KV, { rows: [
+      ["Command", header.command, { mono: true }],
+      ["Return code", header.return_code != null ? /* @__PURE__ */ (0, import_jsx_runtime21.jsx)(Badge, { tone: header.return_code === 0 ? "ok" : "fail", children: header.return_code }) : header.return_code_raw],
+      ["Timestamp", header.timestamp]
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime21.jsx)(CodeView, { relPath: step.rel_path, lang: "log", tail: isSim || step.step === "synthesize", onLoaded: (d) => setHeader(d.header || null) }),
+    onOpenFile && /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("div", { className: "rv-actions", children: /* @__PURE__ */ (0, import_jsx_runtime21.jsx)(LinkButton, { onClick: () => onOpenFile(step.rel_path, { lang: "log", title: step.name }), children: "Open in drawer" }) })
+  ] });
+}
+function SegmentDetail({ seg, onSelect }) {
+  const exit = seg.exit || {};
+  const toolStdout = exit.tool_stdout;
+  const rows = Object.entries(exit).filter(([k]) => k !== "tool_stdout").map(([k, v]) => [k.replace(/_/g, " "), v]);
+  const enterRows = Object.entries(seg.enter || {}).map(([k, v]) => [k.replace(/_/g, " "), v]);
+  return /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("div", { className: "rv-detail-seg", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("div", { className: "rv-detail-head", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("h3", { children: [
+        seg.node,
+        seg.attempt != null ? ` \xB7 attempt ${seg.attempt}` : ""
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsx)(StatusBadge, { status: seg.status }),
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("span", { className: "rv-muted", children: [
+        fmtTime(seg.enter_ts),
+        " ",
+        seg.exit_ts ? `\u2192 ${fmtTime(seg.exit_ts)} (${fmtDuration(seg.duration_s)})` : "(still open)"
+      ] })
+    ] }),
+    rows.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)(import_jsx_runtime21.Fragment, { children: [
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("h4", { children: "Node outcome (graph_node_exit)" }),
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsx)(KV, { rows })
+    ] }) : /* @__PURE__ */ (0, import_jsx_runtime21.jsx)(Empty, { children: "No exit fields recorded for this node." }),
+    enterRows.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)(import_jsx_runtime21.Fragment, { children: [
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("h4", { children: "Node inputs (graph_node_enter)" }),
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsx)(KV, { rows: enterRows })
+    ] }),
+    toolStdout && /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)(import_jsx_runtime21.Fragment, { children: [
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("h4", { children: "Tool stdout (tail)" }),
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsx)(LongText, { text: toolStdout, initialChars: 4e3 })
+    ] }),
+    seg.steps && seg.steps.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)(import_jsx_runtime21.Fragment, { children: [
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("h4", { children: "Steps in this node" }),
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("div", { className: "rv-seg-steps", children: seg.steps.map((st) => /* @__PURE__ */ (0, import_jsx_runtime21.jsx)(StepRow, { step: st, selected: false, onSelect }, stepKey(st))) })
+    ] })
+  ] });
+}
+function EventDetail({ step }) {
+  const rows = Object.entries(step.fields || {}).map(([k, v]) => [k.replace(/_/g, " "), v]);
+  return /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("div", { className: "rv-detail-event", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("div", { className: "rv-detail-head", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("h3", { children: eventSummary(step) }),
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("span", { className: "rv-muted", children: [
+        step.event,
+        " \xB7 ",
+        fmtTime(step.ts),
+        step.node ? ` \xB7 ${step.node}` : ""
+      ] })
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime21.jsx)(KV, { rows })
+  ] });
+}
+function BlockTrajectory({ block, onOpenFile, onOpenBlock, initialCallId, isLive }) {
+  const { data, error, loading, reload } = useJson(block ? api.trajectory(block) : null, { pollMs: isLive ? 8e3 : 0 });
+  const [selState, setSelState] = (0, import_react28.useState)(null);
+  const sel = selState && selState.block === block ? selState.item : null;
+  const setSel = (0, import_react28.useCallback)((item) => setSelState(item ? { block, item } : null), [block]);
+  const listRef = (0, import_react28.useRef)(null);
+  const flat = (0, import_react28.useMemo)(() => {
+    if (!data) return [];
+    const out = [];
+    for (const r of data.rounds) {
+      for (const s of r.segments) {
+        out.push({ type: "segment", ...s });
+        for (const st of s.steps) out.push(st);
+      }
+    }
+    for (const c of data.unattributed?.calls || []) out.push({ type: "llm_call", ts: c.ts, ...c });
+    return out;
+  }, [data]);
+  const keyOf = (item) => item.type === "segment" ? `seg:${item.seg_id}` : stepKey(item);
+  (0, import_react28.useEffect)(() => {
+    if (!data || data.block !== block || sel) return;
+    if (initialCallId) {
+      const c = flat.find((x) => x.type === "llm_call" && x.call_id === initialCallId);
+      if (c) {
+        setSel(c);
+        return;
+      }
+    }
+    const last = data.rounds[data.rounds.length - 1];
+    const first = last?.segments.flatMap((s) => s.steps).find((s) => s.type === "llm_call");
+    if (first) setSel(first);
+  }, [data, block, flat, initialCallId, sel, setSel]);
+  const onKeyDown = (0, import_react28.useCallback)((e) => {
+    if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+    if (!flat.length) return;
+    e.preventDefault();
+    const cur = sel ? flat.findIndex((x) => keyOf(x) === keyOf(sel)) : -1;
+    const next = e.key === "ArrowDown" ? Math.min(flat.length - 1, cur + 1) : Math.max(0, cur - 1);
+    const item = flat[next];
+    setSel(item);
+    const el = listRef.current?.querySelector(`[data-key="${keyOf(item)}"]`);
+    if (el) el.scrollIntoView({ block: "nearest" });
+  }, [flat, sel]);
+  if (!block) return /* @__PURE__ */ (0, import_jsx_runtime21.jsx)(Empty, { children: "Select a block." });
+  if (loading && !data) return /* @__PURE__ */ (0, import_jsx_runtime21.jsx)(Spinner, { label: "Loading trajectory\u2026" });
+  if (error) return /* @__PURE__ */ (0, import_jsx_runtime21.jsx)(ErrorBanner, { error });
+  if (!data) return null;
+  const selKey = sel ? keyOf(sel) : null;
+  const totalCalls = data.rounds.reduce((a, r) => a + r.n_calls, 0) + (data.unattributed?.calls?.length || 0);
+  return /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("div", { className: "rv-traj", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("div", { className: "rv-traj-list", ref: listRef, tabIndex: 0, onKeyDown, "aria-label": "Trajectory steps (use arrow keys)", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("div", { className: "rv-traj-summary", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("span", { children: [
+          /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("b", { children: data.rounds.length }),
+          " round",
+          data.rounds.length === 1 ? "" : "s"
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("span", { children: [
+          /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("b", { children: totalCalls }),
+          " LLM calls"
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("span", { children: [
+          /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("b", { children: data.status?.rtl_attempts ?? 0 }),
+          " RTL attempt",
+          data.status?.rtl_attempts === 1 ? "" : "s",
+          " (max per round)"
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("span", { children: [
+          "LLM time ",
+          /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("b", { children: fmtDuration(data.status?.llm_time_s) })
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("button", { type: "button", className: "rv-btn rv-btn-small", onClick: reload, title: "Refresh", children: "\u21BB" })
+      ] }),
+      data.rounds.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime21.jsx)(Empty, { children: "No pipeline events recorded for this block yet." }),
+      data.rounds.map((r, i) => /* @__PURE__ */ (0, import_jsx_runtime21.jsx)(RoundBlock, { round: r, selectedKey: selKey, onSelect: setSel, defaultOpen: i === data.rounds.length - 1 || data.rounds.length <= 2 }, r.round)),
+      data.unattributed?.calls?.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("div", { className: "rv-round rv-open", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("div", { className: "rv-round-head rv-round-head-static", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("span", { className: "rv-round-title", children: "Calls outside any node window" }),
+          /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("span", { className: "rv-round-meta", children: [
+            data.unattributed.calls.length,
+            " (chip-lead / helper calls attributed by name)"
+          ] })
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("div", { className: "rv-round-body rv-seg-steps", children: data.unattributed.calls.map((c) => /* @__PURE__ */ (0, import_jsx_runtime21.jsx)(StepRow, { step: { type: "llm_call", ...c }, selected: selKey === `call:${c.call_id}`, onSelect: setSel }, `call:${c.call_id}`)) })
+      ] }),
+      data.unattributed?.tool_runs?.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("div", { className: "rv-round rv-open", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("div", { className: "rv-round-head rv-round-head-static", children: /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("span", { className: "rv-round-title", children: "Step logs outside any node window" }) }),
+        /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("div", { className: "rv-round-body rv-seg-steps", children: data.unattributed.tool_runs.map((l) => /* @__PURE__ */ (0, import_jsx_runtime21.jsx)(StepRow, { step: { type: "tool_run", ...l }, selected: selKey === `tool:${l.rel_path}`, onSelect: setSel }, `tool:${l.rel_path}`)) })
+      ] }),
+      data.decisions?.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("div", { className: "rv-round rv-open", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("div", { className: "rv-round-head rv-round-head-static", children: /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("span", { className: "rv-round-title", children: [
+          "Chip-lead decisions touching ",
+          blockLabel(block)
+        ] }) }),
+        /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("div", { className: "rv-round-body", children: data.decisions.map((d) => /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("div", { className: "rv-decision-mini", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime21.jsx)(Badge, { tone: /approve|override|fix/.test(d.action || "") ? "ok" : "warn", children: d.action }),
+          /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("span", { className: "rv-muted", children: [
+            d.type,
+            " \xB7 ",
+            fmtTime(d.ts)
+          ] }),
+          d.call_id && /* @__PURE__ */ (0, import_jsx_runtime21.jsx)(LinkButton, { onClick: () => setSel({ type: "llm_call", call_id: d.call_id, ts: d.ts, run_name: `Chip Lead decision #${d.decision_index}` }), children: "open call" }),
+          /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("div", { className: "rv-decision-reason", children: d.reasoning })
+        ] }, d.decision_index)) })
+      ] })
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("div", { className: "rv-traj-detail", children: [
+      !sel && /* @__PURE__ */ (0, import_jsx_runtime21.jsx)(Empty, { icon: "\u261C", children: "Select a node, LLM call, or tool log on the left. Arrow keys move the selection." }),
+      sel && sel.type === "llm_call" && /* @__PURE__ */ (0, import_jsx_runtime21.jsx)(LLMCallViewer, { callId: sel.call_id, onOpenFile, onOpenBlock, embedded: true }),
+      sel && sel.type === "tool_run" && /* @__PURE__ */ (0, import_jsx_runtime21.jsx)(ToolRunDetail, { step: sel, onOpenFile }),
+      sel && sel.type === "segment" && /* @__PURE__ */ (0, import_jsx_runtime21.jsx)(SegmentDetail, { seg: sel, onSelect: setSel }),
+      sel && sel.type === "event" && /* @__PURE__ */ (0, import_jsx_runtime21.jsx)(EventDetail, { step: sel })
+    ] })
+  ] });
+}
+
+// src/webview/components/review/BlockDesign.jsx
+var import_react30 = __toESM(require_react());
+
+// src/webview/components/review/DiffView.jsx
+var import_react29 = __toESM(require_react());
+var import_jsx_runtime22 = __toESM(require_jsx_runtime());
+function DiffView({ a, b, maxHeight }) {
+  const { data, error, loading } = useJson(a && b ? api.diff(a, b) : null);
+  if (!a || !b) return null;
+  if (loading && !data) return /* @__PURE__ */ (0, import_jsx_runtime22.jsx)(Spinner, { label: "Computing diff\u2026" });
+  if (error) return /* @__PURE__ */ (0, import_jsx_runtime22.jsx)(ErrorBanner, { error });
+  if (!data) return null;
+  if (data.identical) return /* @__PURE__ */ (0, import_jsx_runtime22.jsx)(Empty, { icon: "=", children: "Files are identical." });
+  return /* @__PURE__ */ (0, import_jsx_runtime22.jsxs)("div", { className: "rv-diff", style: maxHeight ? { maxHeight } : void 0, children: [
+    /* @__PURE__ */ (0, import_jsx_runtime22.jsxs)("div", { className: "rv-diff-bar", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime22.jsxs)("span", { className: "rv-diff-title", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime22.jsx)("code", { children: a }),
+        " ",
+        "\u2192",
+        " ",
+        /* @__PURE__ */ (0, import_jsx_runtime22.jsx)("code", { children: b })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime22.jsxs)("span", { className: "rv-diff-stats", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime22.jsxs)("span", { className: "rv-diff-add", children: [
+          "+",
+          data.added
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime22.jsxs)("span", { className: "rv-diff-del", children: [
+          "\u2212",
+          data.removed
+        ] }),
+        data.truncated && /* @__PURE__ */ (0, import_jsx_runtime22.jsx)("span", { className: "rv-muted", children: "(truncated)" })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime22.jsx)(CopyButton, { text: data.lines.join("\n"), label: "Copy diff" })
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime22.jsx)("pre", { className: "rv-diff-body", children: data.lines.map((ln, i) => {
+      let cls = "rv-diff-ctx";
+      if (ln.startsWith("+++") || ln.startsWith("---")) cls = "rv-diff-file";
+      else if (ln.startsWith("@@")) cls = "rv-diff-hunk";
+      else if (ln.startsWith("+")) cls = "rv-diff-add";
+      else if (ln.startsWith("-")) cls = "rv-diff-del";
+      return /* @__PURE__ */ (0, import_jsx_runtime22.jsx)("div", { className: `rv-diff-line ${cls}`, children: ln || " " }, i);
+    }) })
+  ] });
+}
+
+// src/webview/components/review/BlockDesign.jsx
+var import_jsx_runtime23 = __toESM(require_jsx_runtime());
+var GATE_LABELS = {
+  lint: "Lint (Verilator)",
+  simulation: "Simulation (cocotb)",
+  coverage: "Line coverage",
+  throughput: "Measured throughput",
+  gate_sim: "Gate-level sim",
+  contract_conformance: "Contract conformance",
+  mem_price: "Memory price (SRAM/ROM area)",
+  ppa: "PPA gate",
+  timing: "Pre-layout timing (WNS \u2265 0)",
+  "ppa:flip_flop_count": "PPA: flip-flops",
+  "ppa:chip_area_um2": "PPA: chip area",
+  "ppa:wns_ns": "PPA: WNS"
+};
+function GatesTable({ gates }) {
+  return /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(
+    Table,
+    {
+      dense: true,
+      columns: [
+        { key: "gate", label: "Gate", render: (g) => GATE_LABELS[g.gate] || g.gate },
+        { key: "passed", label: "Verdict", render: (g) => /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(PassFail, { value: g.passed, none: "not run" }) },
+        { key: "detail", label: "Detail" }
+      ],
+      rows: gates,
+      rowKey: (g) => g.gate,
+      empty: "No gate results recorded for this block."
+    }
+  );
+}
+function VersionedFile({ versions, lang, emptyText, defaultIndex }) {
+  const [idx, setIdx] = (0, import_react30.useState)(defaultIndex ?? Math.max(0, (versions?.length || 1) - 1));
+  const [mode, setMode] = (0, import_react30.useState)("view");
+  (0, import_react30.useEffect)(() => {
+    setIdx(defaultIndex ?? Math.max(0, (versions?.length || 1) - 1));
+  }, [versions, defaultIndex]);
+  if (!versions || !versions.length) return /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(Empty, { children: emptyText });
+  const cur = versions[Math.min(idx, versions.length - 1)];
+  const prev = idx > 0 ? versions[idx - 1] : null;
+  return /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)("div", { className: "rv-versioned", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)("div", { className: "rv-versioned-bar", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("label", { className: "rv-muted", children: "Version" }),
+      /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("select", { className: "rv-select", value: idx, onChange: (e) => setIdx(Number(e.target.value)), children: versions.map((v, i) => /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)("option", { value: i, children: [
+        i + 1,
+        ". ",
+        v.label || v.workspace || v.rel_path,
+        " \xB7 ",
+        fmtDateTime(v.mtime),
+        " \xB7 ",
+        fmtBytes(v.size)
+      ] }, v.rel_path + i)) }),
+      /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(
+        Tabs,
+        {
+          tabs: [{ key: "view", label: "View" }, { key: "diff", label: prev ? `Diff vs #${idx}` : "Diff", title: prev ? `Compare with ${prev.label || prev.rel_path}` : "No earlier version" }],
+          active: mode,
+          onChange: (m) => {
+            if (m !== "diff" || prev) setMode(m);
+          }
+        }
+      )
+    ] }),
+    mode === "view" && /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(CodeView, { relPath: cur.rel_path, lang, maxHeight: "70vh" }),
+    mode === "diff" && prev && /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(DiffView, { a: prev.rel_path, b: cur.rel_path, maxHeight: "70vh" })
+  ] });
+}
+function num(v, d = 0) {
+  return v == null ? "--" : fmtNum(v, d);
+}
+function BlockDesign({ block, onOpenFile, onOpenCall, isLive }) {
+  const { data, error, loading } = useJson(block ? api.review(block) : null, { pollMs: isLive ? 15e3 : 0 });
+  const containerRef = (0, import_react30.useRef)(null);
+  const [tbIdx, setTbIdx] = (0, import_react30.useState)(0);
+  (0, import_react30.useEffect)(() => {
+    setTbIdx(0);
+  }, [block]);
+  const toc = (0, import_react30.useMemo)(() => [
+    { id: "sec-summary", label: "Summary" },
+    { id: "sec-spec", label: "uArch spec" },
+    { id: "sec-rtl", label: "RTL" },
+    { id: "sec-tb", label: "Testbench" },
+    { id: "sec-sim", label: "Simulation" },
+    { id: "sec-synth", label: "Synthesis" },
+    { id: "sec-timing", label: "Timing" },
+    { id: "sec-issues", label: "Issues" },
+    { id: "sec-decisions", label: "Decisions" },
+    { id: "sec-contracts", label: "Contracts" }
+  ], []);
+  if (!block) return /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(Empty, { children: "Select a block." });
+  if (loading && !data) return /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(Spinner, { label: "Loading design review\u2026" });
+  if (error) return /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(ErrorBanner, { error });
+  if (!data) return null;
+  const { meta, status, files, sim, synth, timing, issues, mem_price: memPrice, decisions, interrupts, contracts, gates, lint, spec_summary: specSummary } = data;
+  const best = sim.best || {};
+  const cov = sim.coverage || {};
+  const thr = sim.throughput || {};
+  const gs = sim.gate_sim || {};
+  const budgets = synth.budgets || {};
+  const failedGates = gates.filter((g) => g.passed === false).length;
+  const tb = files.tb || [];
+  const memories = memPrice && memPrice.memories || [];
+  return /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)("div", { className: "rv-design", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(MiniToc, { items: toc.map((t) => t.id === "sec-summary" && failedGates ? { ...t, badge: `${failedGates} \u2717` } : t), containerRef }),
+    /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)("div", { className: "rv-design-body", ref: containerRef, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)(Section, { id: "sec-summary", title: blockLabel(block), subtitle: `tier ${meta.tier ?? "?"} \xB7 ${meta.subsystem || ""}`, right: /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(StatusBadge, { status: status.status }), children: [
+        meta.description && /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("p", { className: "rv-desc", children: meta.description }),
+        /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)("div", { className: "rv-tiles", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(StatTile, { label: "Rounds", value: status.rounds, sub: "Init Block re-entries" }),
+          /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(StatTile, { label: "RTL attempts", value: status.rtl_attempts, sub: "max within a round" }),
+          /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(StatTile, { label: "LLM calls", value: status.llm_calls, sub: fmtDuration(status.llm_time_s) }),
+          /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(StatTile, { label: "DV", value: best.tests_total != null ? `${best.tests_passed}/${best.tests_total}` : "--", tone: best.sim_passed === true ? "ok" : best.sim_passed === false ? "fail" : void 0, sub: "tests passed" }),
+          /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(StatTile, { label: "Coverage", value: fmtPct(cov.pct), tone: cov.passed === true ? "ok" : cov.passed === false ? "fail" : void 0, sub: cov.floor != null ? `floor ${cov.floor}%` : "" }),
+          /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(StatTile, { label: "Cells", value: num(synth.cells), sub: budgets.estimated_gates != null ? `est. ${fmtNum(budgets.estimated_gates)} gates` : "" }),
+          /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(StatTile, { label: "Flip-flops", value: num(synth.ff), tone: synth.ff != null && budgets.flip_flop_budget != null ? synth.ff > budgets.flip_flop_budget ? "fail" : "ok" : void 0, sub: budgets.flip_flop_budget != null ? `budget ${fmtNum(budgets.flip_flop_budget)}` : "" }),
+          /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(StatTile, { label: "Area (\xB5m\xB2)", value: num(synth.area_um2), tone: synth.area_um2 != null && budgets.area_budget_um2 != null ? synth.area_um2 > budgets.area_budget_um2 ? "fail" : "ok" : void 0, sub: budgets.area_budget_um2 != null ? `budget ${fmtNum(budgets.area_budget_um2)}` : "" }),
+          /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(StatTile, { label: "WNS (ns)", value: timing.wns_ns != null ? fmtNum(timing.wns_ns, 3) : "--", tone: timing.wns_ns != null ? timing.wns_ns >= 0 ? "ok" : "fail" : void 0, sub: timing.period_ns != null ? `@ ${timing.period_ns} ns period` : "" }),
+          /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(StatTile, { label: "Fmax (MHz)", value: timing.fmax_mhz != null ? fmtNum(timing.fmax_mhz, 1) : "--", sub: "1000 / (period \u2212 WNS)" })
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("h4", { children: "Gates" }),
+        /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(GatesTable, { gates }),
+        /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(KV, { rows: [
+          ["RTL target", meta.rtl_target, { mono: true }],
+          ["Testbench", meta.testbench, { mono: true }],
+          ["Golden source", meta.python_source, { mono: true }],
+          ["Contract version", meta.spec_contract_version],
+          ["First activity", fmtDateTime(status.first_ts)],
+          ["Last activity", fmtDateTime(status.last_ts)]
+        ] })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)(Section, { id: "sec-spec", title: "Microarchitecture spec", subtitle: files.spec ? `${fmtBytes(files.spec.size)} \xB7 ${fmtDateTime(files.spec.mtime)}` : "no spec on disk", children: [
+        specSummary?.overview && /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("p", { className: "rv-desc", children: specSummary.overview }),
+        specSummary?.summary && /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(Collapsible2, { title: "Machine-readable summary (JSON block in the spec)", defaultOpen: false, children: /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("pre", { className: "rv-pre-inline", children: JSON.stringify(specSummary.summary, null, 2) }) }),
+        /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(VersionedFile, { versions: files.spec_versions, lang: "markdown", emptyText: "No uArch spec was written for this block." }),
+        files.spec_review && /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(Collapsible2, { title: "Reviewed spec (arch/uarch_specs_review)", subtitle: fmtDateTime(files.spec_review.mtime), defaultOpen: false, children: /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(CodeView, { relPath: files.spec_review.rel_path, lang: "markdown", maxHeight: "60vh" }) })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)(Section, { id: "sec-rtl", title: "RTL", subtitle: files.rtl ? `${files.rtl.rel_path} \xB7 ${fmtBytes(files.rtl.size)} \xB7 ${fmtDateTime(files.rtl.mtime)}` : "no RTL on disk", children: [
+        lint && /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)("div", { className: "rv-inline-stats", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(PassFail, { value: (lint.error_count || 0) === 0, yes: "lint clean", no: `${lint.error_count} lint errors` }),
+          /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)("span", { className: "rv-muted", children: [
+            lint.warning_count,
+            " warnings",
+            lint.warning_kinds?.length ? ` (${lint.warning_kinds.join(", ")})` : ""
+          ] }),
+          lint.log_rel_path && /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(LinkButton, { onClick: () => onOpenFile(lint.log_rel_path, { lang: "log" }), children: "open lint log" })
+        ] }),
+        lint?.errors?.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("ul", { className: "rv-list-fail", children: lint.errors.map((e, i) => /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("li", { children: e }, i)) }),
+        /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(VersionedFile, { versions: files.rtl_versions, lang: "verilog", emptyText: "No RTL file exists for this block yet." }),
+        issues.provenance && /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(Collapsible2, { title: "Provenance", defaultOpen: false, children: /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("pre", { className: "rv-pre-inline", children: JSON.stringify(issues.provenance, null, 2) }) })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)(Section, { id: "sec-tb", title: "Testbench", subtitle: tb.length ? `${tb.length} file${tb.length === 1 ? "" : "s"}` : "no testbench on disk", children: [
+        sim.dv_summary?.testbenches?.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(Table, { dense: true, columns: [
+          { key: "name", label: "Testbench" },
+          { key: "kind", label: "Kind" },
+          { key: "tests", label: "Tests", render: (t) => `${t.tests_passed}/${t.tests_total}` },
+          { key: "passed", label: "Verdict", render: (t) => /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(PassFail, { value: t.passed }) }
+        ], rows: sim.dv_summary.testbenches, rowKey: (t) => t.path || t.name }),
+        tb.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)(import_jsx_runtime23.Fragment, { children: [
+          /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(Tabs, { tabs: tb.map((f, i) => ({ key: i, label: f.rel_path.split("/").pop(), title: f.rel_path })), active: Math.min(tbIdx, tb.length - 1), onChange: setTbIdx }),
+          /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(CodeView, { relPath: tb[Math.min(tbIdx, tb.length - 1)].rel_path, lang: "python", maxHeight: "70vh" })
+        ] }),
+        tb.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(Empty, { children: "No testbench files found under tb/ for this block." })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)(Section, { id: "sec-sim", title: "Simulation results", right: /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(PassFail, { value: best.sim_passed, yes: "sim passed", no: "sim failed", none: "not run" }), children: [
+        /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)("div", { className: "rv-tiles", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(StatTile, { label: "Tests", value: best.tests_total != null ? `${best.tests_passed}/${best.tests_total}` : "--", tone: best.sim_passed === true ? "ok" : best.sim_passed === false ? "fail" : void 0, sub: best.attempt != null ? `best attempt ${best.attempt}` : "" }),
+          /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(StatTile, { label: "Coverage", value: fmtPct(cov.pct), tone: cov.passed === true ? "ok" : cov.passed === false ? "fail" : void 0, sub: cov.points_total != null ? `${cov.points_hit}/${cov.points_total} points \xB7 floor ${cov.floor}%` : "" }),
+          /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(StatTile, { label: "Throughput", value: thr.applicable ? `${fmtNum(thr.measured_cyc_per_op, 1)} cyc/op` : "n/a", tone: thr.passed === true ? "ok" : thr.passed === false ? "fail" : void 0, sub: thr.applicable ? `declared ${fmtNum(thr.declared_cyc_per_op, 1)} \xB7 threshold ${fmtNum(thr.threshold_cyc_per_op, 1)} \xB7 ${thr.n_ops} ops` : thr.reason || "" }),
+          /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(StatTile, { label: "Gate-level sim", value: gs.status ? gs.status.replace(/_/g, " ") : "--", tone: gs.ran ? gs.ok ? "ok" : "fail" : void 0, sub: gs.cycles_compared ? `${fmtNum(gs.cycles_compared)} cycles compared` : "" })
+        ] }),
+        gs.reason && !gs.ran && /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)("p", { className: "rv-note", children: [
+          "Gate sim: ",
+          gs.reason
+        ] }),
+        sim.parsed?.tests?.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)(import_jsx_runtime23.Fragment, { children: [
+          /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)("h4", { children: [
+            "Latest regression (",
+            sim.parsed.log_rel_path?.split("/").pop(),
+            ")"
+          ] }),
+          /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(Table, { dense: true, columns: [
+            { key: "name", label: "Test" },
+            { key: "status", label: "Result", render: (t) => /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(Badge, { tone: t.status === "PASS" ? "ok" : t.status === "FAIL" ? "fail" : "warn", children: t.status }) },
+            { key: "sim_time_ns", label: "Sim time (ns)", align: "right", render: (t) => fmtNum(t.sim_time_ns, 2) },
+            { key: "real_time_s", label: "Wall (s)", align: "right", render: (t) => fmtNum(t.real_time_s, 2) }
+          ], rows: sim.parsed.tests, rowKey: (t) => t.name }),
+          sim.parsed.first_assertion && /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("p", { className: "rv-fail-text rv-mono", children: sim.parsed.first_assertion }),
+          /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(LinkButton, { onClick: () => onOpenFile(sim.parsed.log_rel_path, { lang: "log", tail: true }), children: "open simulate log" })
+        ] }),
+        sim.dv_results?.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(Collapsible2, { title: "DV history (dv_results)", subtitle: `${sim.dv_results.length} rows \xB7 agent probes + gate verdicts`, defaultOpen: false, children: /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(Table, { dense: true, columns: [
+          { key: "ts", label: "Time", render: (r) => fmtTime(r.ts) },
+          { key: "attempt", label: "Att." },
+          { key: "scope", label: "Scope" },
+          { key: "source", label: "Source" },
+          { key: "passed", label: "Verdict", render: (r) => /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(PassFail, { value: r.passed === 1 || r.passed === true }) },
+          { key: "tests", label: "Tests", render: (r) => r.tests_total != null ? `${r.tests_passed}/${r.tests_total}` : "--" },
+          { key: "duration_s", label: "Dur", render: (r) => fmtDuration(r.duration_s) },
+          { key: "detail", label: "Detail", render: (r) => /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("span", { className: "rv-clip", title: r.detail, children: (r.detail || "").slice(0, 120) }) },
+          { key: "log", label: "Log", render: (r) => r.log_rel_path ? /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(LinkButton, { onClick: () => onOpenFile(r.log_rel_path, { lang: "log", tail: true }), children: "log" }) : "" }
+        ], rows: sim.dv_results, rowKey: (r) => r.id }) }),
+        sim.coverage_results?.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(Collapsible2, { title: "Coverage history", defaultOpen: false, children: /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(Table, { dense: true, columns: [
+          { key: "ts", label: "Time", render: (r) => fmtTime(r.ts) },
+          { key: "scope", label: "Scope" },
+          { key: "pct", label: "%", align: "right", render: (r) => fmtPct(r.pct, 2) },
+          { key: "points", label: "Points", render: (r) => `${r.points_hit}/${r.points_total}` },
+          { key: "passed", label: "Verdict", render: (r) => /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(PassFail, { value: r.uncovered?.passed }) }
+        ], rows: sim.coverage_results, rowKey: (r) => r.id }) }),
+        sim.sim_logs?.length > 1 && /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)("p", { className: "rv-muted", children: [
+          "Simulate logs on disk: ",
+          sim.sim_logs.map((l) => /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(LinkButton, { onClick: () => onOpenFile(l.rel_path, { lang: "log", tail: true }), children: l.name }, l.rel_path))
+        ] })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)(Section, { id: "sec-synth", title: "Synthesis (Yosys, sky130_fd_sc_hd)", right: /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(PassFail, { value: synth.ppa_ok == null ? null : !!synth.ppa_ok, yes: "PPA ok", no: "PPA failed", none: "no PPA verdict" }), children: [
+        synth.cells == null && /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(Empty, { children: "No synthesis result recorded for this block (synthesis skipped or not reached)." }),
+        synth.cells != null && /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)(import_jsx_runtime23.Fragment, { children: [
+          /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)("div", { className: "rv-tiles", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(StatTile, { label: "Cells", value: /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(BudgetCell, { measured: synth.cells, budget: budgets.estimated_gates }), sub: "std cells vs estimated gates" }),
+            /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(StatTile, { label: "Flip-flops", value: /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(BudgetCell, { measured: synth.ff, budget: budgets.flip_flop_budget }), sub: "sequential cells vs FF budget" }),
+            /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(StatTile, { label: "Total area (\xB5m\xB2)", value: /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(BudgetCell, { measured: synth.area_um2, budget: budgets.area_budget_um2 }), sub: "ppa_history area (std cells + instantiated SRAM macros) vs budget" }),
+            /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(StatTile, { label: "Std-cell area (\xB5m\xB2)", value: num(synth.std_cell_area_um2, 1), sub: synth.sequential_pct != null ? `${synth.sequential_pct}% sequential` : "" }),
+            /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(StatTile, { label: "Memory macro area (\xB5m\xB2)", value: num(synth.sram_area_um2, 1), sub: memPrice ? `${memories.length} memories (mem_price)` : "no mem_price ledger" })
+          ] }),
+          synth.reasons?.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("ul", { className: "rv-list-fail", children: synth.reasons.map((r, i) => /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("li", { children: r }, i)) }),
+          synth.checks?.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)(import_jsx_runtime23.Fragment, { children: [
+            /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("h4", { children: "PPA checks (ppa_report.json)" }),
+            /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(Table, { dense: true, columns: [
+              { key: "metric", label: "Metric" },
+              { key: "actual", label: "Actual", align: "right", render: (c) => fmtNum(c.actual, 3) },
+              { key: "budget", label: "Budget", align: "right", render: (c) => fmtNum(c.budget, 3) },
+              { key: "limit", label: "Limit", align: "right", render: (c) => fmtNum(c.limit, 3) },
+              { key: "passed", label: "Verdict", render: (c) => /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(PassFail, { value: c.passed }) }
+            ], rows: synth.checks, rowKey: (c) => c.metric })
+          ] }),
+          /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("h4", { children: "Macro inventory" }),
+          synth.macros?.length ? /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(Table, { dense: true, columns: [{ key: "name", label: "Macro / blackbox" }, { key: "count", label: "Instances", align: "right" }], rows: synth.macros, rowKey: (m) => m.name }) : /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("p", { className: "rv-muted", children: "No macro / blackbox instances in the netlist." }),
+          synth.unknown_area_types?.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)("p", { className: "rv-note", children: [
+            "Yosys had no area for: ",
+            synth.unknown_area_types.join(", "),
+            " (macro area comes from mem_price)."
+          ] }),
+          memories.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)(import_jsx_runtime23.Fragment, { children: [
+            /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("h4", { children: "Memory ledger (mem_price.json)" }),
+            /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(Table, { dense: true, columns: [
+              { key: "name", label: "Memory" },
+              { key: "width", label: "W", align: "right" },
+              { key: "depth", label: "D", align: "right" },
+              { key: "bits", label: "Bits", align: "right", render: (m) => fmtNum(m.bits) },
+              { key: "ports", label: "Ports" },
+              { key: "declared_impl", label: "Impl" },
+              { key: "recommended_impl", label: "Recommended" },
+              { key: "area_um2", label: "Area (\xB5m\xB2)", align: "right", render: (m) => fmtNum(m.area_um2, 1) },
+              { key: "estimate_source", label: "Source" }
+            ], rows: memories, rowKey: (m) => m.name }),
+            /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(KV, { rows: [
+              ["Ledger verdict", /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(PassFail, { value: memPrice.ok })],
+              ["Total memory area", `${fmtNum(memPrice.total_area_um2, 1)} \xB5m\xB2 (${memPrice.total_area_mm2} mm\xB2)`],
+              ["Area budget", memPrice.area_budget_um2 != null ? `${fmtNum(memPrice.area_budget_um2)} \xB5m\xB2` : null],
+              ["Trajectory", memPrice.trajectory],
+              ["Deferred", memPrice.deferred ? memPrice.deferred_reason || "yes" : null]
+            ] })
+          ] }),
+          /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(Collapsible2, { title: "PPA history (ppa_history)", subtitle: `${synth.history?.length || 0} rows \xB7 agent probes + gate synth`, defaultOpen: false, children: /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(Table, { dense: true, columns: [
+            { key: "ts", label: "Time", render: (r) => fmtTime(r.ts) },
+            { key: "round", label: "Round" },
+            { key: "attempt", label: "Att." },
+            { key: "source", label: "Source" },
+            { key: "probe", label: "Probe" },
+            { key: "cells", label: "Cells", align: "right", render: (r) => fmtNum(r.cells) },
+            { key: "ff", label: "FF", align: "right", render: (r) => fmtNum(r.ff) },
+            { key: "area_um2", label: "Area", align: "right", render: (r) => fmtNum(r.area_um2, 1) },
+            { key: "wns_ns", label: "WNS", align: "right", render: (r) => r.wns_ns != null ? fmtNum(r.wns_ns, 3) : "--" },
+            { key: "budget_ff", label: "FF budget", align: "right", render: (r) => fmtNum(r.budget_ff) },
+            { key: "ppa_ok", label: "OK", render: (r) => /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(PassFail, { value: r.ppa_ok == null ? null : !!r.ppa_ok }) },
+            { key: "reasons", label: "Reasons", render: (r) => r.reasons ? r.reasons.join("; ") : "" }
+          ], rows: synth.history, rowKey: (r) => r.id }) }),
+          /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(Collapsible2, { title: "Cell types (Yosys stat)", subtitle: `${synth.cell_types?.length || 0} types`, defaultOpen: false, children: /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(Table, { dense: true, columns: [
+            { key: "name", label: "Cell" },
+            { key: "count", label: "Count", align: "right", render: (c) => fmtNum(c.count) },
+            { key: "area", label: "Area (\xB5m\xB2)", align: "right", render: (c) => c.area != null ? fmtNum(c.area, 1) : "--" }
+          ], rows: [...synth.cell_types || []].sort((a, b) => (b.count || 0) - (a.count || 0)), rowKey: (c) => c.name }) }),
+          /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)("div", { className: "rv-actions", children: [
+            synth.report_rel_path && /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(LinkButton, { onClick: () => onOpenFile(synth.report_rel_path, { lang: "log", tail: true, title: "Yosys report" }), children: "Yosys report" }),
+            synth.script_rel_path && /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(LinkButton, { onClick: () => onOpenFile(synth.script_rel_path, { lang: "tcl" }), children: "synth script" }),
+            synth.netlist_rel_path && /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)(LinkButton, { onClick: () => onOpenFile(synth.netlist_rel_path, { lang: "verilog" }), children: [
+              "netlist (",
+              fmtBytes(synth.netlist_size),
+              ")"
+            ] }),
+            (synth.synth_logs || []).map((l) => /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(LinkButton, { onClick: () => onOpenFile(l.rel_path, { lang: "log", tail: true }), children: l.name }, l.rel_path))
+          ] })
+        ] })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)(Section, { id: "sec-timing", title: "Timing (pre-layout OpenSTA)", right: timing.wns_ns != null ? /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(PassFail, { value: timing.wns_ns >= 0, yes: "timing met", no: "timing violated" }) : /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(Badge, { tone: "muted", children: "not measured" }), children: [
+        /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)("div", { className: "rv-tiles", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(StatTile, { label: "Clock period (ns)", value: timing.period_ns != null ? fmtNum(timing.period_ns, 2) : "--", sub: timing.period_ns ? `${fmtNum(1e3 / timing.period_ns, 1)} MHz target` : "from SDC" }),
+          /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(StatTile, { label: "WNS (ns)", value: timing.wns_ns != null ? fmtNum(timing.wns_ns, 3) : "--", tone: timing.wns_ns != null ? timing.wns_ns >= 0 ? "ok" : "fail" : void 0, sub: "worst negative slack, max(base, fan-out buffered)" }),
+          /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(StatTile, { label: "TNS (ns)", value: timing.tns_ns != null ? fmtNum(timing.tns_ns, 3) : "n/a", sub: timing.tns_ns == null ? "not persisted by engine" : "total negative slack" }),
+          /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(StatTile, { label: "Fmax (MHz)", value: timing.fmax_mhz != null ? fmtNum(timing.fmax_mhz, 1) : "--", sub: "1000 / (period \u2212 WNS)" })
+        ] }),
+        timing.wns_check && /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(KV, { rows: [
+          ["Gate verdict", /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(PassFail, { value: timing.wns_check.passed })],
+          ["Measured WNS", `${timing.wns_check.actual} ns`],
+          ["Limit", `${timing.wns_check.limit} ns`],
+          ["Gross violation", timing.wns_check.gross],
+          ["Advisory only", timing.wns_check.advisory]
+        ] }),
+        timing.history?.filter((h) => h.wns_ns != null).length > 0 && /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)(import_jsx_runtime23.Fragment, { children: [
+          /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("h4", { children: "WNS per synthesis" }),
+          /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(Table, { dense: true, columns: [
+            { key: "ts", label: "Time", render: (r) => fmtTime(r.ts) },
+            { key: "round", label: "Round" },
+            { key: "attempt", label: "Att." },
+            { key: "wns_ns", label: "WNS (ns)", align: "right", render: (r) => /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("span", { className: r.wns_ns < 0 ? "rv-fail-text" : "", children: fmtNum(r.wns_ns, 4) }) },
+            { key: "cells", label: "Cells", align: "right", render: (r) => fmtNum(r.cells) },
+            { key: "ff", label: "FF", align: "right", render: (r) => fmtNum(r.ff) },
+            { key: "ppa_ok", label: "PPA", render: (r) => /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(PassFail, { value: r.ppa_ok == null ? null : !!r.ppa_ok }) }
+          ], rows: timing.history.filter((h) => h.wns_ns != null), rowKey: (r, i) => `${r.ts}-${i}` })
+        ] }),
+        timing.paths?.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)(import_jsx_runtime23.Fragment, { children: [
+          /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("h4", { children: "Worst paths (report_checks)" }),
+          /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(Table, { dense: true, columns: [
+            { key: "startpoint", label: "Startpoint" },
+            { key: "endpoint", label: "Endpoint" },
+            { key: "path_group", label: "Group" },
+            { key: "arrival_ns", label: "Arrival", align: "right" },
+            { key: "required_ns", label: "Required", align: "right" },
+            { key: "slack_ns", label: "Slack", align: "right", render: (p) => /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("span", { className: p.violated ? "rv-fail-text" : "", children: fmtNum(p.slack_ns, 3) }) },
+            { key: "violated", label: "Verdict", render: (p) => /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(PassFail, { value: !p.violated, yes: "met", no: "violated" }) }
+          ], rows: timing.paths, rowKey: (p, i) => i })
+        ] }) : timing.note && /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("p", { className: "rv-note", children: timing.note }),
+        timing.sdc_rel_path && /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(Collapsible2, { title: "Constraints (SDC)", defaultOpen: false, children: /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(CodeView, { relPath: timing.sdc_rel_path, lang: "tcl", maxHeight: "30vh" }) })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)(Section, { id: "sec-issues", title: "Issues, diagnoses & constraints", subtitle: `${issues.event_diagnoses?.length || 0} diagnoses in the event stream \xB7 ${issues.attempts?.length || 0} failed attempts on record \xB7 ${issues.constraints?.length || 0} constraints`, children: [
+        issues.event_diagnoses?.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)(import_jsx_runtime23.Fragment, { children: [
+          /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("h4", { children: "Diagnoses by round (pipeline events)" }),
+          /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("p", { className: "rv-note", children: "The state store keeps only the current round's diagnosis; earlier rounds survive as the (truncated) previews the engine logged at Diagnose Failure exit." }),
+          issues.event_diagnoses.map((d, i) => /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)("div", { className: "rv-issue", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)("div", { className: "rv-issue-head", children: [
+              /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)(Badge, { tone: "muted", children: [
+                "round ",
+                d.round
+              ] }),
+              d.phase && /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(Badge, { tone: "muted", children: d.phase }),
+              /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(Badge, { tone: "warn", children: d.category || "no category" }),
+              d.confidence != null && /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)(Badge, { tone: "muted", children: [
+                "confidence ",
+                Math.round(Number(d.confidence) * 100),
+                "%"
+              ] }),
+              d.needs_human != null && /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(Badge, { tone: d.needs_human ? "fail" : "ok", children: d.needs_human ? "needs human" : "auto-fixable" }),
+              d.repeat_count != null && /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)(Badge, { tone: "fail", children: [
+                "repeat \xD7",
+                d.repeat_count
+              ] }),
+              /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("span", { className: "rv-muted", children: fmtDateTime(d.ts) }),
+              d.call_ids?.map((cid) => onOpenCall && /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)(LinkButton, { onClick: () => onOpenCall(cid), children: [
+                "open diagnosis call #",
+                cid
+              ] }, cid))
+            ] }),
+            d.diagnosis_preview && /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("p", { className: "rv-prose", children: d.diagnosis_preview }),
+            d.suggested_fix && /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)(import_jsx_runtime23.Fragment, { children: [
+              /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("b", { children: "Suggested fix:" }),
+              /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("p", { className: "rv-prose", children: d.suggested_fix })
+            ] }),
+            !d.diagnosis_preview && !d.suggested_fix && /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("p", { className: "rv-muted", children: "Repeated failure signature: no new LLM diagnosis was produced." })
+          ] }, i))
+        ] }),
+        issues.route_decisions?.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)("p", { className: "rv-muted", children: [
+          "Route decisions: ",
+          issues.route_decisions.map((r, i) => /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)("span", { children: [
+            i ? " \xB7 " : "",
+            "round ",
+            r.round,
+            r.attempt != null ? ` attempt ${r.attempt}` : "",
+            " \u2192 ",
+            /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("b", { children: r.decision })
+          ] }, i))
+        ] }),
+        issues.attempts?.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)(import_jsx_runtime23.Fragment, { children: [
+          /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("h4", { children: "Failed attempts (attempt_history)" }),
+          issues.attempts.map((a, i) => /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)("div", { className: "rv-issue", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)("div", { className: "rv-issue-head", children: [
+              /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)(Badge, { tone: "fail", children: [
+                "attempt ",
+                a.attempt
+              ] }),
+              a.phase && /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(Badge, { tone: "muted", children: a.phase }),
+              a.category && /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(Badge, { tone: "warn", children: a.category }),
+              a.ts && /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("span", { className: "rv-muted", children: fmtDateTime(a.ts) })
+            ] }),
+            /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(LongText, { text: a.error || "", initialChars: 1500, searchable: false })
+          ] }, i))
+        ] }),
+        issues.diagnoses?.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)(import_jsx_runtime23.Fragment, { children: [
+          /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("h4", { children: "Diagnoses" }),
+          issues.diagnoses.map((d, i) => {
+            const dj = d.diagnosis || {};
+            return /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)("div", { className: "rv-issue", children: [
+              /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)("div", { className: "rv-issue-head", children: [
+                /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(Badge, { tone: "warn", children: d.category || dj.category }),
+                d.confidence != null && /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)(Badge, { tone: "muted", children: [
+                  "confidence ",
+                  Math.round(Number(d.confidence) * 100),
+                  "%"
+                ] }),
+                d.attempt != null && /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)(Badge, { tone: "muted", children: [
+                  "attempt ",
+                  d.attempt
+                ] }),
+                dj.needs_human != null && /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(Badge, { tone: dj.needs_human ? "fail" : "ok", children: dj.needs_human ? "needs human" : "auto-fixable" }),
+                d.ts && /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("span", { className: "rv-muted", children: fmtDateTime(d.ts) })
+              ] }),
+              dj.diagnosis && /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("p", { className: "rv-prose", children: dj.diagnosis }),
+              dj.suggested_fix && /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)(import_jsx_runtime23.Fragment, { children: [
+                /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("b", { children: "Suggested fix:" }),
+                /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("p", { className: "rv-prose", children: dj.suggested_fix })
+              ] }),
+              dj.constraints?.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("ul", { children: dj.constraints.map((c, j) => /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("li", { children: typeof c === "string" ? c : c.rule || JSON.stringify(c) }, j)) }),
+              /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(Collapsible2, { title: "Raw diagnosis JSON", defaultOpen: false, children: /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("pre", { className: "rv-pre-inline", children: JSON.stringify(dj, null, 2) }) })
+            ] }, i);
+          })
+        ] }),
+        issues.constraints?.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)(import_jsx_runtime23.Fragment, { children: [
+          /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("h4", { children: "Constraints" }),
+          /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(Table, { dense: true, columns: [
+            { key: "rule", label: "Rule" },
+            { key: "source", label: "Source" },
+            { key: "attempt", label: "Att." },
+            { key: "ts", label: "Time", render: (r) => r.ts ? fmtTime(r.ts) : "" }
+          ], rows: issues.constraints, rowKey: (r, i) => i })
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("h4", { children: "previous_error.txt (what the regenerating agent was told)" }),
+        issues.previous_error ? /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(LongText, { text: issues.previous_error, initialChars: 3e3 }) : /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("p", { className: "rv-muted", children: "empty \u2014 no pending error for the next attempt." }),
+        issues.conformance && /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)(import_jsx_runtime23.Fragment, { children: [
+          /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("h4", { children: "Contract conformance" }),
+          /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(KV, { rows: [
+            ["Verdict", issues.conformance.ran ? /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(PassFail, { value: issues.conformance.ok }) : "not run"],
+            ["Edges checked", issues.conformance.checked_edges],
+            ["Deviations", issues.conformance.deviations?.length ? issues.conformance.deviations : "none"],
+            ["Renames applied", Object.keys(issues.conformance.renames || {}).length ? issues.conformance.renames : null],
+            ["Feedback", issues.conformance.feedback || null],
+            ["Testbench changed", issues.conformance.tb?.changed]
+          ] })
+        ] }),
+        issues.carried_forward_defects?.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)(import_jsx_runtime23.Fragment, { children: [
+          /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("h4", { children: "Carried-forward defects" }),
+          issues.carried_forward_defects.map((d, i) => /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)("div", { className: "rv-issue", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)("div", { className: "rv-issue-head", children: [
+              /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(Badge, { tone: d.advisory ? "warn" : "fail", children: d.gate }),
+              /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(Badge, { tone: "muted", children: d.kind }),
+              d.advisory && /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(Badge, { tone: "muted", children: "advisory" })
+            ] }),
+            /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("p", { className: "rv-prose", children: d.detail || d.unmodeled })
+          ] }, i))
+        ] }),
+        issues.failure_signature && /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)("p", { className: "rv-muted", children: [
+          "Last failure signature: ",
+          /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("code", { children: issues.failure_signature.sig }),
+          " (seen ",
+          issues.failure_signature.run,
+          "\xD7)"
+        ] })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)(Section, { id: "sec-decisions", title: "Chip-lead decisions & interrupts", subtitle: `${decisions.length} decisions \xB7 ${interrupts.length} interrupts`, children: [
+        decisions.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("p", { className: "rv-muted", children: "No chip-lead decision references this block." }),
+        decisions.map((d) => /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)("div", { className: "rv-issue", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)("div", { className: "rv-issue-head", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(Badge, { tone: /approve|override|fix|retry/.test(d.action || "") ? "ok" : "warn", children: d.action }),
+            /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(Badge, { tone: "muted", children: d.type }),
+            /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)("span", { className: "rv-muted", children: [
+              "#",
+              d.decision_index,
+              " \xB7 ",
+              fmtDateTime(d.ts)
+            ] }),
+            d.call_id && onOpenCall && /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(LinkButton, { onClick: () => onOpenCall(d.call_id), children: "open chip-lead call" })
+          ] }),
+          /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("p", { className: "rv-prose", children: d.reasoning })
+        ] }, d.decision_index)),
+        interrupts.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(Table, { dense: true, columns: [
+          { key: "ts", label: "Time", render: (r) => fmtDateTime(r.ts) },
+          { key: "node", label: "Node / event", render: (r) => r.node || r.event },
+          { key: "round", label: "Round" },
+          { key: "action", label: "Resolution", render: (r) => r.action || r.detail?.reason || "" },
+          { key: "status", label: "Status", render: (r) => /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(StatusBadge, { status: r.status }) },
+          { key: "dur", label: "Waited", render: (r) => r.end_ts ? fmtDuration(r.end_ts - r.ts) : "" }
+        ], rows: interrupts, rowKey: (r, i) => i })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)(Section, { id: "sec-contracts", title: "Interface contracts", subtitle: `${contracts.length} edges`, children: [
+        /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(Table, { dense: true, columns: [
+          { key: "producer_block", label: "Producer", render: (c) => `${blockLabel(c.producer_block)}.${c.producer_port}` },
+          { key: "consumer_block", label: "Consumer", render: (c) => `${blockLabel(c.consumer_block)}.${c.consumer_port}` },
+          { key: "handshake_protocol", label: "Protocol" },
+          { key: "data_width_bits", label: "Width", align: "right" },
+          { key: "version", label: "v", align: "right" }
+        ], rows: contracts, rowKey: (c) => c.edge_id, empty: "No interface contracts recorded for this block." }),
+        meta.interfaces && /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(Collapsible2, { title: "Declared interfaces (block diagram)", defaultOpen: false, children: /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("pre", { className: "rv-pre-inline", children: JSON.stringify(meta.interfaces, null, 2) }) })
+      ] })
+    ] })
+  ] });
+}
+
+// src/webview/components/review/BlocksView.jsx
+var import_jsx_runtime24 = __toESM(require_jsx_runtime());
+function StatusDot({ status }) {
+  return /* @__PURE__ */ (0, import_jsx_runtime24.jsx)("span", { className: `rv-dot rv-dot-${statusTone(status)}`, title: status });
+}
+function BlockNavigator({ blocks, selected, onSelect, loading }) {
+  const groups = (0, import_react31.useMemo)(() => {
+    const g = /* @__PURE__ */ new Map();
+    for (const b of blocks || []) {
+      const t = b.tier ?? "?";
+      if (!g.has(t)) g.set(t, []);
+      g.get(t).push(b);
+    }
+    return [...g.entries()].sort((a, b) => (Number(a[0]) || 99) - (Number(b[0]) || 99));
+  }, [blocks]);
+  return /* @__PURE__ */ (0, import_jsx_runtime24.jsxs)("nav", { className: "rv-nav", "aria-label": "Blocks", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime24.jsxs)("div", { className: "rv-nav-head", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime24.jsx)("span", { children: "Blocks" }),
+      /* @__PURE__ */ (0, import_jsx_runtime24.jsxs)("span", { className: "rv-muted", children: [
+        blocks ? blocks.length : "",
+        loading ? " \u2026" : ""
+      ] })
+    ] }),
+    groups.map(([tier, list]) => /* @__PURE__ */ (0, import_jsx_runtime24.jsxs)("div", { className: "rv-nav-tier", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime24.jsxs)("div", { className: "rv-nav-tier-head", children: [
+        "Tier ",
+        tier,
+        " ",
+        /* @__PURE__ */ (0, import_jsx_runtime24.jsxs)("span", { className: "rv-muted", children: [
+          "\xB7 ",
+          list.length
+        ] })
+      ] }),
+      list.map((b) => /* @__PURE__ */ (0, import_jsx_runtime24.jsxs)(
+        "button",
+        {
+          type: "button",
+          className: `rv-nav-item ${selected === b.name ? "rv-nav-item-active" : ""}`,
+          onClick: () => onSelect(b.name),
+          title: b.description || b.name,
+          children: [
+            /* @__PURE__ */ (0, import_jsx_runtime24.jsx)(StatusDot, { status: b.status }),
+            /* @__PURE__ */ (0, import_jsx_runtime24.jsx)("span", { className: "rv-nav-name", children: blockLabel(b.name) }),
+            /* @__PURE__ */ (0, import_jsx_runtime24.jsxs)("span", { className: "rv-nav-meta", children: [
+              b.rounds > 1 ? `${b.rounds}r ` : "",
+              b.rtl_attempts > 1 ? `${b.rtl_attempts}a ` : "",
+              b.dv?.tests_total != null ? `${b.dv.tests_passed}/${b.dv.tests_total}` : ""
+            ] })
+          ]
+        },
+        b.name
+      ))
+    ] }, tier)),
+    blocks && blocks.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime24.jsx)(Empty, { children: "No blocks recorded yet." })
+  ] });
+}
+function BlocksView({ selectedBlock, onSelectBlock, subTab, onSubTab, onOpenFile, onOpenCall, initialCallId, isLive }) {
+  const { data, error, loading } = useJson(api.blocks(), { pollMs: isLive ? 1e4 : 0 });
+  const blocks = data?.blocks || null;
+  (0, import_react31.useEffect)(() => {
+    if (!selectedBlock && blocks && blocks.length) onSelectBlock(blocks[0].name);
+  }, [blocks, selectedBlock, onSelectBlock]);
+  const cur = blocks?.find((b) => b.name === selectedBlock) || null;
+  return /* @__PURE__ */ (0, import_jsx_runtime24.jsxs)("div", { className: "rv-blocks", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime24.jsx)(BlockNavigator, { blocks, selected: selectedBlock, onSelect: onSelectBlock, loading }),
+    /* @__PURE__ */ (0, import_jsx_runtime24.jsxs)("div", { className: "rv-blocks-main", children: [
+      error && /* @__PURE__ */ (0, import_jsx_runtime24.jsx)(ErrorBanner, { error }),
+      !blocks && !error && /* @__PURE__ */ (0, import_jsx_runtime24.jsx)(Spinner, { label: "Loading blocks\u2026" }),
+      blocks && !selectedBlock && /* @__PURE__ */ (0, import_jsx_runtime24.jsx)(Empty, { children: "Select a block on the left." }),
+      selectedBlock && /* @__PURE__ */ (0, import_jsx_runtime24.jsxs)(import_jsx_runtime24.Fragment, { children: [
+        /* @__PURE__ */ (0, import_jsx_runtime24.jsxs)("div", { className: "rv-block-head", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime24.jsxs)("div", { className: "rv-block-title", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime24.jsx)("h2", { children: blockLabel(selectedBlock) }),
+            cur && /* @__PURE__ */ (0, import_jsx_runtime24.jsxs)(Badge, { tone: "muted", children: [
+              "tier ",
+              cur.tier ?? "?"
+            ] }),
+            cur?.subsystem && /* @__PURE__ */ (0, import_jsx_runtime24.jsx)(Badge, { tone: "muted", children: cur.subsystem }),
+            cur && /* @__PURE__ */ (0, import_jsx_runtime24.jsx)(StatusBadge, { status: cur.status }),
+            cur?.open_node && /* @__PURE__ */ (0, import_jsx_runtime24.jsxs)(Badge, { tone: "running", children: [
+              "at ",
+              cur.open_node
+            ] })
+          ] }),
+          cur?.description && /* @__PURE__ */ (0, import_jsx_runtime24.jsx)("div", { className: "rv-block-desc", children: cur.description }),
+          cur && /* @__PURE__ */ (0, import_jsx_runtime24.jsxs)("div", { className: "rv-block-stats", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime24.jsxs)("span", { children: [
+              /* @__PURE__ */ (0, import_jsx_runtime24.jsx)("b", { children: cur.rounds }),
+              " round",
+              cur.rounds === 1 ? "" : "s"
+            ] }),
+            /* @__PURE__ */ (0, import_jsx_runtime24.jsxs)("span", { children: [
+              /* @__PURE__ */ (0, import_jsx_runtime24.jsx)("b", { children: cur.rtl_attempts }),
+              " RTL attempt",
+              cur.rtl_attempts === 1 ? "" : "s"
+            ] }),
+            /* @__PURE__ */ (0, import_jsx_runtime24.jsxs)("span", { children: [
+              /* @__PURE__ */ (0, import_jsx_runtime24.jsx)("b", { children: cur.llm_calls }),
+              " LLM calls \xB7 ",
+              fmtDuration(cur.llm_time_s)
+            ] }),
+            cur.dv?.tests_total != null && /* @__PURE__ */ (0, import_jsx_runtime24.jsxs)("span", { children: [
+              "DV ",
+              /* @__PURE__ */ (0, import_jsx_runtime24.jsxs)("b", { children: [
+                cur.dv.tests_passed,
+                "/",
+                cur.dv.tests_total
+              ] })
+            ] }),
+            cur.coverage_pct != null && /* @__PURE__ */ (0, import_jsx_runtime24.jsxs)("span", { children: [
+              "cov ",
+              /* @__PURE__ */ (0, import_jsx_runtime24.jsxs)("b", { children: [
+                cur.coverage_pct,
+                "%"
+              ] })
+            ] }),
+            cur.cells != null && /* @__PURE__ */ (0, import_jsx_runtime24.jsxs)("span", { children: [
+              /* @__PURE__ */ (0, import_jsx_runtime24.jsx)("b", { children: fmtNum(cur.cells) }),
+              " cells \xB7 ",
+              /* @__PURE__ */ (0, import_jsx_runtime24.jsx)("b", { children: fmtNum(cur.ff) }),
+              " FF \xB7 ",
+              /* @__PURE__ */ (0, import_jsx_runtime24.jsx)("b", { children: fmtNum(cur.area_um2) }),
+              " \xB5m\xB2"
+            ] }),
+            cur.wns_ns != null && /* @__PURE__ */ (0, import_jsx_runtime24.jsxs)("span", { children: [
+              "WNS ",
+              /* @__PURE__ */ (0, import_jsx_runtime24.jsxs)("b", { className: cur.wns_ns < 0 ? "rv-fail-text" : "", children: [
+                fmtNum(cur.wns_ns, 3),
+                " ns"
+              ] })
+            ] })
+          ] }),
+          /* @__PURE__ */ (0, import_jsx_runtime24.jsx)(
+            Tabs,
+            {
+              tabs: [
+                { key: "trajectory", label: "Trajectory", title: "What the LLM did, node by node" },
+                { key: "design", label: "Design & results", title: "Spec, RTL, testbench, sim, synthesis, timing, issues" }
+              ],
+              active: subTab,
+              onChange: onSubTab
+            }
+          )
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime24.jsx)("div", { className: "rv-blocks-content", children: subTab === "trajectory" ? /* @__PURE__ */ (0, import_jsx_runtime24.jsx)(BlockTrajectory, { block: selectedBlock, onOpenFile, onOpenBlock: (b, tab) => {
+          onSelectBlock(b);
+          if (tab) onSubTab(tab);
+        }, initialCallId, isLive }) : /* @__PURE__ */ (0, import_jsx_runtime24.jsx)(BlockDesign, { block: selectedBlock, onOpenFile, onOpenCall, isLive }) })
+      ] })
+    ] })
+  ] });
+}
+
+// src/webview/App.jsx
+var import_jsx_runtime25 = __toESM(require_jsx_runtime());
+var ErrorBoundary = class extends import_react32.Component {
   constructor(props) {
     super(props);
     this.state = { hasError: false, error: null };
@@ -129732,15 +131414,15 @@ var ErrorBoundary = class extends import_react23.Component {
   }
   render() {
     if (this.state.hasError) {
-      return /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("div", { style: {
+      return /* @__PURE__ */ (0, import_jsx_runtime25.jsxs)("div", { style: {
         padding: "2rem",
         textAlign: "center",
         color: "#e0e0e0",
         fontFamily: "system-ui, sans-serif"
       }, children: [
-        /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("h2", { style: { color: "#ff6b6b" }, children: "Something went wrong" }),
-        /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("p", { style: { color: "#aaa", maxWidth: 500, margin: "1rem auto" }, children: this.state.error?.message || "An unexpected error occurred." }),
-        /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(
+        /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("h2", { style: { color: "#ff6b6b" }, children: "Something went wrong" }),
+        /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("p", { style: { color: "#aaa", maxWidth: 500, margin: "1rem auto" }, children: this.state.error?.message || "An unexpected error occurred." }),
+        /* @__PURE__ */ (0, import_jsx_runtime25.jsx)(
           "button",
           {
             onClick: () => this.setState({ hasError: false, error: null }),
@@ -129764,31 +131446,30 @@ var ErrorBoundary = class extends import_react23.Component {
 var vscode = typeof acquireVsCodeApi === "function" ? acquireVsCodeApi() : null;
 var isStandalone = !vscode;
 function useTheme() {
-  const [theme, setThemeState] = (0, import_react23.useState)(() => {
+  const [theme, setThemeState] = (0, import_react32.useState)(() => {
     try {
       const stored = localStorage.getItem("coresmith-theme");
-      if (stored === "dark" || stored === "light")
-        return stored;
+      if (stored === "dark" || stored === "light") return stored;
     } catch {
     }
     return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
   });
-  (0, import_react23.useEffect)(() => {
+  (0, import_react32.useEffect)(() => {
     document.documentElement.setAttribute("data-theme", theme);
     try {
       localStorage.setItem("coresmith-theme", theme);
     } catch {
     }
   }, [theme]);
-  const toggle = (0, import_react23.useCallback)(() => {
+  const toggle = (0, import_react32.useCallback)(() => {
     setThemeState((prev) => prev === "dark" ? "light" : "dark");
   }, []);
   return [theme, toggle];
 }
 function useStableState(initial) {
-  const [value, setValue] = (0, import_react23.useState)(initial);
-  const jsonRef = (0, import_react23.useRef)(JSON.stringify(initial));
-  const setStable = (0, import_react23.useCallback)((newVal) => {
+  const [value, setValue] = (0, import_react32.useState)(initial);
+  const jsonRef = (0, import_react32.useRef)(JSON.stringify(initial));
+  const setStable = (0, import_react32.useCallback)((newVal) => {
     const j = JSON.stringify(newVal);
     if (j !== jsonRef.current) {
       jsonRef.current = j;
@@ -129799,16 +131480,14 @@ function useStableState(initial) {
 }
 async function fetchGraph(graphName) {
   const res = await fetch(`/api/graph/${graphName}`);
-  if (!res.ok)
-    throw new Error(`Graph fetch failed: ${res.status}`);
+  if (!res.ok) throw new Error(`Graph fetch failed: ${res.status}`);
   return res.json();
 }
 async function fetchStatus(graphName) {
   try {
     const url = graphName ? `/api/status?graph=${graphName}` : "/api/status";
     const res = await fetch(url);
-    if (!res.ok)
-      return {};
+    if (!res.ok) return {};
     return res.json();
   } catch {
     return {};
@@ -129818,8 +131497,7 @@ async function fetchTimeline(graphName) {
   try {
     const url = graphName ? `/api/timeline?graph=${graphName}` : "/api/timeline";
     const res = await fetch(url);
-    if (!res.ok)
-      return null;
+    if (!res.ok) return null;
     return res.json();
   } catch {
     return null;
@@ -129828,8 +131506,7 @@ async function fetchTimeline(graphName) {
 async function fetchTracesHttp(nodeId) {
   try {
     const res = await fetch(`/api/traces/${encodeURIComponent(nodeId)}`);
-    if (!res.ok)
-      return [];
+    if (!res.ok) return [];
     return res.json();
   } catch {
     return [];
@@ -129838,18 +131515,17 @@ async function fetchTracesHttp(nodeId) {
 async function fetchLiveCallsHttp(nodeId) {
   try {
     const res = await fetch(`/api/live_calls/${encodeURIComponent(nodeId)}`);
-    if (!res.ok)
-      return [];
+    if (!res.ok) return [];
     return res.json();
   } catch {
     return [];
   }
 }
-async function fetchNodeTrajectoryHttp(nodeId) {
+async function fetchNodeTrajectoryHttp(nodeId, block) {
   try {
-    const res = await fetch(`/api/node_trajectory/${encodeURIComponent(nodeId)}`);
-    if (!res.ok)
-      return [];
+    const qs = block ? `?block=${encodeURIComponent(block)}` : "";
+    const res = await fetch(`/api/node_trajectory/${encodeURIComponent(nodeId)}${qs}`);
+    if (!res.ok) return [];
     return res.json();
   } catch {
     return [];
@@ -129858,8 +131534,7 @@ async function fetchNodeTrajectoryHttp(nodeId) {
 async function fetchNodeDescriptions() {
   try {
     const res = await fetch("/api/node_descriptions");
-    if (!res.ok)
-      return {};
+    if (!res.ok) return {};
     return res.json();
   } catch {
     return {};
@@ -129868,8 +131543,7 @@ async function fetchNodeDescriptions() {
 async function fetchSummaryHttp(stage) {
   try {
     const res = await fetch(`/api/summary/${stage}`);
-    if (!res.ok)
-      return { stage, content: "", updated: null };
+    if (!res.ok) return { stage, content: "", updated: null };
     return res.json();
   } catch {
     return { stage, content: "", updated: null };
@@ -129878,8 +131552,7 @@ async function fetchSummaryHttp(stage) {
 async function fetchSummaryCardsHttp(stage) {
   try {
     const res = await fetch(`/api/summary_cards/${stage}`);
-    if (!res.ok)
-      return null;
+    if (!res.ok) return null;
     return res.json();
   } catch {
     return null;
@@ -129888,68 +131561,67 @@ async function fetchSummaryCardsHttp(stage) {
 async function fetchBlockDiagramViz() {
   try {
     const res = await fetch("/api/block_diagram_viz");
-    if (!res.ok)
-      return null;
+    if (!res.ok) return null;
     const data = await res.json();
-    if (!data || !data.architecture)
-      return null;
+    if (!data || !data.architecture) return null;
     return data;
   } catch {
     return null;
   }
 }
 function getSummaryStage(viewMode, graphName) {
-  if (graphName === "timeline")
-    return "frontend";
-  if (graphName === "block_diagram")
-    return "architecture";
+  if (graphName === "timeline") return "frontend";
+  if (graphName === "block_diagram") return "architecture";
+  if (graphName === "overview" || graphName === "blocks" || graphName === "collateral") return "frontend";
   return graphName || "frontend";
 }
+var FULL_WIDTH_VIEWS = /* @__PURE__ */ new Set(["collateral", "overview", "blocks"]);
 function App() {
   const [theme, toggleTheme] = useTheme();
-  const [graphData, setGraphData] = (0, import_react23.useState)(null);
-  const [graphName, setGraphName] = (0, import_react23.useState)("frontend");
-  const [viewMode, setViewMode] = (0, import_react23.useState)("graph");
-  const [selectedNode, setSelectedNode] = (0, import_react23.useState)(null);
-  const [blockDiagramData, setBlockDiagramData] = (0, import_react23.useState)(null);
-  const [modalOpen, setModalOpen] = (0, import_react23.useState)(false);
+  const [graphData, setGraphData] = (0, import_react32.useState)(null);
+  const [graphName, setGraphName] = (0, import_react32.useState)(isStandalone ? "overview" : "frontend");
+  const [viewMode, setViewMode] = (0, import_react32.useState)(isStandalone ? "overview" : "graph");
+  const [selectedBlock, setSelectedBlock] = (0, import_react32.useState)(null);
+  const [blocksSubTab, setBlocksSubTab] = (0, import_react32.useState)("trajectory");
+  const [pendingCallId, setPendingCallId] = (0, import_react32.useState)(null);
+  const [drawer, setDrawer] = (0, import_react32.useState)(null);
+  const [selectedNode, setSelectedNode] = (0, import_react32.useState)(null);
+  const [blockDiagramData, setBlockDiagramData] = (0, import_react32.useState)(null);
+  const [modalOpen, setModalOpen] = (0, import_react32.useState)(false);
   const [executionStatus, setExecutionStatus] = useStableState({});
   const [timelineData, setTimelineData] = useStableState(null);
-  const [traceData, setTraceData] = (0, import_react23.useState)(null);
-  const [traceNodeId, setTraceNodeId] = (0, import_react23.useState)(null);
-  const viewModeRef = (0, import_react23.useRef)(viewMode);
-  const graphNameRef = (0, import_react23.useRef)(graphName);
-  const [showSummary, setShowSummary] = (0, import_react23.useState)(true);
-  const [summaryContent, setSummaryContent] = (0, import_react23.useState)("");
-  const [summaryStage, setSummaryStage] = (0, import_react23.useState)("frontend");
-  const [summaryUpdated, setSummaryUpdated] = (0, import_react23.useState)(null);
+  const [traceData, setTraceData] = (0, import_react32.useState)(null);
+  const [traceNodeId, setTraceNodeId] = (0, import_react32.useState)(null);
+  const viewModeRef = (0, import_react32.useRef)(viewMode);
+  const graphNameRef = (0, import_react32.useRef)(graphName);
+  const [showSummary, setShowSummary] = (0, import_react32.useState)(true);
+  const [summaryContent, setSummaryContent] = (0, import_react32.useState)("");
+  const [summaryStage, setSummaryStage] = (0, import_react32.useState)("frontend");
+  const [summaryUpdated, setSummaryUpdated] = (0, import_react32.useState)(null);
   const [summaryCardData, setSummaryCardData] = useStableState(null);
-  const [summaryWidth, setSummaryWidth] = (0, import_react23.useState)(360);
-  const [detailWidth, setDetailWidth] = (0, import_react23.useState)(420);
-  const draggingRef = (0, import_react23.useRef)(null);
-  const [nodeDescriptions, setNodeDescriptions] = (0, import_react23.useState)({});
-  (0, import_react23.useEffect)(() => {
-    if (!isStandalone)
-      return;
+  const [summaryWidth, setSummaryWidth] = (0, import_react32.useState)(360);
+  const [detailWidth, setDetailWidth] = (0, import_react32.useState)(420);
+  const draggingRef = (0, import_react32.useRef)(null);
+  const [nodeDescriptions, setNodeDescriptions] = (0, import_react32.useState)({});
+  (0, import_react32.useEffect)(() => {
+    if (!isStandalone) return;
     fetchNodeDescriptions().then(setNodeDescriptions);
   }, []);
-  const [serverConfig, setServerConfig] = (0, import_react23.useState)({ observer_enabled: false });
-  (0, import_react23.useEffect)(() => {
-    if (!isStandalone)
-      return;
+  const [serverConfig, setServerConfig] = (0, import_react32.useState)({ observer_enabled: false });
+  (0, import_react32.useEffect)(() => {
+    if (!isStandalone) return;
     fetch("/api/server_config").then((r) => r.ok ? r.json() : null).then((c) => {
-      if (c)
-        setServerConfig(c);
+      if (c) setServerConfig(c);
     }).catch(() => {
     });
   }, []);
-  (0, import_react23.useEffect)(() => {
+  (0, import_react32.useEffect)(() => {
     viewModeRef.current = viewMode;
   }, [viewMode]);
-  (0, import_react23.useEffect)(() => {
+  (0, import_react32.useEffect)(() => {
     graphNameRef.current = graphName;
   }, [graphName]);
-  (0, import_react23.useEffect)(() => {
+  (0, import_react32.useEffect)(() => {
     const newStage = getSummaryStage(viewMode, graphName);
     setSummaryStage(newStage);
     if (isStandalone) {
@@ -129958,14 +131630,13 @@ function App() {
         setSummaryUpdated(data.updated);
       });
       fetchSummaryCardsHttp(newStage).then((data) => {
-        if (data)
-          setSummaryCardData(data);
+        if (data) setSummaryCardData(data);
       });
     } else {
       vscode.postMessage({ type: "requestSummary", stage: newStage });
     }
   }, [viewMode, graphName]);
-  const loadGraph = (0, import_react23.useCallback)((name) => {
+  const loadGraph = (0, import_react32.useCallback)((name) => {
     if (isStandalone) {
       fetchGraph(name).then((data) => {
         setGraphData(data);
@@ -129975,20 +131646,18 @@ function App() {
       vscode.postMessage({ type: "requestGraph", graphName: name });
     }
   }, []);
-  (0, import_react23.useEffect)(() => {
+  (0, import_react32.useEffect)(() => {
     if (isStandalone) {
-      loadGraph("frontend");
+      fetchGraph("frontend").then(setGraphData).catch((err) => console.error("Graph load error:", err));
       const interval2 = setInterval(() => {
-        const statusGraph = graphNameRef.current === "timeline" ? "frontend" : graphNameRef.current;
+        const statusGraph = ["timeline", "overview", "blocks", "collateral", "block_diagram"].includes(graphNameRef.current) ? "frontend" : graphNameRef.current;
         fetchStatus(statusGraph).then(setExecutionStatus);
         fetchTimeline("").then((data) => {
-          if (data)
-            setTimelineData(data);
+          if (data) setTimelineData(data);
         });
         if (viewModeRef.current === "block_diagram") {
           fetchBlockDiagramViz().then((data) => {
-            if (data)
-              setBlockDiagramData(data);
+            if (data) setBlockDiagramData(data);
           });
         }
         const stage = getSummaryStage(viewModeRef.current, graphNameRef.current);
@@ -130005,8 +131674,7 @@ function App() {
         }
         if (stage === "architecture" || stage === "frontend" || stage === "backend") {
           fetchSummaryCardsHttp(stage).then((data) => {
-            if (data)
-              setSummaryCardData(data);
+            if (data) setSummaryCardData(data);
           });
         }
       }, 3e3);
@@ -130016,8 +131684,7 @@ function App() {
         const msg = event.data;
         if (msg.type === "graphUpdate") {
           setGraphData(msg.data);
-          if (msg.graphName)
-            setGraphName(msg.graphName);
+          if (msg.graphName) setGraphName(msg.graphName);
         }
         if (msg.type === "executionUpdate") {
           setExecutionStatus(msg.status);
@@ -130031,8 +131698,7 @@ function App() {
         if (msg.type === "summaryUpdate") {
           setSummaryContent(msg.content || "");
           setSummaryUpdated(msg.updated);
-          if (msg.stage)
-            setSummaryStage(msg.stage);
+          if (msg.stage) setSummaryStage(msg.stage);
         }
       };
       window.addEventListener("message", handler);
@@ -130041,7 +131707,7 @@ function App() {
       return () => window.removeEventListener("message", handler);
     }
   }, [loadGraph]);
-  const handleDragStart = (0, import_react23.useCallback)((panel) => (e) => {
+  const handleDragStart = (0, import_react32.useCallback)((panel) => (e) => {
     e.preventDefault();
     draggingRef.current = panel;
     document.body.style.cursor = "col-resize";
@@ -130065,7 +131731,7 @@ function App() {
     window.addEventListener("mousemove", onMouseMove);
     window.addEventListener("mouseup", onMouseUp);
   }, []);
-  const statusBarInfo = (0, import_react23.useMemo)(() => {
+  const statusBarInfo = (0, import_react32.useMemo)(() => {
     const status = executionStatus || {};
     let pipelineStatus = status.status || status.pipeline_status || "idle";
     const currentBlock = status.current_block || status.block || null;
@@ -130082,8 +131748,8 @@ function App() {
     }
     return { pipelineStatus, currentBlock, completedCount, inFlight, waitingForHuman, remaining, total };
   }, [graphName, executionStatus, timelineData]);
-  const traceNodeIdRef = (0, import_react23.useRef)(null);
-  const handleRequestTraces = (0, import_react23.useCallback)((nodeId) => {
+  const traceNodeIdRef = (0, import_react32.useRef)(null);
+  const handleRequestTraces = (0, import_react32.useCallback)((nodeId, block) => {
     const isRefresh = nodeId === traceNodeIdRef.current;
     traceNodeIdRef.current = nodeId;
     setTraceNodeId(nodeId);
@@ -130092,7 +131758,7 @@ function App() {
     }
     if (isStandalone) {
       Promise.all([
-        fetchNodeTrajectoryHttp(nodeId),
+        fetchNodeTrajectoryHttp(nodeId, block),
         fetchTracesHttp(nodeId),
         fetchLiveCallsHttp(nodeId)
       ]).then(([trajectory, traces, live]) => {
@@ -130121,19 +131787,21 @@ function App() {
       vscode.postMessage({ type: "requestTraces", nodeId });
     }
   }, []);
-  const handleNodeCogwheel = (0, import_react23.useCallback)((node) => {
+  const handleNodeCogwheel = (0, import_react32.useCallback)((node) => {
     setSelectedNode(node);
     setModalOpen(true);
   }, []);
-  const handleTabSwitch = (0, import_react23.useCallback)((tab) => {
+  const handleTabSwitch = (0, import_react32.useCallback)((tab) => {
     setModalOpen(false);
-    if (tab === "timeline") {
+    if (tab === "overview" || tab === "blocks") {
+      setViewMode(tab);
+      setGraphName(tab);
+    } else if (tab === "timeline") {
       setViewMode("timeline");
       setGraphName("timeline");
       if (isStandalone) {
         fetchTimeline("").then((data) => {
-          if (data)
-            setTimelineData(data);
+          if (data) setTimelineData(data);
         });
       } else {
         vscode.postMessage({ type: "requestTimeline" });
@@ -130155,11 +131823,49 @@ function App() {
       loadGraph(tab);
     }
   }, [loadGraph]);
-  return /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("div", { className: "app-shell", children: [
-    /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("div", { className: "app-header", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("span", { className: "app-title", children: "Coresmith" }),
-      /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("div", { className: "graph-selector", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(
+  const handleOpenBlock = (0, import_react32.useCallback)((block, subTab, callId) => {
+    setSelectedBlock(block);
+    if (subTab) setBlocksSubTab(subTab);
+    setPendingCallId(callId || null);
+    setDrawer(null);
+    setModalOpen(false);
+    setViewMode("blocks");
+    setGraphName("blocks");
+  }, []);
+  const handleOpenCall = (0, import_react32.useCallback)((callId) => {
+    setDrawer({ kind: "call", callId });
+  }, []);
+  const handleOpenFile = (0, import_react32.useCallback)((relPath, opts = {}) => {
+    setDrawer({ kind: "file", relPath, ...opts });
+  }, []);
+  const closeDrawer = (0, import_react32.useCallback)(() => setDrawer(null), []);
+  const isLiveRun = !!(timelineData && !timelineData.is_historical);
+  return /* @__PURE__ */ (0, import_jsx_runtime25.jsxs)("div", { className: "app-shell", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime25.jsxs)("div", { className: "app-header", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("span", { className: "app-title", children: "Coresmith" }),
+      /* @__PURE__ */ (0, import_jsx_runtime25.jsxs)("div", { className: "graph-selector", children: [
+        isStandalone && /* @__PURE__ */ (0, import_jsx_runtime25.jsxs)(import_jsx_runtime25.Fragment, { children: [
+          /* @__PURE__ */ (0, import_jsx_runtime25.jsx)(
+            "button",
+            {
+              className: graphName === "overview" ? "active" : "",
+              onClick: () => handleTabSwitch("overview"),
+              title: "Run-level dashboard",
+              children: "Overview"
+            }
+          ),
+          /* @__PURE__ */ (0, import_jsx_runtime25.jsx)(
+            "button",
+            {
+              className: graphName === "blocks" ? "active" : "",
+              onClick: () => handleTabSwitch("blocks"),
+              title: "Per-block trajectory and design review",
+              children: "Blocks"
+            }
+          ),
+          /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("span", { className: "selector-divider" })
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime25.jsx)(
           "button",
           {
             className: graphName === "architecture" ? "active" : "",
@@ -130167,7 +131873,7 @@ function App() {
             children: "Architecture"
           }
         ),
-        /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(
+        /* @__PURE__ */ (0, import_jsx_runtime25.jsx)(
           "button",
           {
             className: graphName === "frontend" ? "active" : "",
@@ -130175,7 +131881,7 @@ function App() {
             children: "Frontend"
           }
         ),
-        /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(
+        /* @__PURE__ */ (0, import_jsx_runtime25.jsx)(
           "button",
           {
             className: graphName === "backend" ? "active" : "",
@@ -130183,7 +131889,7 @@ function App() {
             children: "Backend"
           }
         ),
-        /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(
+        /* @__PURE__ */ (0, import_jsx_runtime25.jsx)(
           "button",
           {
             className: graphName === "block_diagram" ? "active" : "",
@@ -130191,7 +131897,7 @@ function App() {
             children: "Block Diagram"
           }
         ),
-        /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(
+        /* @__PURE__ */ (0, import_jsx_runtime25.jsx)(
           "button",
           {
             className: graphName === "timeline" ? "active" : "",
@@ -130199,7 +131905,7 @@ function App() {
             children: "Timeline"
           }
         ),
-        /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(
+        /* @__PURE__ */ (0, import_jsx_runtime25.jsx)(
           "button",
           {
             className: graphName === "collateral" ? "active" : "",
@@ -130207,8 +131913,8 @@ function App() {
             children: "Collateral"
           }
         ),
-        /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("span", { className: "selector-divider" }),
-        /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(
+        /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("span", { className: "selector-divider" }),
+        /* @__PURE__ */ (0, import_jsx_runtime25.jsx)(
           "button",
           {
             className: `summary-toggle-btn ${showSummary ? "active" : ""}`,
@@ -130218,8 +131924,8 @@ function App() {
           }
         )
       ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(StatusBar, { info: statusBarInfo }),
-      /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(
+      /* @__PURE__ */ (0, import_jsx_runtime25.jsx)(StatusBar, { info: statusBarInfo }),
+      /* @__PURE__ */ (0, import_jsx_runtime25.jsx)(
         "button",
         {
           className: "theme-toggle",
@@ -130229,9 +131935,9 @@ function App() {
         }
       )
     ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("div", { className: "app-body", children: [
-      showSummary && viewMode !== "collateral" && /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)(import_jsx_runtime17.Fragment, { children: [
-        /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(
+    /* @__PURE__ */ (0, import_jsx_runtime25.jsxs)("div", { className: "app-body", children: [
+      showSummary && !FULL_WIDTH_VIEWS.has(viewMode) && /* @__PURE__ */ (0, import_jsx_runtime25.jsxs)(import_jsx_runtime25.Fragment, { children: [
+        /* @__PURE__ */ (0, import_jsx_runtime25.jsx)(
           SummaryPanel_default,
           {
             stage: summaryStage,
@@ -130242,7 +131948,7 @@ function App() {
             observerEnabled: serverConfig.observer_enabled
           }
         ),
-        /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(
+        /* @__PURE__ */ (0, import_jsx_runtime25.jsx)(
           "div",
           {
             className: "resize-handle resize-handle-right",
@@ -130250,7 +131956,19 @@ function App() {
           }
         )
       ] }),
-      viewMode === "timeline" ? /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { className: "canvas-container", children: /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(
+      viewMode === "overview" ? /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("div", { className: "canvas-container", children: /* @__PURE__ */ (0, import_jsx_runtime25.jsx)(RunOverview, { onOpenBlock: handleOpenBlock, onOpenCall: handleOpenCall, onOpenFile: handleOpenFile }) }) : viewMode === "blocks" ? /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("div", { className: "canvas-container", children: /* @__PURE__ */ (0, import_jsx_runtime25.jsx)(
+        BlocksView,
+        {
+          selectedBlock,
+          onSelectBlock: setSelectedBlock,
+          subTab: blocksSubTab,
+          onSubTab: setBlocksSubTab,
+          onOpenFile: handleOpenFile,
+          onOpenCall: handleOpenCall,
+          initialCallId: pendingCallId,
+          isLive: isLiveRun
+        }
+      ) }) : viewMode === "timeline" ? /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("div", { className: "canvas-container", children: /* @__PURE__ */ (0, import_jsx_runtime25.jsx)(
         GanttTimeline,
         {
           timelineData,
@@ -130259,9 +131977,11 @@ function App() {
           graphName,
           detailWidth,
           onDetailResize: handleDragStart("detail"),
-          nodeDescriptions
+          nodeDescriptions,
+          onOpenBlock: isStandalone ? handleOpenBlock : void 0,
+          onOpenCall: isStandalone ? handleOpenCall : void 0
         }
-      ) }) : viewMode === "block_diagram" ? /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { className: "canvas-container", children: /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(ReactFlowProvider, { children: /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(BlockDiagramCanvas, { diagramData: blockDiagramData }) }) }) : viewMode === "collateral" ? /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { className: "canvas-container", children: /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(CollateralViewer, {}) }) : /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { className: "canvas-container", children: /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(ReactFlowProvider, { children: graphData ? /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(
+      ) }) : viewMode === "block_diagram" ? /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("div", { className: "canvas-container", children: /* @__PURE__ */ (0, import_jsx_runtime25.jsx)(ReactFlowProvider, { children: /* @__PURE__ */ (0, import_jsx_runtime25.jsx)(BlockDiagramCanvas, { diagramData: blockDiagramData }) }) }) : viewMode === "collateral" ? /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("div", { className: "canvas-container", children: /* @__PURE__ */ (0, import_jsx_runtime25.jsx)(CollateralViewer, {}) }) : /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("div", { className: "canvas-container", children: /* @__PURE__ */ (0, import_jsx_runtime25.jsx)(ReactFlowProvider, { children: graphData ? /* @__PURE__ */ (0, import_jsx_runtime25.jsx)(
         GraphCanvas,
         {
           graphData,
@@ -130271,22 +131991,26 @@ function App() {
           traceData,
           onRequestTraces: handleRequestTraces,
           detailWidth,
-          onDetailResize: handleDragStart("detail")
+          onDetailResize: handleDragStart("detail"),
+          onOpenBlock: isStandalone ? handleOpenBlock : void 0,
+          onOpenCall: isStandalone ? handleOpenCall : void 0
         }
-      ) : /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { className: "loading", children: "Loading graph..." }) }) })
+      ) : /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("div", { className: "loading", children: "Loading graph..." }) }) })
     ] }),
-    modalOpen && selectedNode && /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(
+    modalOpen && selectedNode && /* @__PURE__ */ (0, import_jsx_runtime25.jsx)(
       NodePromptModal,
       {
         node: selectedNode,
         onClose: () => setModalOpen(false)
       }
-    )
+    ),
+    drawer && drawer.kind === "call" && /* @__PURE__ */ (0, import_jsx_runtime25.jsx)(Drawer, { title: `LLM call #${drawer.callId}`, onClose: closeDrawer, width: "min(1100px, 80vw)", children: /* @__PURE__ */ (0, import_jsx_runtime25.jsx)(LLMCallViewer, { callId: drawer.callId, onOpenFile: handleOpenFile, onOpenBlock: handleOpenBlock }) }),
+    drawer && drawer.kind === "file" && /* @__PURE__ */ (0, import_jsx_runtime25.jsx)(Drawer, { title: drawer.title || drawer.relPath, onClose: closeDrawer, children: /* @__PURE__ */ (0, import_jsx_runtime25.jsx)(CodeView, { relPath: drawer.relPath, lang: drawer.lang, tail: !!drawer.tail, title: drawer.title }) })
   ] });
 }
 var root2 = (0, import_client.createRoot)(document.getElementById("root"));
 root2.render(
-  /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(ErrorBoundary, { children: /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(App, {}) })
+  /* @__PURE__ */ (0, import_jsx_runtime25.jsx)(ErrorBoundary, { children: /* @__PURE__ */ (0, import_jsx_runtime25.jsx)(App, {}) })
 );
 /*! Bundled license information:
 

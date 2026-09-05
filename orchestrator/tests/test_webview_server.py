@@ -657,7 +657,8 @@ class TestLiveLLMStreaming:
     # --- 2.6 Stale done streaming file cleaned up ---
 
     def test_stale_done_streaming_file_cleaned_up(self, tmp_path, serve_module):
-        """A done streaming file older than 120s should be deleted and not returned."""
+        """A done streaming file older than 120s is ignored but NEVER deleted:
+        the webview is read-only and the engine owns live_streams/."""
         t0 = 1700000000.0
         events = [
             {"ts": t0, "event": "graph_node_enter", "node": "Generate RTL",
@@ -679,10 +680,15 @@ class TestLiveLLMStreaming:
         stream_file = tmp_path / ".coresmith" / "live_streams" / "11111.json"
         assert stream_file.exists()
 
-        serve_module.get_live_calls("Generate RTL")
+        result = serve_module.get_live_calls("Generate RTL")
 
-        # File should have been deleted
-        assert not stream_file.exists()
+        # Not returned ...
+        assert all(
+            c["span_id"] != "stream_11111"
+            for g in result for c in g["spans"][0]["children"]
+        )
+        # ... and still on disk: the viewer must not write to the run directory.
+        assert stream_file.exists()
 
     # --- 2.7 Multiple blocks grouped correctly ---
 

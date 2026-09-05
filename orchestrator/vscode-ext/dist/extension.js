@@ -216,8 +216,7 @@ print(json.dumps(status))
     `python3 -c "${script.replace(/"/g, '\\"')}"`,
     { cwd: root, timeout: 5e3 },
     (err, stdout) => {
-      if (err || !stdout.trim())
-        return;
+      if (err || !stdout.trim()) return;
       try {
         const status = JSON.parse(stdout);
         panel?.webview.postMessage({ type: "executionUpdate", status });
