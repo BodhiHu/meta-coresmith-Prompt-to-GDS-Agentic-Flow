@@ -1,0 +1,484 @@
+"""WP-7: targeted integration-review revise + single-context uArch stage.
+
+Before: a chip-level ``revise`` re-fanned out the WHOLE tier from spec
+generation, the reviewer's edits (made on ``arch/uarch_specs_review/`` copies)
+were never adopted, and the chip lead's feedback never reached the spec
+author. The h264 Arm E run spent 6 tier-3 rounds in that loop.
+
+After: ``integration_review_node`` turns a revise into ``revise_blocks``
+(``{block: reuse_spec}``): reviewer-edited specs are adopted as canonical and
+those blocks implement them as-is, chip-lead-named blocks re-spec with the
+findings as gate feedback, everything else keeps its passing result.
+``CORESMITH_UARCH_SINGLE_CONTEXT=1`` authors all specs in one session at the
+first tier entry instead of one author per block.
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from orchestrator.langgraph import pipeline_graph, pipeline_helpers
+
+
+def _seed_project(root: Path, names: list[str], tier: int = 1) -> None:
+    (root / ".coresmith").mkdir(parents=True, exist_ok=True)
+    (root / "arch" / "uarch_specs").mkdir(parents=True, exist_ok=True)
+    bd = {
+        "blocks": [{"name": n, "tier": tier, "interfaces": {}} for n in names],
+        "connections": [],
+    }
+    (root / ".coresmith" / "block_diagram.json").write_text(json.dumps(bd))
+
+
+def _orch_state(root: Path, names: list[str], **extra) -> dict:
+    st = {
+        "project_root": str(root),
+        "target_clock_mhz": 50.0,
+        "max_attempts": 3,
+        "block_queue": [{"name": n, "tier": 1} for n in names],
+        "tier_list": [1],
+        "current_tier_index": 0,
+        "completed_blocks": [],
+    }
+    st.update(extra)
+    return st
+
+
+def _patch_review(monkeypatch, result: dict):
+    from orchestrator.langchain.agents import integration_review_agent as ira
+
+    async def fake_review(self, block_names, project_root):
+        return result
+
+    monkeypatch.setattr(ira.IntegrationReviewAgent, "__init__",
+                        lambda self, *a, **k: None)
+    monkeypatch.setattr(ira.IntegrationReviewAgent, "review", fake_review)
+
+
+# --------------------------------------------------------------------------
+# Review agent reports which blocks it edited
+# --------------------------------------------------------------------------
+class TestReviewAgentReportsEdits:
+    @pytest.mark.asyncio
+    async def test_edited_blocks_and_reviewed_paths(self, tmp_path, monkeypatch):
+        from orchestrator.langchain.agents import integration_review_agent as ira
+
+        _seed_project(tmp_path, ["alpha", "beta"])
+        for n in ("alpha", "beta"):
+            (tmp_path / "arch" / "uarch_specs" / f"{n}.md").write_text(f"# {n}\n")
+
+        class FakeLLM:
+            async def call(self, system="", prompt="", run_name="", **kw):
+                # the reviewer edits ONE review copy
+                p = tmp_path / "arch" / "uarch_specs_review" / "alpha.md"
+                p.write_text("# alpha (renamed port)\n")
+                return 'fixed one\n```json\n{"issues_found": 1, "issues_fixed": 1}\n```'
+
+        monkeypatch.delenv("CORESMITH_INTEGRATION_REVIEW_INPLACE", raising=False)
+        agent = ira.IntegrationReviewAgent.__new__(ira.IntegrationReviewAgent)
+        agent.llm = FakeLLM()
+        out = await agent.review(block_names=["alpha", "beta"],
+                                 project_root=str(tmp_path))
+        assert out["edited_blocks"] == ["alpha"]
+        assert Path(out["reviewed_specs"]["alpha"]).read_text().startswith("# alpha (renamed")
+        assert "beta" in out["reviewed_specs"]
+        # canonical spec untouched by the review itself (adoption is the node's job)
+        assert (tmp_path / "arch" / "uarch_specs" / "alpha.md").read_text() == "# alpha\n"
+
+
+# --------------------------------------------------------------------------
+# integration_review_node: targeted plan
+# --------------------------------------------------------------------------
+class TestTargetedRevisePlan:
+    @pytest.mark.asyncio
+    async def test_revise_scopes_to_edited_plus_named_blocks(self, tmp_path, monkeypatch):
+        names = ["alpha", "beta", "gamma"]
+        _seed_project(tmp_path, names)
+        specs = tmp_path / "arch" / "uarch_specs"
+        for n in names:
+            (specs / f"{n}.md").write_text(f"# {n} v1\n")
+        review_copy = tmp_path / "arch" / "uarch_specs_review" / "alpha.md"
+        review_copy.parent.mkdir(parents=True)
+        review_copy.write_text("# alpha v2 (reviewer edit)\n")
+        _patch_review(monkeypatch, {
+            "summary": "renamed alpha ports",
+            "issues_found": 1, "issues_fixed": 1,
+            "edited_blocks": ["alpha"],
+            "reviewed_specs": {n: str(review_copy if n == "alpha" else specs / f"{n}.md")
+                               for n in names},
+        })
+        monkeypatch.setattr(pipeline_graph, "interrupt", lambda payload: {
+            "action": "revise",
+            "affected_blocks": ["beta"],
+            "feedback": "beta must expose m_token_srdy/m_token_drdy",
+        })
+        monkeypatch.setenv("CORESMITH_STRICT_INTEGRATION_REVIEW", "0")
+        out = await pipeline_graph.integration_review_node(_orch_state(tmp_path, names))
+
+        assert out["integration_review_action"] == "revise"
+        assert out["revise_blocks"] == {"alpha": True, "beta": False}
+        # reviewer edit adopted as canonical
+        assert (specs / "alpha.md").read_text() == "# alpha v2 (reviewer edit)\n"
+        # named block gets the chip lead's finding as gate feedback
+        fb = tmp_path / ".coresmith" / "blocks" / "beta" / "gate_feedback.txt"
+        assert "m_token_srdy" in fb.read_text()
+        assert not (tmp_path / ".coresmith" / "blocks" / "alpha" / "gate_feedback.txt").exists()
+        # untouched block is not in the plan and keeps its spec
+        assert (specs / "gamma.md").read_text() == "# gamma v1\n"
+        assert not (tmp_path / ".coresmith" / "blocks" / "gamma").exists()
+
+    @pytest.mark.asyncio
+    async def test_unscoped_revise_reenters_whole_tier_with_review_feedback(self, tmp_path, monkeypatch):
+        names = ["alpha", "beta"]
+        _seed_project(tmp_path, names)
+        for n in names:
+            (tmp_path / "arch" / "uarch_specs" / f"{n}.md").write_text(f"# {n}\n")
+        _patch_review(monkeypatch, {
+            "summary": "widths disagree on edge e1", "issues_found": 2,
+            "issues_fixed": 0, "edited_blocks": [], "reviewed_specs": {},
+        })
+        monkeypatch.setattr(pipeline_graph, "interrupt",
+                            lambda payload: {"action": "revise"})
+        out = await pipeline_graph.integration_review_node(_orch_state(tmp_path, names))
+        assert out["revise_blocks"] == {"alpha": False, "beta": False}
+        for n in names:
+            fb = tmp_path / ".coresmith" / "blocks" / n / "gate_feedback.txt"
+            assert "widths disagree on edge e1" in fb.read_text()
+
+    @pytest.mark.asyncio
+    async def test_named_by_mention_in_reasoning(self, tmp_path, monkeypatch):
+        names = ["alpha", "beta"]
+        _seed_project(tmp_path, names)
+        for n in names:
+            (tmp_path / "arch" / "uarch_specs" / f"{n}.md").write_text(f"# {n}\n")
+        _patch_review(monkeypatch, {
+            "summary": "ok", "issues_found": 1, "issues_fixed": 0,
+            "edited_blocks": [], "reviewed_specs": {},
+        })
+        monkeypatch.setattr(pipeline_graph, "interrupt", lambda payload: {
+            "action": "revise",
+            "reasoning": "beta still lacks the packed handshake; alphabet is fine",
+        })
+        out = await pipeline_graph.integration_review_node(_orch_state(tmp_path, names))
+        # exact-name mention only: 'alphabet' does not name 'alpha'
+        assert out["revise_blocks"] == {"beta": False}
+
+    @pytest.mark.asyncio
+    async def test_approve_clears_plan_and_payload_lists_edits(self, tmp_path, monkeypatch):
+        names = ["alpha"]
+        _seed_project(tmp_path, names)
+        (tmp_path / "arch" / "uarch_specs" / "alpha.md").write_text("# alpha\n")
+        _patch_review(monkeypatch, {
+            "summary": "ok", "issues_found": 1, "issues_fixed": 1,
+            "edited_blocks": ["alpha"], "reviewed_specs": {},
+        })
+        seen = {}
+
+        def fake_interrupt(payload):
+            seen.update(payload)
+            return {"action": "approve"}
+
+        monkeypatch.setattr(pipeline_graph, "interrupt", fake_interrupt)
+        monkeypatch.delenv("CORESMITH_STRICT_INTEGRATION_REVIEW", raising=False)
+        out = await pipeline_graph.integration_review_node(_orch_state(tmp_path, names))
+        assert seen["edited_blocks"] == ["alpha"]
+        assert out["integration_review_action"] == "approve"
+        assert out["revise_blocks"] is None
+
+    def test_revise_named_blocks_accepts_block_actions_json(self):
+        resp = {"block_actions": json.dumps({"beta": "restart", "alpha": "approve"})}
+        assert pipeline_graph._revise_named_blocks(resp, ["alpha", "beta", "gamma"]) == ["beta"]
+        assert pipeline_graph._revise_named_blocks(
+            {"affected_blocks": "gamma, alpha"}, ["alpha", "beta", "gamma"]) == ["alpha", "gamma"]
+
+
+# --------------------------------------------------------------------------
+# fan-out / tier advance honour the plan
+# --------------------------------------------------------------------------
+class TestFanOutHonoursPlan:
+    def test_only_planned_blocks_are_sent_with_reuse_flag(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("CORESMITH_UARCH_SINGLE_CONTEXT", raising=False)
+        st = _orch_state(tmp_path, ["alpha", "beta", "gamma"],
+                         revise_blocks={"alpha": True, "beta": False})
+        sends = pipeline_graph.fan_out_tier(st)
+        got = {s.arg["current_block"]["name"]: s.arg["reuse_spec"] for s in sends}
+        assert got == {"alpha": True, "beta": False}
+
+    def test_normal_entry_sends_every_block_without_reuse(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("CORESMITH_UARCH_SINGLE_CONTEXT", raising=False)
+        sends = pipeline_graph.fan_out_tier(_orch_state(tmp_path, ["alpha", "beta"]))
+        assert [s.arg["reuse_spec"] for s in sends] == [False, False]
+
+    def test_single_context_mode_sends_reuse(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CORESMITH_UARCH_SINGLE_CONTEXT", "1")
+        sends = pipeline_graph.fan_out_tier(_orch_state(tmp_path, ["alpha", "beta"]))
+        assert [s.arg["reuse_spec"] for s in sends] == [True, True]
+
+    @pytest.mark.asyncio
+    async def test_advance_tier_clears_plan(self, tmp_path):
+        out = await pipeline_graph.advance_tier_node(
+            _orch_state(tmp_path, ["alpha"], revise_blocks={"alpha": True}))
+        assert out["revise_blocks"] is None
+        assert out["current_tier_index"] == 1
+
+    def test_route_still_reenters_init_tier(self):
+        assert pipeline_graph.route_after_integration_review(
+            {"integration_review_action": "revise"}) == "init_tier"
+
+
+# --------------------------------------------------------------------------
+# generate_uarch_spec_node reuse branch
+# --------------------------------------------------------------------------
+def _block_state(root: Path, name: str, **extra) -> dict:
+    st = {
+        "project_root": str(root),
+        "target_clock_mhz": 50.0,
+        "max_attempts": 3,
+        "pipeline_run_start": 0.0,
+        "current_block": {"name": name, "tier": 1, "description": "d"},
+        "attempt": 1, "phase": "init", "human_response": None,
+        "reuse_spec": True,
+    }
+    st.update(extra)
+    return st
+
+
+class TestGenerateUarchSpecReuse:
+    @pytest.mark.asyncio
+    async def test_reuses_on_disk_spec_without_calling_the_author(self, tmp_path, monkeypatch):
+        _seed_project(tmp_path, ["alpha"])
+        (tmp_path / "arch" / "uarch_specs" / "alpha.md").write_text("# alpha reviewed\n")
+
+        async def boom(*a, **k):
+            raise AssertionError("spec author must not be called")
+
+        monkeypatch.setattr(pipeline_graph, "generate_uarch_spec", boom)
+        monkeypatch.delenv("CORESMITH_IGNORE_SPEC_PINS", raising=False)
+        out = await pipeline_graph.generate_uarch_spec_node(_block_state(tmp_path, "alpha"))
+        assert out == {"uarch_approved": False, "phase": "uarch"}
+        assert (tmp_path / "arch" / "uarch_specs" / "alpha.md").read_text() == "# alpha reviewed\n"
+
+    @pytest.mark.asyncio
+    async def test_pending_gate_feedback_still_revises_per_block(self, tmp_path, monkeypatch):
+        _seed_project(tmp_path, ["alpha"])
+        (tmp_path / "arch" / "uarch_specs" / "alpha.md").write_text("# alpha v1\n")
+        bdir = tmp_path / ".coresmith" / "blocks" / "alpha"
+        bdir.mkdir(parents=True)
+        (bdir / "gate_feedback.txt").write_text("add m_token_srdy")
+        calls = []
+
+        async def fake_generate(block, feedback="", previous_spec="", **k):
+            calls.append((feedback, previous_spec))
+            return {"spec_text": "# alpha v2\n", "block_name": block["name"]}
+
+        monkeypatch.setattr(pipeline_graph, "generate_uarch_spec", fake_generate)
+        out = await pipeline_graph.generate_uarch_spec_node(_block_state(tmp_path, "alpha"))
+        assert out["phase"] == "uarch"
+        assert len(calls) == 1
+        assert "add m_token_srdy" in calls[0][0]
+        assert calls[0][1] == "# alpha v1\n"
+
+    @pytest.mark.asyncio
+    async def test_missing_spec_falls_through_to_the_author(self, tmp_path, monkeypatch):
+        _seed_project(tmp_path, ["alpha"])
+        calls = []
+
+        async def fake_generate(block, **k):
+            calls.append(block["name"])
+            return {"spec_text": "# alpha\n", "block_name": block["name"]}
+
+        monkeypatch.setattr(pipeline_graph, "generate_uarch_spec", fake_generate)
+        await pipeline_graph.generate_uarch_spec_node(_block_state(tmp_path, "alpha"))
+        assert calls == ["alpha"]
+
+
+# --------------------------------------------------------------------------
+# single-context uArch stage in init_tier
+# --------------------------------------------------------------------------
+class TestSingleContextStage:
+    @pytest.mark.asyncio
+    async def test_first_entry_authors_every_missing_spec_once(self, tmp_path, monkeypatch):
+        names = ["alpha", "beta", "gamma"]
+        _seed_project(tmp_path, names)
+        (tmp_path / ".coresmith" / "block_specs.json").write_text(json.dumps(
+            {"blocks": [{"name": n, "tier": 1} for n in names]}))
+        monkeypatch.setenv("CORESMITH_UARCH_SINGLE_CONTEXT", "1")
+        calls = []
+
+        async def fake_single(blocks, feedback_by_block=None):
+            calls.append(([b["name"] for b in blocks], dict(feedback_by_block or {})))
+            for b in blocks:
+                (tmp_path / "arch" / "uarch_specs" / f"{b['name']}.md").write_text("# spec\n")
+            return {"written": [b["name"] for b in blocks], "missing": []}
+
+        monkeypatch.setattr(pipeline_helpers, "generate_uarch_specs_single_context", fake_single)
+        st = _orch_state(tmp_path, names)
+        out = await pipeline_graph.init_tier_node(st)
+        assert calls == [(names, {})]
+        assert "revise_blocks" not in out
+        # second entry (next tier / re-entry): nothing missing, no call
+        st.update(out)
+        await pipeline_graph.init_tier_node(st)
+        assert len(calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_revise_reentry_respecs_named_blocks_in_one_session(self, tmp_path, monkeypatch):
+        names = ["alpha", "beta"]
+        _seed_project(tmp_path, names)
+        for n in names:
+            (tmp_path / "arch" / "uarch_specs" / f"{n}.md").write_text(f"# {n}\n")
+        bdir = tmp_path / ".coresmith" / "blocks" / "beta"
+        bdir.mkdir(parents=True)
+        (bdir / "gate_feedback.txt").write_text("rename ports")
+        monkeypatch.setenv("CORESMITH_UARCH_SINGLE_CONTEXT", "1")
+        calls = []
+
+        async def fake_single(blocks, feedback_by_block=None):
+            calls.append(([b["name"] for b in blocks], dict(feedback_by_block or {})))
+            return {"written": ["beta"], "missing": []}
+
+        monkeypatch.setattr(pipeline_helpers, "generate_uarch_specs_single_context", fake_single)
+        st = _orch_state(tmp_path, names, revise_blocks={"alpha": True, "beta": False})
+        out = await pipeline_graph.init_tier_node(st)
+        assert calls == [(["beta"], {"beta": "rename ports"})]
+        assert out["revise_blocks"] == {"alpha": True, "beta": True}
+        assert not (bdir / "gate_feedback.txt").exists()
+
+    @pytest.mark.asyncio
+    async def test_author_failure_falls_back_to_per_block(self, tmp_path, monkeypatch):
+        names = ["alpha"]
+        _seed_project(tmp_path, names)
+        monkeypatch.setenv("CORESMITH_UARCH_SINGLE_CONTEXT", "1")
+
+        async def fake_single(blocks, feedback_by_block=None):
+            raise RuntimeError("codex down")
+
+        monkeypatch.setattr(pipeline_helpers, "generate_uarch_specs_single_context", fake_single)
+        out = await pipeline_graph.init_tier_node(_orch_state(tmp_path, names))
+        assert out["tier_list"] == [1]
+        assert "revise_blocks" not in out
+
+    @pytest.mark.asyncio
+    async def test_helper_reports_written_vs_missing(self, tmp_path, monkeypatch):
+        from orchestrator.langchain.agents import uarch_spec_generator as usg
+
+        _seed_project(tmp_path, ["alpha", "beta"])
+        monkeypatch.setattr(pipeline_helpers, "PROJECT_ROOT", tmp_path)
+        body = "# alpha\n\n## Interface\n" + ("| port | w |\n" * 60)
+
+        async def fake_many(self, blocks, **kw):
+            (tmp_path / "arch" / "uarch_specs" / "alpha.md").write_text(body)
+            return "done"
+
+        monkeypatch.setattr(usg.UarchSpecGenerator, "__init__", lambda self, *a, **k: None)
+        monkeypatch.setattr(usg.UarchSpecGenerator, "generate_many", fake_many)
+        out = await pipeline_helpers.generate_uarch_specs_single_context(
+            [{"name": "alpha"}, {"name": "beta"}])
+        assert out["written"] == ["alpha"]
+        assert out["missing"] == ["beta"]
+
+    @pytest.mark.asyncio
+    async def test_generate_many_prompt_names_every_block_and_contract(self, tmp_path):
+        from orchestrator.langchain.agents import uarch_spec_generator as usg
+
+        _seed_project(tmp_path, ["alpha", "beta"])
+        (tmp_path / ".coresmith" / "interface_contracts.json").write_text(json.dumps({
+            "contracts": [{"edge_id": "e1", "producer_block": "alpha",
+                           "consumer_block": "beta", "signal": "m_token"}],
+        }))
+        (tmp_path / "arch" / "ers_spec.md").write_text("ERS TEXT")
+        seen = {}
+
+        class FakeLLM:
+            async def call(self, system="", prompt="", run_name="", **kw):
+                seen.update(system=system, prompt=prompt, run_name=run_name)
+                return "ok"
+
+        agent = usg.UarchSpecGenerator.__new__(usg.UarchSpecGenerator)
+        agent.llm = FakeLLM()
+        await agent.generate_many(
+            blocks=[{"name": "alpha", "description": "A"}, {"name": "beta", "description": "B"}],
+            python_sources={"alpha": "def f(): pass"},
+            feedback={"beta": "rename ports"},
+            previous_specs={"beta": "# beta old"},
+            project_root=str(tmp_path),
+        )
+        p = seen["prompt"]
+        assert "arch/uarch_specs/alpha.md" in p and "arch/uarch_specs/beta.md" in p
+        assert "ERS TEXT" in p and '"edge_id": "e1"' in p
+        assert "def f(): pass" in p
+        assert "rename ports" in p and "REVISION REQUESTED" in p
+        assert seen["run_name"].startswith("Generate Uarch Specs [2 blocks")
+
+
+# --------------------------------------------------------------------------
+# WP-7b: DV-failure revise plans span tiers
+# --------------------------------------------------------------------------
+class TestPlanSpansTiers:
+    def _queue(self):
+        return [{"name": "mem", "tier": 1}, {"name": "ctl", "tier": 2},
+                {"name": "enc", "tier": 3}]
+
+    @pytest.mark.asyncio
+    async def test_init_tier_skips_tiers_with_nothing_to_redo(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("CORESMITH_UARCH_SINGLE_CONTEXT", raising=False)
+        _seed_project(tmp_path, ["mem", "ctl", "enc"])
+        st = _orch_state(tmp_path, [], block_queue=self._queue(), tier_list=[1, 2, 3],
+                         current_tier_index=0, revise_blocks={"enc": False})
+        out = await pipeline_graph.init_tier_node(st)
+        assert out["current_tier_index"] == 2
+        st.update(out)
+        sends = pipeline_graph.fan_out_tier(st)
+        assert [s.arg["current_block"]["name"] for s in sends] == ["enc"]
+        assert sends[0].arg["reuse_spec"] is False
+
+    @pytest.mark.asyncio
+    async def test_plan_naming_no_queued_block_voids_itself(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("CORESMITH_UARCH_SINGLE_CONTEXT", raising=False)
+        _seed_project(tmp_path, ["mem"])
+        st = _orch_state(tmp_path, [], block_queue=self._queue(), tier_list=[1, 2, 3],
+                         revise_blocks={"ghost": False})
+        out = await pipeline_graph.init_tier_node(st)
+        assert out["revise_blocks"] is None
+        assert "current_tier_index" not in out
+        st.update(out)
+        assert len(pipeline_graph.fan_out_tier(st)) == 1  # tier 1 runs normally
+
+    @pytest.mark.asyncio
+    async def test_advance_tier_keeps_plan_while_later_tiers_are_planned(self, tmp_path):
+        st = _orch_state(tmp_path, [], block_queue=self._queue(), tier_list=[1, 2, 3],
+                         current_tier_index=0, revise_blocks={"mem": False, "enc": False})
+        out = await pipeline_graph.advance_tier_node(st)
+        assert out == {"current_tier_index": 1, "revise_blocks": {"mem": False, "enc": False}}
+        st["current_tier_index"] = 2
+        out = await pipeline_graph.advance_tier_node(st)
+        assert out["revise_blocks"] is None
+
+    def test_apply_revise_uarch_hands_feedback_to_the_block(self, tmp_path):
+        _seed_project(tmp_path, ["enc"])
+        (tmp_path / "arch" / "uarch_specs" / "enc.md").write_text("# enc\n")
+        applied = pipeline_graph._apply_revise_uarch(
+            str(tmp_path), {"action": "revise", "affected_blocks": ["enc"],
+                            "feedback": "token FIFO must be shared"},
+            {}, "validation_dv")
+        assert applied == ["enc"]
+        fb = (tmp_path / ".coresmith" / "blocks" / "enc" / "gate_feedback.txt").read_text()
+        assert "token FIFO must be shared" in fb
+        assert "VALIDATION_DV REVISION FEEDBACK" in (tmp_path / "arch" / "uarch_specs" / "enc.md").read_text()
+
+    @pytest.mark.asyncio
+    async def test_integration_review_carries_later_tier_entries(self, tmp_path, monkeypatch):
+        _seed_project(tmp_path, ["mem", "enc"])
+        (tmp_path / "arch" / "uarch_specs" / "mem.md").write_text("# mem\n")
+        _patch_review(monkeypatch, {
+            "summary": "ok", "issues_found": 0, "issues_fixed": 0,
+            "edited_blocks": [], "reviewed_specs": {},
+        })
+        monkeypatch.setattr(pipeline_graph, "interrupt", lambda payload: {"action": "approve"})
+        st = _orch_state(tmp_path, [], block_queue=self._queue(), tier_list=[1, 2, 3],
+                         current_tier_index=0, revise_blocks={"mem": False, "enc": False})
+        out = await pipeline_graph.integration_review_node(st)
+        assert out["integration_review_action"] == "approve"
+        assert out["revise_blocks"] == {"enc": False}

@@ -542,6 +542,174 @@ class UarchSpecGenerator:
                 "block_name": block_name,
             }
 
+    async def generate_many(
+        self,
+        blocks: list[dict],
+        python_sources: dict[str, str] | None = None,
+        feedback: dict[str, str] | None = None,
+        previous_specs: dict[str, str] | None = None,
+        project_root: str = "",
+    ) -> str:
+        """Single-context uArch stage: ONE session authors (or revises) every
+        spec in ``blocks`` against the shared ERS / FRD / block diagram /
+        interface contracts, so port names, widths, handshakes and field
+        layouts agree across connected blocks by construction. Each spec is
+        written to ``arch/uarch_specs/<block>.md``; the raw response is
+        returned for the caller, which verifies the files on disk.
+        """
+        python_sources = python_sources or {}
+        feedback = feedback or {}
+        previous_specs = previous_specs or {}
+        names = [b["name"] for b in blocks]
+        revising = [n for n in names if n in previous_specs]
+        span_name = f"Uarch Specs [{len(names)} blocks]"
+        with _tracer.start_as_current_span(span_name) as span:
+            span.set_attribute("block_count", len(names))
+            span.set_attribute("revising", len(revising))
+            parts = [
+                "Author the microarchitecture specifications for ALL of the "
+                "following blocks in this one session. You are the single "
+                "micro-architect of this design: every port name, width, "
+                "handshake, field layout and clock/reset convention MUST agree "
+                "between the blocks that connect to each other and MUST match "
+                "the canonical interface contracts exactly.",
+                "",
+                f"Write ONE file per block, {len(names)} files in total:",
+            ]
+            for n in names:
+                parts.append(f"- arch/uarch_specs/{n}.md")
+            parts.append(
+                "\nWrite each file completely (the same structure and depth "
+                "you would give a single block) before moving to the next; do "
+                "not stop until every file above exists. Spec Section 9 "
+                "(interface summary) of two connected blocks must name the "
+                "same signals.\n"
+            )
+            if revising:
+                parts.append(
+                    "--- REVISION REQUESTED ---\n"
+                    "The following blocks already have a spec on disk that was "
+                    "reviewed and needs changes. Read the current spec file, "
+                    "revise it to address ALL feedback points, and rewrite it "
+                    "in place. Keep everything the feedback does not touch."
+                )
+                for n in revising:
+                    _cur = (Path(project_root) / "arch" / "uarch_specs" / f"{n}.md"
+                            if project_root else Path("arch/uarch_specs") / f"{n}.md")
+                    parts.append(
+                        f"\n### {n} -- current spec: {_cur}\nFeedback:\n"
+                        f"{feedback.get(n, '').strip() or '(rejected; revise)'}")
+                parts.append("")
+            _root = None
+            _bd: dict = {}
+            if project_root:
+                _root = Path(project_root)
+                ers_path = _root / "arch" / "ers_spec.md"
+                if ers_path.exists():
+                    try:
+                        parts.append(
+                            "\n--- ENGINEERING REQUIREMENTS SPECIFICATION (ERS) ---\n"
+                            f"{ers_path.read_text()}\n--- END ERS ---\n"
+                        )
+                    except OSError:
+                        pass
+                bd_path = _root / ".coresmith" / "block_diagram.json"
+                if bd_path.exists():
+                    try:
+                        _bd = json.loads(bd_path.read_text())
+                    except (OSError, json.JSONDecodeError):
+                        _bd = {}
+                if _bd:
+                    target = set(names)
+                    conns = [c for c in _bd.get("connections", [])
+                             if c.get("from") in target or c.get("to") in target]
+                    parts.append(
+                        "\n--- CONNECTION GRAPH (every edge touching these blocks) ---\n"
+                        f"{json.dumps(conns, indent=2)}\n--- END CONNECTION GRAPH ---\n"
+                    )
+                from .contract_lookup import load_interface_contracts
+                _doc = load_interface_contracts(project_root) or {}
+                _edges = _doc.get("contracts") or _doc.get("edges") or []
+                if _edges:
+                    _defaults = _doc.get("defaults") or {}
+                    _pack = _defaults.get("default_packing_convention")
+                    parts.append(
+                        "\n## CANONICAL INTERFACE CONTRACTS (all edges; AUTHORITATIVE)\n"
+                        "The bit layouts, field positions, handshake protocol, "
+                        "sideband signals, bootstrap policy and port NAMES below "
+                        "MUST match in every spec exactly. Do not invent fields, "
+                        "change widths, rename signals, or skip a bootstrap policy."
+                        + (f"\n**Design-wide convention:** `{_pack}`" if _pack else "")
+                        + "\n```json\n" + json.dumps(_edges, indent=2) + "\n```\n"
+                    )
+                frd_path = _root / "arch" / "frd_spec.md"
+                if frd_path.exists():
+                    try:
+                        frd_text = frd_path.read_text()
+                        if len(frd_text) > 8000:
+                            frd_text = (frd_text[:8000]
+                                        + f"\n... (truncated; full text: {frd_path})")
+                        parts.append(
+                            "\n--- FUNCTIONAL REQUIREMENTS (FRD) ---\n"
+                            f"{frd_text}\n--- END FRD ---\n"
+                        )
+                    except OSError:
+                        pass
+            bd_blocks = {b.get("name"): b for b in _bd.get("blocks", [])
+                         if isinstance(b, dict)}
+            parts.append("\n═══ BLOCKS TO SPECIFY ═══")
+            for b in blocks:
+                n = b["name"]
+                parts.append(f"\n### Block: {n}")
+                parts.append(f"Description: {b.get('description', '')}")
+                blk = bd_blocks.get(n) or {}
+                ifaces = blk.get("interfaces", {})
+                if ifaces:
+                    parts.append("Interfaces (block diagram):\n"
+                                 f"{json.dumps(ifaces, indent=2)}")
+                _ffb = blk.get("flip_flop_budget")
+                if _ffb:
+                    parts.append(f"HARD FLOP BUDGET: flip_flop_budget = {_ffb} FF "
+                                 "(std-cell sequential elements; bulk memories "
+                                 ">= 2 Kbit are SRAM macros, excluded). The spec "
+                                 f"MUST emit `flip_flop_budget` <= {_ffb}.")
+                _ab = blk.get("area_budget_um2") or blk.get("die_area_budget_um2")
+                if _ab:
+                    parts.append(f"HARD AREA BUDGET (SRAM included): area_budget_um2 "
+                                 f"= {_ab}; each cs_sram bit costs ~1.7 um^2. The "
+                                 f"spec MUST emit `area_budget_um2` <= {_ab}.")
+                src = (python_sources.get(n) or "").strip()
+                if src:
+                    parts.append(f"Python golden model:\n```python\n{src}\n```")
+                else:
+                    parts.append(
+                        "Python golden model: NONE SUPPLIED -- derive the "
+                        "microarchitecture from the description, contracts and "
+                        "ERS, and say so in the spec. Do NOT invent one.")
+                if n in previous_specs:
+                    _cur = (Path(project_root) / "arch" / "uarch_specs" / f"{n}.md"
+                            if project_root else Path("arch/uarch_specs") / f"{n}.md")
+                    parts.append(
+                        f"Current spec to revise: {_cur} (read it with its "
+                        "absolute path; write the revision to "
+                        f"arch/uarch_specs/{n}.md).")
+            parts.append(
+                "\nWhen every file is written, end with ONE fenced ```json block: "
+                '{"specs_written": [<block names>], "notes": "<cross-block '
+                'naming decisions>"}.'
+            )
+            user_message = "\n".join(parts)
+            system_prompt = build_system_prompt()  # no per-block evidence: all skills inline
+            span.set_attribute("system_prompt_chars", len(system_prompt))
+            span.set_attribute("user_prompt_chars", len(user_message))
+            content = await self.llm.call(
+                system=system_prompt,
+                prompt=user_message,
+                run_name=f"Generate Uarch Specs [{len(names)} blocks"
+                         + (" - Revision" if revising else "") + "]",
+            )
+            return content or ""
+
     def _parse_response(
         self, content: str, block_name: str
     ) -> tuple[str, dict]:

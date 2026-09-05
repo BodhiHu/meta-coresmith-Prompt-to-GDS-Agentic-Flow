@@ -263,6 +263,9 @@ class BlockState(TypedDict):
     # letting a stub proceed to RTL. Threaded from generate_uarch_spec_node.
     uarch_blocking_issues: list | None
     uarch_feasible: bool | None
+    reuse_spec: bool  # targeted revise / single-context uArch: implement the
+                      # on-disk spec as-is unless feedback is pending for
+                      # this block (then revise it per block, as before)
 
     # File paths (set by nodes, consumed by routing and downstream nodes) ───
     rtl_path: str          # path to generated Verilog file
@@ -331,6 +334,9 @@ class OrchestratorState(TypedDict):
 
     # Integration review decision (set by integration_review_node) ────────
     integration_review_action: str | None
+    # Targeted revise plan from integration_review: {block: reuse_spec}. Only
+    # these blocks re-enter the tier on a revise; None = normal entry.
+    revise_blocks: Annotated[dict | None, _last]
 
     # Integration check results ────────────────────────────────────────────
     integration_result: dict | None  # set by integration_check node
@@ -1028,6 +1034,13 @@ def _apply_revise_uarch(pr: str, response: dict, contract_audit: dict,
         except OSError:
             continue
         _db(pr).clear_result(name, "best")
+        try:
+            _bdir = Path(pr) / ".coresmith" / "blocks" / name
+            _bdir.mkdir(parents=True, exist_ok=True)
+            with (_bdir / "gate_feedback.txt").open("a", encoding="utf-8") as fh:
+                fh.write(f"\n\n## {stage.upper()} REVISION (MANDATORY)\n\n{feedback}\n")
+        except OSError:
+            pass
         # Arm-U audit CRITICAL #2/#3: spec appends are destroyed by the
         # per-tier re-spec, so a correctly-fixed bug regressed 4h later.
         # constraints.json survives regeneration and is read by the spec/RTL/
@@ -1168,6 +1181,26 @@ async def generate_uarch_spec_node(state: BlockState) -> dict:
         # the pin suppressed exactly the regen it was written to steer. A
         # pinned SPEC still regenerates its model (OPERATOR_MODEL_PIN and the
         # gate-scope check inside the helper still protect the model file).
+        return {"uarch_approved": False, "phase": "uarch"}
+
+    # Targeted revise / single-context uArch: the spec on disk is the one to
+    # implement (adopted from the integration review, or written by the
+    # single-context author). Reuse it unless feedback is pending for THIS
+    # block -- a chip-lead finding or a mem-price re-spec -- which revises
+    # the spec per block exactly as before.
+    _resp0 = state.get("human_response") or {}
+    _fb_pending = (
+        (Path(_pr(state)) / ".coresmith" / "blocks" / block_name
+         / "gate_feedback.txt").exists()
+        or (_resp0.get("action") == "revise" and bool(_resp0.get("feedback")))
+    )
+    if state.get("reuse_spec") and _pinned_spec.exists() and not _fb_pending:
+        log(f"  [UARCH] {block_name}: implementing the on-disk spec as-is "
+            "(targeted revise / single-context uArch) -- no per-block "
+            "regeneration", YELLOW)
+        write_graph_event(_pr(state), "Generate Uarch Spec", "spec_reused", {
+            "block": block_name, "spec_path": str(_pinned_spec),
+        })
         return {"uarch_approved": False, "phase": "uarch"}
 
     write_graph_event(_pr(state), "Generate Uarch Spec", "graph_node_enter", {
@@ -5789,6 +5822,66 @@ def _is_own_gate_feedback(path: Path) -> bool:
         return False
 
 
+async def _single_context_uarch_stage(
+    pr: str, block_queue: list, tier_blocks: list, revise: dict | None,
+) -> dict | None:
+    """CORESMITH_UARCH_SINGLE_CONTEXT: one session authors every missing spec
+    of the design (first entry) or revises the blocks a targeted revise asked
+    to re-spec. Returns the updated revise plan (re-specced blocks flip to
+    ``reuse_spec``) or None when nothing changed. A spec the session did not
+    produce falls through to the per-block author as before."""
+    from orchestrator.langgraph.pipeline_helpers import (
+        generate_uarch_specs_single_context,
+    )
+    spec_dir = Path(pr) / "arch" / "uarch_specs"
+    if revise:
+        targets = [b for b in tier_blocks
+                   if b["name"] in revise and not revise[b["name"]]]
+    else:
+        targets = [b for b in block_queue
+                   if not (spec_dir / f"{b['name']}.md").exists()]
+    if not targets:
+        return None
+    feedback: dict[str, str] = {}
+    for b in targets:
+        fb = Path(pr) / ".coresmith" / "blocks" / b["name"] / "gate_feedback.txt"
+        if fb.exists():
+            try:
+                feedback[b["name"]] = fb.read_text(encoding="utf-8").strip()
+            except OSError:
+                pass
+    names = [b["name"] for b in targets]
+    log(f"  [UARCH] single-context uArch stage: {'revising' if revise else 'authoring'} "
+        f"{len(names)} spec(s) in one session ({', '.join(names)})", YELLOW)
+    write_graph_event(pr, "Generate Uarch Specs", "graph_node_enter", {
+        "blocks": names, "revise": bool(revise),
+    })
+    try:
+        result = await generate_uarch_specs_single_context(
+            targets, feedback_by_block=feedback)
+    except Exception as exc:  # noqa: BLE001 - fall through to per-block authors
+        log(f"  [UARCH] single-context uArch stage FAILED ({exc}) -- blocks "
+            "fall back to per-block spec generation", RED)
+        write_graph_event(pr, "Generate Uarch Specs", "graph_node_exit", {
+            "error": str(exc)[:500], "blocks": names,
+        })
+        return None
+    written = [n for n in result.get("written", []) if n in names]
+    missing = [n for n in names if n not in written]
+    write_graph_event(pr, "Generate Uarch Specs", "graph_node_exit", {
+        "written": written, "missing": missing,
+    })
+    log(f"  [UARCH] single-context uArch stage wrote {len(written)}/{len(names)} "
+        f"spec(s)" + (f"; per-block fallback for {', '.join(missing)}" if missing else ""),
+        GREEN if not missing else YELLOW)
+    for n in written:
+        fb = Path(pr) / ".coresmith" / "blocks" / n / "gate_feedback.txt"
+        fb.unlink(missing_ok=True)  # consumed by the single-context revision
+    if revise and written:
+        return {**revise, **{n: True for n in written}}
+    return None
+
+
 async def init_tier_node(state: OrchestratorState) -> dict:
     """Compute the tier list (once) and log the current tier."""
     pr = state.get("project_root", str(PROJECT_ROOT))
@@ -5818,6 +5911,30 @@ async def init_tier_node(state: OrchestratorState) -> dict:
     tier = tier_list[current_idx]
     tier_blocks = [b for b in block_queue if b.get("tier", 1) == tier]
 
+    # Targeted revise plan ({block: reuse_spec}) from integration_review or a
+    # DV-failure revise. It may span tiers: skip the tiers with nothing to
+    # redo; a plan naming no queued block voids itself (normal full entry).
+    revise = state.get("revise_blocks") or None
+    tier_idx_update = None
+    plan_void = False
+    if revise:
+        _idx = current_idx
+        while _idx < len(tier_list) and not any(
+            b.get("name") in revise for b in block_queue
+            if b.get("tier", 1) == tier_list[_idx]
+        ):
+            _idx += 1
+        if _idx >= len(tier_list):
+            log("  Targeted revise plan names no queued block -- normal "
+                "tier entry", YELLOW)
+            revise, plan_void = None, True
+        elif _idx != current_idx:
+            log(f"  Targeted revise: tier {tier} has nothing to redo -- "
+                f"skipping to tier {tier_list[_idx]}", CYAN)
+            current_idx = tier_idx_update = _idx
+            tier = tier_list[current_idx]
+            tier_blocks = [b for b in block_queue if b.get("tier", 1) == tier]
+
     # Section 7a: stamp the engine git SHA at run start + WARN in the daemon log
     # if it changes mid-run (a hot-swap that flipped behavior under the run).
     _stamp_engine_sha(pr)
@@ -5834,11 +5951,25 @@ async def init_tier_node(state: OrchestratorState) -> dict:
         f"Tier {current_idx + 1}/{len(tier_list)}", CYAN)
     log(f"{'='*60}", CYAN)
 
+    if revise:
+        _mine = [b['name'] for b in tier_blocks if b['name'] in revise]
+        log(f"  Targeted revise: re-entering {', '.join(_mine)} only", CYAN)
+    revise_update = None
+    if _uarch_single_context_enabled():
+        revise_update = await _single_context_uarch_stage(
+            pr, block_queue, tier_blocks, revise)
+
     write_graph_event(pr, "Init Tier", "graph_node_exit", {
-        "tier": tier,
+        "tier": tier, "revise_blocks": revise,
     })
 
     out = {"tier_list": tier_list}
+    if revise_update is not None:
+        out["revise_blocks"] = revise_update
+    elif plan_void:
+        out["revise_blocks"] = None
+    if tier_idx_update is not None:
+        out["current_tier_index"] = tier_idx_update
     # Publish the reduced queue + the retirement record so EVERY downstream
     # consumer agrees the block is deliberately absent rather than missing:
     # pipeline_complete / integration_check size `expected` off block_queue,
@@ -5865,6 +5996,13 @@ def fan_out_tier(state: OrchestratorState) -> list[Send]:
 
     tier_blocks = [b for b in block_queue if b.get("tier", 1) == tier]
 
+    # Targeted revise: only the planned blocks re-enter; the rest keep the
+    # completed result they already have (completed_blocks dedups by name).
+    revise = state.get("revise_blocks") or None
+    if revise:
+        tier_blocks = [b for b in tier_blocks if b["name"] in revise]
+    single_context = _uarch_single_context_enabled()
+
     sends = []
     for block in tier_blocks:
         sends.append(Send("process_block", {
@@ -5890,6 +6028,8 @@ def fan_out_tier(state: OrchestratorState) -> list[Send]:
             "human_response": None,
             "completed_blocks": [],
             "step_log_paths": {},
+            "reuse_spec": (bool(revise[block["name"]]) if revise
+                           else single_context),
         }))
 
     return sends
@@ -5898,6 +6038,117 @@ def fan_out_tier(state: OrchestratorState) -> list[Send]:
 fan_out_tier.__edge_labels__ = {
     "process_block": "FAN OUT",
 }
+
+
+def _uarch_single_context_enabled() -> bool:
+    """CORESMITH_UARCH_SINGLE_CONTEXT=1: the uArch stage runs in ONE agent
+    session -- at the first tier entry one author writes every missing spec of
+    the design (no per-block fan-out for the spec stage), and on a targeted
+    revise one session revises the blocks the chip lead named. Blocks then
+    implement the on-disk spec (``reuse_spec``); a block still re-specs on its
+    own when feedback is pending for it (mem-price gate, spec-review revise).
+    Default OFF = one author per block, as before."""
+    return _env_truthy("CORESMITH_UARCH_SINGLE_CONTEXT")
+
+
+def _revise_named_blocks(response: dict, candidates: list[str]) -> list[str]:
+    """Blocks a chip-level ``revise`` names explicitly: ``block_actions``
+    (dict / JSON string, any action other than approve/skip),
+    ``affected_blocks`` (list), else exact block names mentioned in the
+    ``feedback`` / ``reasoning`` text. Order follows ``candidates``."""
+    named: set[str] = set()
+    actions = response.get("block_actions")
+    if isinstance(actions, str) and actions.strip():
+        try:
+            actions = json.loads(actions)
+        except json.JSONDecodeError:
+            actions = None
+    if isinstance(actions, dict):
+        named |= {k for k, v in actions.items()
+                  if str(v or "").strip().lower() not in {"approve", "skip", "keep"}}
+    elif isinstance(actions, list):
+        named |= {str(a) for a in actions}
+    affected = response.get("affected_blocks") or []
+    if isinstance(affected, str):
+        affected = [a.strip() for a in affected.split(",")]
+    named |= {str(a) for a in affected}
+    text = " ".join(str(response.get(k) or "") for k in ("feedback", "reasoning"))
+    if text:
+        named |= {c for c in candidates
+                  if re.search(rf"(?<![A-Za-z0-9_]){re.escape(c)}(?![A-Za-z0-9_])", text)}
+    return [c for c in candidates if c in named]
+
+
+def _plan_targeted_revise(
+    pr: str,
+    response: dict,
+    block_names: list[str],
+    edited_blocks: list[str],
+    reviewed_specs: dict,
+    failed_blocks: list[str],
+    review_summary: str,
+    tier: int,
+) -> dict:
+    """Turn a chip-level ``revise`` into a per-block plan ``{block: reuse_spec}``.
+
+    Scope = blocks the reviewer edited + blocks the chip lead named + blocks
+    that failed their lifecycle; an unscoped revise keeps today's whole-tier
+    re-entry. Reviewer edits are ADOPTED (the reviewed copy becomes the
+    canonical spec, newer than the block's RTL/TB so those regenerate); named
+    blocks get the chip lead's findings as ``gate_feedback.txt`` and re-spec
+    from their current spec; everything in scope drops ``best_result`` so the
+    RTL skip-regen fast path cannot reuse a pass measured against the old spec.
+    Blocks outside the scope keep their completed result untouched.
+    """
+    import shutil as _shutil
+
+    named = _revise_named_blocks(response, block_names)
+    edited = [b for b in block_names if b in set(edited_blocks)]
+    scope = [b for b in block_names
+             if b in set(edited) | set(named) | set(failed_blocks)]
+    unscoped = not scope
+    if unscoped:
+        scope = list(block_names)
+    feedback = (str(response.get("feedback") or "").strip()
+                or str(response.get("reasoning") or "").strip()
+                or review_summary.strip())
+    spec_dir = Path(pr) / "arch" / "uarch_specs"
+    plan: dict[str, bool] = {}
+    for name in scope:
+        canonical = spec_dir / f"{name}.md"
+        if name in edited:
+            src = reviewed_specs.get(name)
+            try:
+                if src and Path(src).exists() and Path(src).resolve() != canonical.resolve():
+                    canonical.parent.mkdir(parents=True, exist_ok=True)
+                    _shutil.copy2(src, canonical)
+                    os.utime(canonical, None)  # newer than RTL/TB -> they regenerate
+                    log(f"  [INTEGRATION REVIEW] {name}: adopted the reviewed spec "
+                        f"({src})", YELLOW)
+            except OSError as exc:
+                log(f"  [INTEGRATION REVIEW] {name}: could not adopt reviewed "
+                    f"spec: {exc}", RED)
+        # A named block (or an unscoped whole-tier revise) re-specs with the
+        # chip lead's findings; an edited-only block implements the reviewed
+        # spec as-is; a failed-only block retries its RTL against its spec.
+        needs_respec = unscoped or name in named
+        if needs_respec and feedback:
+            bdir = Path(pr) / ".coresmith" / "blocks" / name
+            bdir.mkdir(parents=True, exist_ok=True)
+            try:
+                with (bdir / "gate_feedback.txt").open("a", encoding="utf-8") as fh:
+                    fh.write(
+                        f"\n\n## INTEGRATION REVIEW REVISION (tier {tier}; MANDATORY)\n\n"
+                        f"{feedback}\n"
+                    )
+            except OSError:
+                pass
+        plan[name] = bool(canonical.exists()) and not needs_respec
+        try:
+            _db(pr).clear_result(name, "best")
+        except Exception:  # noqa: BLE001 - never block the revise on bookkeeping
+            pass
+    return plan
 
 
 async def integration_review_node(state: OrchestratorState) -> dict:
@@ -5959,10 +6210,14 @@ async def integration_review_node(state: OrchestratorState) -> dict:
         review_summary = result.get("summary", "No issues found.")
         issues_found = result.get("issues_found", 0)
         issues_fixed = result.get("issues_fixed", 0)
+        edited_blocks = [b for b in (result.get("edited_blocks") or [])
+                         if b in block_names]
+        reviewed_specs = dict(result.get("reviewed_specs") or {})
     except Exception as exc:
         review_summary = f"Integration review failed: {exc}"
         issues_found = 1
         issues_fixed = 0
+        edited_blocks, reviewed_specs = [], {}
         review_failed = True
     else:
         review_failed = False
@@ -6035,6 +6290,7 @@ async def integration_review_node(state: OrchestratorState) -> dict:
         "review_summary": review_summary,
         "issues_found": issues_found,
         "issues_fixed": issues_fixed,
+        "edited_blocks": edited_blocks,
         "mem_price_deferred": mem_price_deferred,
         "review_failed": review_failed,
         "supported_actions": ["approve", "revise", "abort"],
@@ -6043,8 +6299,11 @@ async def integration_review_node(state: OrchestratorState) -> dict:
             "cross-block interface coherence. Present this as a CHIP-LEVEL "
             "review to the user. The user approves or rejects ALL specs at "
             "once. If the Integration Agent fixed mismatches, summarize "
-            "what was changed. If the user wants revisions, use "
-            "restart_block(from_node='generate_uarch_spec') for affected blocks."
+            "what was changed. A `revise` is TARGETED: only the blocks in "
+            "edited_blocks (the reviewed spec is adopted as-is) plus any "
+            "block you name in `affected_blocks` / `block_actions` (re-spec "
+            "with your `feedback`) re-enter the tier; the other blocks keep "
+            "their passing result. A revise naming nothing re-runs the tier."
         ),
     }
 
@@ -6095,20 +6354,34 @@ async def integration_review_node(state: OrchestratorState) -> dict:
         )
         action = "approve"
 
+    # Keep the entries of a plan that still names blocks in LATER tiers (a
+    # DV-failure revise spanning tiers); this tier's own entries are replaced.
+    _carry = {k: v for k, v in (state.get("revise_blocks") or {}).items()
+              if k not in block_names}
+    revise_blocks: dict | None = _carry or None
+    if action == "revise":
+        revise_blocks = {**_carry, **_plan_targeted_revise(
+            pr, response, block_names, edited_blocks, reviewed_specs,
+            failed_tier_blocks, review_summary, tier,
+        )}
     write_graph_event(pr, "Integration Review", "graph_node_exit", {
         "action": action, "issues_found": issues_found,
         "review_failed": review_failed,
+        "edited_blocks": edited_blocks,
+        "revise_blocks": revise_blocks,
     })
-
     if action == "abort":
         log("  [INTEGRATION REVIEW] Aborted by user/agent", RED)
     elif action == "revise":
-        log("  [INTEGRATION REVIEW] Revision requested — "
-            "use restart_block to re-generate affected specs", YELLOW)
-
+        _desc = ', '.join(
+            f"{b} ({'implement reviewed spec' if reuse else 're-spec with feedback'})"
+            for b, reuse in (revise_blocks or {}).items())
+        log(f"  [INTEGRATION REVIEW] Targeted revise -- re-entering: {_desc}",
+            YELLOW)
     return {
         "integration_review_action": action,
         "integration_review_failed": review_failed,
+        "revise_blocks": revise_blocks,
     }
 
 
@@ -6126,7 +6399,14 @@ async def advance_tier_node(state: OrchestratorState) -> dict:
         "passed_so_far": passed,
     })
 
-    return {"current_tier_index": new_idx}
+    plan = state.get("revise_blocks") or None
+    keep = None
+    if plan:
+        later = set((state.get("tier_list") or [])[new_idx:])
+        if any(b.get("name") in plan and b.get("tier", 1) in later
+               for b in state.get("block_queue", [])):
+            keep = plan
+    return {"current_tier_index": new_idx, "revise_blocks": keep}
 
 
 # ---------------------------------------------------------------------------
@@ -6138,7 +6418,9 @@ def route_after_integration_review(state: OrchestratorState) -> str:
 
     approve → advance_tier (continue normally)
     abort   → END (terminate the pipeline)
-    revise  → init_tier (rerun the current tier from the revised uArch specs)
+    revise  → init_tier (re-enter ONLY the blocks in ``revise_blocks``; the
+              reviewed specs were adopted and the chip lead's findings
+              written as gate feedback by integration_review_node)
     """
     action = state.get("integration_review_action", "approve")
     if action == "abort":
@@ -9086,7 +9368,9 @@ async def integration_dv_decision_node(state: OrchestratorState) -> dict:
             "integration_dv")
         dv_result["revised_blocks"] = revised
         log(f"  [INTEG-DV] Revise: uArch feedback appended to "
-            f"{revised or '[] (no specs matched)'}; re-running tiers",
+            f"{revised or '[] (no specs matched)'}; "
+            + ("re-entering only those blocks" if revised
+               else "re-running every tier"),
             YELLOW)
     elif action in ("retry", "fix_rtl", "fix_tb"):
         fix_desc = response.get("rtl_fix_description", "")
@@ -9115,7 +9399,9 @@ async def integration_dv_decision_node(state: OrchestratorState) -> dict:
         "integration_dv_result": dv_result,
         "pipeline_done": False,
         "pipeline_aborted": action == "abort",
-        **({"current_tier_index": 0} if action == "revise" else {}),
+        **({"current_tier_index": 0,
+            "revise_blocks": ({n: False for n in revised} or None)}
+           if action == "revise" else {}),
     }
 
 
@@ -10065,7 +10351,9 @@ async def validation_dv_decision_node(state: OrchestratorState) -> dict:
             "validation_dv")
         dv_result["revised_blocks"] = revised
         log(f"  [VALIDATION-DV] Revise: uArch feedback appended to "
-            f"{revised or '[] (no specs matched)'}; re-running tiers",
+            f"{revised or '[] (no specs matched)'}; "
+            + ("re-entering only those blocks" if revised
+               else "re-running every tier"),
             YELLOW)
     elif action in ("retry", "fix_rtl", "fix_tb"):
         fix_desc = response.get("rtl_fix_description", "")
@@ -10080,7 +10368,9 @@ async def validation_dv_decision_node(state: OrchestratorState) -> dict:
         "validation_dv_result": dv_result,
         "pipeline_done": False,
         "pipeline_aborted": action == "abort",
-        **({"current_tier_index": 0} if action == "revise" else {}),
+        **({"current_tier_index": 0,
+            "revise_blocks": ({n: False for n in revised} or None)}
+           if action == "revise" else {}),
     }
 
 

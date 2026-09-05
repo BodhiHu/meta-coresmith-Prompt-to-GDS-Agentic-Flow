@@ -1052,6 +1052,83 @@ def check_rtl_contract_ports(project_root, block_name: str,
     return errors
 
 
+async def generate_uarch_specs_single_context(
+    blocks: list[dict],
+    feedback_by_block: dict[str, str] | None = None,
+) -> dict:
+    """Author (or revise) the uArch specs of ``blocks`` in ONE agent session
+    (CORESMITH_UARCH_SINGLE_CONTEXT). One micro-architect writes every
+    ``arch/uarch_specs/<block>.md`` with a single, consistent naming scheme
+    across the edges that connect them, instead of one author per block.
+
+    Returns ``{"written": [...], "missing": [...], "session_id": str}``. A
+    spec is ``written`` only when this call produced a fresh artifact for it
+    (canonical path modified, or recovered from the per-call codex workdir);
+    the caller lets ``missing`` blocks fall back to per-block generation.
+    """
+    from orchestrator.architecture.state import ARCH_DOC_DIR
+    from orchestrator.langchain.agents.uarch_spec_generator import UarchSpecGenerator
+
+    feedback_by_block = feedback_by_block or {}
+    spec_dir = PROJECT_ROOT / ARCH_DOC_DIR / "uarch_specs"
+    spec_dir.mkdir(parents=True, exist_ok=True)
+    python_sources: dict[str, str] = {}
+    previous_specs: dict[str, str] = {}
+    pre_mtime: dict[str, int] = {}
+    for b in blocks:
+        name = b["name"]
+        ref = _live_python_source_ref(b, PROJECT_ROOT)
+        python_sources[name] = resolve_python_source(ref, PROJECT_ROOT)
+        _report_uarch_golden(name, ref, python_sources[name])
+        p = spec_dir / f"{name}.md"
+        if p.exists():
+            try:
+                previous_specs[name] = p.read_text()
+                pre_mtime[name] = p.stat().st_mtime_ns
+            except OSError:
+                pass
+    call_start = _time.time()
+    agent = UarchSpecGenerator(temperature=0.2)
+    await agent.generate_many(
+        blocks=blocks,
+        python_sources=python_sources,
+        feedback=feedback_by_block,
+        previous_specs=previous_specs,
+        project_root=str(PROJECT_ROOT),
+    )
+    session_id = getattr(getattr(agent, "llm", None), "last_session_id", "") or ""
+    written: list[str] = []
+    missing: list[str] = []
+    for b in blocks:
+        name = b["name"]
+        p = spec_dir / f"{name}.md"
+        text = ""
+        try:
+            if p.exists() and (name not in pre_mtime
+                               or p.stat().st_mtime_ns != pre_mtime[name]):
+                text = p.read_text()
+        except OSError:
+            text = ""
+        if not text.strip():
+            recovered = _recover_codex_call_artifact(
+                PROJECT_ROOT, Path(ARCH_DOC_DIR) / "uarch_specs" / f"{name}.md",
+                min_mtime=call_start,
+            )
+            if recovered:
+                text = recovered
+                p.write_text(text)
+        if text and _looks_like_uarch_markdown(text):
+            written.append(name)
+            try:
+                from orchestrator.state_store.project_db import open_project as _op
+                _op(str(PROJECT_ROOT)).stamp_block_spec(name)
+            except Exception:  # noqa: BLE001 - provenance is best-effort
+                pass
+        else:
+            missing.append(name)
+    return {"written": written, "missing": missing, "session_id": session_id}
+
+
 def _recover_codex_call_artifact(
     project_root: Path, rel_path: Path, min_mtime: float = 0.0
 ) -> str:

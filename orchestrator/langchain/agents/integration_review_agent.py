@@ -300,6 +300,12 @@ class IntegrationReviewAgent:
                 except OSError:
                     continue
 
+            # Targeted revise: the caller re-enters ONLY these blocks (plus
+            # any the chip lead names) and adopts the reviewed copy as the
+            # canonical spec, instead of re-fanning out the whole tier.
+            edited_blocks = [Path(sp).stem for sp in edited_specs]
+            reviewed_specs = {Path(sp).stem: sp for sp in spec_paths}
+
             counts = _extract_issue_counts(summary)
             if counts is None:
                 # No parseable counts block. Taking (0, 0) on faith would read
@@ -324,6 +330,8 @@ class IntegrationReviewAgent:
                 "summary": summary,
                 "issues_found": issues_found,
                 "issues_fixed": issues_fixed,
+                "edited_blocks": edited_blocks,
+                "reviewed_specs": reviewed_specs,
                 "review_dir": (
                     str(review_dir) if not inplace and review_dir.exists() else None
                 ),

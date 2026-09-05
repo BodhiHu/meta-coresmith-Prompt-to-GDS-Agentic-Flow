@@ -698,6 +698,7 @@ def load_blocks_meta(root: Path) -> dict[str, dict]:
 # --------------------------------------------------------------------------- #
 
 TIER_NODES = {"Init Tier", "Advance Tier", "Integration Review", "Pipeline Complete",
+              "Generate Uarch Specs",  # single-context uArch stage (run-level)
               "Integration Check", "Integration DV", "Validation DV", "Contract Audit",
               "Final Report", "Chip Lead", "Backend Complete", "Flat Top Synthesis"}
 HITL_NODES = {"Review Uarch Spec", "Ask Human", "Escalate PRD", "Escalate Diagram",

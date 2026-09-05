@@ -27,8 +27,11 @@ Omit fields you don't need. `action` MUST be one of the payload's
   only for a concrete contract violation you can name.
 - `uarch_integration_review`: `approve` is the default — the reviewer edits
   specs on every run, so `issues_fixed > 0` alone is NOT a reason to revise.
-  `revise` needs `block_actions` naming the blocks to redo, else it strands
-  the run. VERIFY ON DISK before approving: when the review (or your own
+  A `revise` is TARGETED: the blocks in `edited_blocks` re-enter the tier
+  implementing the reviewer's edited spec as-is, and every block you name
+  in `affected_blocks` (or `block_actions`) re-specs with your `feedback`;
+  all other blocks keep their passing result. A revise that names nothing
+  re-runs the whole tier, so name the blocks. VERIFY ON DISK before approving: when the review (or your own
   reasoning) claims specific RTL properties — "block X now exposes ports
   Y/Z", "the handshake is wired" — grep the actual RTL files for those
   identifiers first. A spec saying so is NOT evidence the RTL does; approving
