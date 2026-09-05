@@ -90,17 +90,9 @@ def preflight_check(phases: list[str] | None = None) -> dict:
 
     errors: list[str] = []
     warnings: list[str] = []
-    skip_synth = os.environ.get("CORESMITH_SKIP_SYNTH", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-    # HOT-PATCH (chip-lead, synth-gated run): honor CORESMITH_SYNTH_GENERIC in
-    # preflight. Generic (PDK-free) synth maps with abc -g and needs only yosys+
-    # verilator -- NOT the sky130 Liberty/PDK. Preflight previously required the
-    # PDK unconditionally whenever SKIP_SYNTH was unset, falsely blocking generic
-    # synth on PDK-less boxes. SYNTH_GENERIC honored downstream (~L1181); align here.
+    # Generic (PDK-free) synth maps with abc -g and needs only yosys + verilator,
+    # not the sky130 Liberty/PDK. It is selected explicitly or whenever the PDK
+    # is absent; synthesis itself can never be skipped.
     synth_generic = os.environ.get("CORESMITH_SYNTH_GENERIC", "").strip().lower() in {
         "1",
         "true",
@@ -132,30 +124,18 @@ def preflight_check(phases: list[str] | None = None) -> dict:
 
         if not shutil.which("verilator"):
             errors.append("verilator not found on PATH")
-        if skip_synth:
-            _loud = (
-                "!!! CORESMITH_SKIP_SYNTH=1 -- SYNTHESIS GATE DISABLED. "
-                "Yosys/PDK checks SKIPPED; un-synthesizable RTL (e.g. a "
-                "non-terminating combinational cloud) WILL NOT be caught. "
-                "Unset CORESMITH_SKIP_SYNTH to enable the synth gate."
-            )
-            warnings.append(_loud)
-            import sys as _sys
-            print("\n" + "=" * 78 + "\n" + _loud + "\n" + "=" * 78,
-                  file=_sys.stderr, flush=True)
-        elif synth_generic:
-            # Generic PDK-free synth: only yosys (+ verilator above) required.
-            if not shutil.which("yosys"):
-                errors.append("yosys not found on PATH")
+        # Yosys always runs: with the sky130 Liberty/PDK present it maps to the
+        # library; without it (or with CORESMITH_SYNTH_GENERIC=1) it runs the
+        # PDK-free generic gate mapping. There is no way to skip synthesis.
+        if not shutil.which("yosys"):
+            errors.append("yosys not found on PATH (synthesis is mandatory)")
+        if synth_generic or not LIBERTY_FILE.exists():
             warnings.append(
-                "CORESMITH_SYNTH_GENERIC=1 -- PDK-free generic gate-mapping synth "
-                "(abc -g); sky130 Liberty/PDK checks skipped (real synth still runs)."
+                "PDK-free generic gate-mapping synthesis (abc -g): the sky130 "
+                "Liberty/PDK is absent or CORESMITH_SYNTH_GENERIC=1. Real synthesis "
+                "still runs; area and timing are generic estimates."
             )
         else:
-            if not LIBERTY_FILE.exists():
-                errors.append(f"Liberty file not found: {LIBERTY_FILE}")
-            if not shutil.which("yosys"):
-                errors.append("yosys not found on PATH")
             if not PDK_ROOT.exists():
                 errors.append(f"PDK root directory not found: {PDK_ROOT}")
             elif not any((PDK_ROOT / v).is_dir() for v in ("sky130A", "sky130B")):
@@ -910,16 +890,6 @@ async def generate_uarch_spec(
             (_bd / CONTRACT_STALE_MARKER).unlink(missing_ok=True)
     except OSError:
         pass
-
-    # Block model (env-gated). When CORESMITH_BLOCK_GOLDENS is on, emit a
-    # per-block Amaranth model (arch/block_models/<block>.py) transcribing the
-    # reference implementation's exact math for this block with real clock /
-    # handshake / latency semantics, so the model-integration agent can wire the
-    # block models into a top-level chip model and the deterministic
-    # model-integration gate can prove the simulated chip output == the
-    # reference implementation BEFORE end-of-pipeline DV. Best-effort: a failure
-    # here is logged but does not crash the spec step -- the gate is the hard
-    # gate. Flag off => byte-identical to before (no new file).
 
     return result
 

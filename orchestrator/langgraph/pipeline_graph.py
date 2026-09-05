@@ -236,11 +236,6 @@ class BlockState(TypedDict):
     attempt: int
     phase: str  # "init" | "uarch" | "rtl" | "lint" | "tb" | "sim" | "synth"
 
-    # Two-pass restructure: which orchestrator pass this block is running in.
-    # "uarch" = pass 1 (spec + Amaranth block model only, no RTL); "rtl" = pass 2
-    # (RTL gen + DV + synth). Threaded in from the orchestrator via Send.
-    # Only meaningful when CORESMITH_BLOCK_GOLDENS is on; "rtl" (the default)
-    # preserves single-pass behaviour when the flag is off.
 
     # Routing-only flags (no content -- agents read/write disk directly) ────
     uarch_approved: bool
@@ -323,11 +318,6 @@ class OrchestratorState(TypedDict):
     tier_list: list[int]          # sorted unique tiers, e.g. [1, 2, 3]
     current_tier_index: int
 
-    # Count of µarch-gate revise/re-spec iterations (both block_math and
-    # contract gaps). Bounds the in-loop re-spec so a non-composing decomposition
-    # retries a few variance draws instead of dead-ending, but cannot loop
-    # forever. Cap = CORESMITH_UARCH_REVISE_MAX (default 4).
-    uarch_revise_attempts: Annotated[int, _last]
 
     # Results (accumulated via reducer from all Send branches) ──────────────
     completed_blocks: Annotated[list[dict], operator.add]
@@ -4468,86 +4458,7 @@ async def synthesize_node(state: BlockState) -> dict:
     block = state["current_block"]
     block_name = block["name"]
 
-    # Honor CORESMITH_SKIP_SYNTH=1 so hosts with no Sky130 PDK can still
-    # complete RTL + sim.  Treat as a no-op success.
     import os as _os
-    if _os.environ.get("CORESMITH_SKIP_SYNTH") == "1":
-        import sys as _sys
-        _loud = (f"  [SYNTH] !!! GATE DISABLED (CORESMITH_SKIP_SYNTH=1) for "
-                 f"{block_name} -- un-synthesizable RTL WILL NOT be caught")
-        log(_loud, RED)
-        print("=" * 78 + "\n" + _loud.strip() + "\n" + "=" * 78,
-              file=_sys.stderr, flush=True)
-        # rung2 defect 2: the PDK-free synthesizability probes (generic
-        # elaborate / cell-explosion / logic-depth / generic-FF-budget) need no
-        # PDK, so they MUST still run and GATE under SKIP_SYNTH -- otherwise
-        # SKIP_SYNTH silently hides an un-synthesizable design (the exact hole
-        # the synth-gate-default work closed). Pass require_gate_flag=False so
-        # they run even when CORESMITH_PPA_GATE is not seeded; yosys-absent
-        # falls into the tooling_missing park path below. Only area/WNS are
-        # genuinely unavailable here. Real probe metrics are recorded (was NULL).
-        ppa_ok, ppa_reasons, ppa_meta = _evaluate_ppa_gate(
-            _pr(state), block_name, state.get("rtl_path", ""), None,
-            require_gate_flag=False,
-        )
-        # rung3-fixes-1 (minor 4): the SKIP_SYNTH row references
-        # ppa_report.json, but the PDK-free probe only writes that file on a
-        # FAIL (via _evaluate_ppa_gate's _flag). On a PASS it never existed, so
-        # the scoreboard row pointed at a nonexistent report. Write the
-        # same-shape report from the probe metrics whenever the gate didn't
-        # already drop one -- the fail path keeps its richer {checks, reasons}
-        # report; the pass path now has a real file at the recorded path.
-        _skip_report_path = (
-            Path(_pr(state)) / ".coresmith" / "blocks" / block_name
-            / "ppa_report.json"
-        )
-        try:
-            _skip_report_path.parent.mkdir(parents=True, exist_ok=True)
-            if not _skip_report_path.exists():
-                _skip_report_path.write_text(json.dumps({
-                    "probe": "skip_synth",
-                    "ppa_ok": ppa_ok,
-                    "reasons": ppa_reasons or [],
-                    "checks": [],
-                    "ff": ppa_meta.get("ff"),
-                    "cells": ppa_meta.get("cells"),
-                    "mem_bits": ppa_meta.get("mem_bits"),
-                    "area_um2": ppa_meta.get("area_um2"),
-                    "elaborated": ppa_meta.get("elaborated"),
-                    "budget_ff": ppa_meta.get("budget_ff"),
-                    "budget_area_um2": ppa_meta.get("budget_area_um2"),
-                }, indent=2))
-        except OSError:
-            pass
-        _record_ppa_row(
-            _pr(state), block=block_name, attempt=state.get("attempt", 0),
-            source="gate", probe="skip_synth", ppa_ok=ppa_ok,
-            reasons=ppa_reasons or None,
-            cells=ppa_meta.get("cells"),
-            ff=ppa_meta.get("ff"),
-            mem_bits=ppa_meta.get("mem_bits"),
-            area_um2=ppa_meta.get("area_um2"),
-            wns_ns=ppa_meta.get("wns_ns"),
-            elaborated=ppa_meta.get("elaborated"),
-            budget_ff=ppa_meta.get("budget_ff"),
-            budget_area_um2=ppa_meta.get("budget_area_um2"),
-            report_path=str(_skip_report_path),
-        )
-        if _ppa_should_park_tooling_missing(
-                _pr(state), ppa_ok, ppa_meta,
-                state.get("pipeline_run_start") or None):
-            _park_ppa_unmeasurable(state, block_name)
-        return {"synth_success": True, "synth_gate_count": 0,
-                "ppa_ok": ppa_ok, "ppa_reasons": ppa_reasons,
-                # No yosys run -> no netlist -> nothing for the gate-level sim
-                # to simulate. Recorded explicitly (never blank) so the absence
-                # of a gate-sim verdict is visible downstream.
-                "gate_sim_ok": None, "gate_sim_status": "not_run",
-                "gate_sim_reason": "CORESMITH_SKIP_SYNTH=1 -- no netlist was "
-                                   "produced, so the gate netlist was never "
-                                   "simulated",
-                "phase": "synth"}
-
     rtl_path = state.get("rtl_path", "")
     if not rtl_path or not Path(rtl_path).exists():
         log("  [SYNTH] Skipped -- RTL file not found", RED)
@@ -5701,15 +5612,8 @@ def route_after_synth(state: BlockState) -> str:
         return "diagnose"
     if state.get("gate_sim_ok") is False:
         return "diagnose"
-    # rung2 defect 2: under SKIP_SYNTH the PDK-free synthesizability probes run
-    # and GATE unconditionally (they need no PDK / no PPA-budget flag), so a
-    # probe FAIL (ppa_ok False) must route to diagnose there too -- otherwise
-    # SKIP_SYNTH would run the probes but ignore their verdict.
-    import os as _os_ras
-
     from orchestrator.langgraph.ppa_check import ppa_gate_enabled
-    _skip_synth = _os_ras.environ.get("CORESMITH_SKIP_SYNTH") == "1"
-    if (ppa_gate_enabled() or _skip_synth) and state.get("ppa_ok") is False:
+    if ppa_gate_enabled() and state.get("ppa_ok") is False:
         return "diagnose"
     return "block_done"
 
@@ -7893,7 +7797,6 @@ route_after_integration.__edge_labels__ = {
 # Node: model_integration  (LLM model-integration + deterministic Amaranth verify)
 # ---------------------------------------------------------------------------
 #
-# Behind CORESMITH_BLOCK_GOLDENS. When OFF (default) this node is a no-op
 # pass-through to integration_dv -- byte-identical routing to before the
 # feature existed. When ON it (a) calls the model-integration LLM agent to wire
 # every per-block Amaranth block model into a top-level Amaranth chip model
@@ -7906,7 +7809,6 @@ route_after_integration.__edge_labels__ = {
 
 
 # ---------------------------------------------------------------------------
-# Two-pass: uarch_integration_gate + begin_rtl_pass (CORESMITH_BLOCK_GOLDENS)
 # ---------------------------------------------------------------------------
 #
 # The µARCH GATE runs BETWEEN the two fan-outs: after pass 1 (all blocks emit

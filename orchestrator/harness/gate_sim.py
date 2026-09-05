@@ -201,7 +201,7 @@ def block_is_chip_top(block: dict) -> bool:
 def gate_sim_strict() -> bool:
     """When on, an absent toolchain/PDK is a FAIL rather than a non-blocking
     ``not_run``. Default off so a host with no PDK can still run the frontend
-    (the same posture as ``CORESMITH_SKIP_SYNTH``), while CI/backend hosts can
+    (the same posture as PDK-free generic synthesis), while CI/backend hosts can
     demand the gate actually ran."""
     return _flag("CORESMITH_GATE_SIM_STRICT", False)
 

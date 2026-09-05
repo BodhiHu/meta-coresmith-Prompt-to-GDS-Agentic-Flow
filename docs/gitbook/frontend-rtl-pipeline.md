@@ -76,7 +76,7 @@ behavioral mismatches are sent to diagnosis because they may be RTL bugs.
 ### `synthesize`
 
 Runs Yosys for the block at the requested target clock. Synthesis failures get
-up to two local RTL fix attempts. If `CORESMITH_SKIP_SYNTH=1`, synthesis is
+up to two local RTL fix attempts. Synthesis always runs (Yosys is mandatory); if `CORESMITH_SYNTH_GENERIC=1` or no PDK is present, generic gate mapping is
 treated as a no-op success so RTL and simulation can run on hosts without the
 Sky130 PDK.
 

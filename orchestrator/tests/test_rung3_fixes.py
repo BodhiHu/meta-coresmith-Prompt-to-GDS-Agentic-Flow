@@ -17,7 +17,6 @@ Hermetic (no LLM, no EDA except an optional real-yosys probe elsewhere):
 """
 from __future__ import annotations
 
-import json
 
 import pytest
 
@@ -303,34 +302,3 @@ class TestIntegrationRetryReparks:
 # Minor 4 -- SKIP_SYNTH writes the ppa_report.json its row references
 # ===========================================================================
 
-class TestSkipSynthWritesReport:
-    @pytest.mark.asyncio
-    async def test_skip_synth_pass_writes_report_at_recorded_path(
-        self, monkeypatch, tmp_path
-    ):
-        monkeypatch.setenv("CORESMITH_SKIP_SYNTH", "1")
-        meta = {
-            "ff": 128, "cells": 50, "mem_bits": 0, "area_um2": None,
-            "elaborated": True, "budget_ff": 200, "budget_area_um2": None,
-        }
-        monkeypatch.setattr(
-            pipeline_graph, "_evaluate_ppa_gate",
-            lambda *a, **k: (True, [], dict(meta)),
-        )
-        state = {
-            "current_block": {"name": "blk"},
-            "project_root": str(tmp_path),
-            "attempt": 1,
-            "rtl_path": "",
-            "pipeline_phase": "rtl",
-        }
-        result = await pipeline_graph.synthesize_node(state)
-        assert result["synth_success"] is True
-
-        report = tmp_path / ".coresmith" / "blocks" / "blk" / "ppa_report.json"
-        assert report.exists(), "SKIP_SYNTH must write the ppa_report it records"
-        data = json.loads(report.read_text())
-        assert data["probe"] == "skip_synth"
-        assert data["ppa_ok"] is True
-        assert data["ff"] == 128
-        assert data["budget_ff"] == 200

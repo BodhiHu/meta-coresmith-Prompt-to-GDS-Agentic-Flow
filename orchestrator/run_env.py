@@ -11,7 +11,7 @@ dependency-free -- stdlib only -- so the CLI can import it under whatever
 interpreter the operator happens to be running.
 
 SEMANTICS: the file is the run's operator-frozen config (provider + model
-selectors, ``CORESMITH_REFERENCE_ENTRY``, ``CORESMITH_SKIP_SYNTH``, ...), so
+selectors, ``CORESMITH_REFERENCE_ENTRY``, ``CORESMITH_SYNTH_GENERIC``, ...), so
 for the keys it CONTAINS it is AUTHORITATIVE: it OVERRIDES the ambient
 environment rather than deferring to it. The old ``setdefault`` semantics let a
 stale value that happened to be exported in the daemon-launching shell win

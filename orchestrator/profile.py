@@ -39,7 +39,6 @@ STRICT_DEFAULTS: dict[str, str] = {
     "CORESMITH_LATENCY_AUDIT": "1",
     # A-Fix 5a: seeded DV stimulus tier (defined here so the profile owns the
     # single source of truth; the model_integration gate reads the same flag).
-    "CORESMITH_GATE_SEEDED_STIMULUS": "1",
 }
 
 LEGACY_DEFAULTS: dict[str, str] = {}

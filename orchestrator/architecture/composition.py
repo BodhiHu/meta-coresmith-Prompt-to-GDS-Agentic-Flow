@@ -20,7 +20,6 @@ Public surface:
 - :func:`parse_func_vectors` -- tolerant markdown/regex parse of the FRD
   ``## Functional Vectors`` section into structured dicts.
 - :func:`resolve_reference_implementation` -- locate the input software golden.
-The feature is gated by ``CORESMITH_BLOCK_GOLDENS``: when off (the default),
 """
 
 from __future__ import annotations
@@ -77,52 +76,6 @@ def functional_blocks() -> set[str]:
 def is_functional_block(block_name: str) -> bool:
     """True when ``block_name`` is in :func:`functional_blocks`."""
     return bool(block_name) and block_name in functional_blocks()
-
-
-def gate_allow_nondegenerate_enabled() -> bool:
-    """True when ``CORESMITH_GATE_ALLOW_NONDEGENERATE`` is set truthy.
-
-    Default OFF. The model-integration gate's functional default (no declared
-    acceptance predicate, ``CORESMITH_BIT_EXACT`` off) requires the composed
-    chip model's output to MATCH THE REFERENCE (the FRD behaviour). Setting this
-    flag reverts to the old, too-weak check that accepted any *non-degenerate*
-    output without comparing it to the reference -- which let a composition
-    streaming a handful of garbage bytes pass. Use only when there is genuinely
-    no usable oracle comparison; intentionally non-bit-exact (lossy) designs
-    should declare an acceptance_fn (see :func:`resolve_functional_acceptance`)
-    instead. Mirrors :func:`bit_exact_enabled`.
-
-    A-Fix 5(b): under the STRICT profile the escape hatch is DEPRECATED. If the
-    flag is set while strict, log an ERROR and return ``False`` (the functional
-    gate keeps its reference-equivalence requirement) -- a deliberate
-    env>profile exception, because honoring a "pass any non-degenerate output"
-    knob defeats the whole anti-gaming fix. The LEGACY profile still honors it.
-    """
-    flag_set = os.environ.get(
-        "CORESMITH_GATE_ALLOW_NONDEGENERATE", ""
-    ).strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-    if not flag_set:
-        return False
-    try:
-        from orchestrator.profile import resolve_profile
-        profile = resolve_profile()
-    except Exception:  # noqa: BLE001 - a profile hiccup must not weaken the gate
-        profile = "strict"
-    if profile != "legacy":
-        logger.error(
-            "CORESMITH_GATE_ALLOW_NONDEGENERATE is set but the STRICT profile "
-            "DEPRECATES this escape hatch (it let a wrong composed model pass on "
-            "mere non-degeneracy). IGNORING it -- the model-integration gate "
-            "keeps its reference-equivalence requirement. Set "
-            "CORESMITH_PROFILE=legacy to honor the flag."
-        )
-        return False
-    return True
 
 
 # ---------------------------------------------------------------------------
