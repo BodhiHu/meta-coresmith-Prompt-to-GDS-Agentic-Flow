@@ -482,3 +482,33 @@ class TestPlanSpansTiers:
         out = await pipeline_graph.integration_review_node(st)
         assert out["integration_review_action"] == "approve"
         assert out["revise_blocks"] == {"enc": False}
+
+
+class TestWavekitAuditSizeGuard:
+    def test_oversized_vcd_is_skipped_with_a_record(self, tmp_path, monkeypatch):
+        vcd = tmp_path / "dump.vcd"; vcd.write_bytes(b"$date\n" * 200)
+        audit = tmp_path / "wavekit_audit.json"
+        monkeypatch.setenv("CORESMITH_WAVEKIT_MAX_BYTES", "100")
+        out = pipeline_helpers.run_wavekit_vcd_audit(vcd, audit)
+        assert out["skipped"] is True and out["ok"] is False
+        assert json.loads(audit.read_text())["vcd_bytes"] == vcd.stat().st_size
+
+    def test_small_vcd_reaches_the_audit(self, tmp_path, monkeypatch):
+        vcd = tmp_path / "dump.vcd"; vcd.write_bytes(b"$date\n")
+        audit = tmp_path / "wavekit_audit.json"
+        monkeypatch.setenv("CORESMITH_WAVEKIT_MAX_BYTES", "1000000")
+        calls = []
+        monkeypatch.setattr(pipeline_helpers.subprocess, "run",
+                            lambda *a, **k: calls.append(a) or type("P", (), {"returncode": 1, "stdout": "", "stderr": "no wavekit"})())
+        pipeline_helpers.run_wavekit_vcd_audit(vcd, audit)
+        assert calls  # the guard let it through to the real audit path
+
+
+class TestWavekitVeto:
+    def test_only_a_real_finding_blocks(self):
+        b = pipeline_helpers.wavekit_audit_blocks
+        assert b({"ok": True}) is False
+        assert b({"ok": False, "skipped": True, "error": "VCD too large"}) is False
+        assert b({"ok": False, "error": "WaveKit VCD audit timed out"}) is False
+        assert b(None) is False
+        assert b({"ok": False, "error": "clock never toggled"}) is True

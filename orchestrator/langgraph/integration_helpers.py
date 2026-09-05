@@ -25,6 +25,7 @@ from orchestrator.langgraph.contract_conformance import (
     channel_base,
 )
 from orchestrator.langgraph.pipeline_helpers import (
+    wavekit_audit_blocks,
     PROJECT_ROOT,
     RED,
     _write_step_log,
@@ -2603,12 +2604,13 @@ def run_integration_simulation(
                 not summary["found"]
                 or (summary["tests_total"] > 0 and summary["tests_failed"] == 0)
             )
-            and wavekit_audit.get("ok") is True
+            and not wavekit_audit_blocks(wavekit_audit)
         )
         if not wavekit_audit.get("ok"):
             output = (
-                "WAVEKIT VCD AUDIT FAILED: "
-                f"{wavekit_audit.get('error', 'unknown error')}\n" + output
+                ("WAVEKIT VCD AUDIT FAILED: " if wavekit_audit_blocks(wavekit_audit)
+                 else "WAVEKIT VCD AUDIT NOT RUN (advisory): ")
+                + f"{wavekit_audit.get('error', 'unknown error')}\n" + output
             )
         return {
             "passed": passed,

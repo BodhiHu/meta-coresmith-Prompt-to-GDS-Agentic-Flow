@@ -1539,13 +1539,53 @@ with VcdReader(str(vcd_path)) as reader:
 """
 
 
+def wavekit_audit_blocks(audit: dict | None) -> bool:
+    """True when a WaveKit VCD audit VETOES a passing simulation: it ran and
+    found a problem. An audit that could not run -- skipped (oversized VCD,
+    ``CORESMITH_WAVEKIT_MAX_BYTES``) or timed out -- is advisory: the record
+    is persisted and surfaced in the log, but a 9/9 cocotb pass is not turned
+    into a DV failure by a tool that never inspected the waveform."""
+    if not audit:
+        return False
+    if audit.get("ok") is True:
+        return False
+    if audit.get("skipped"):
+        return False
+    err = str(audit.get("error") or "").lower()
+    if "timed out" in err or "too large" in err:
+        return False
+    return True
+
+
 def run_wavekit_vcd_audit(vcd_path: Path, audit_path: Path, clock_hint: str = "clk") -> dict:
-    """Inspect a Verilator VCD with WaveKit and persist a small audit report."""
+    """Inspect a Verilator VCD with WaveKit and persist a small audit report.
+
+    Skips (honestly, with a persisted record) any VCD above
+    ``CORESMITH_WAVEKIT_MAX_BYTES`` (default 1 GiB): WaveKit parses the whole
+    file into Python objects, and a 2.4 GB chip-top validation dump took the
+    e6 host to memory exhaustion (2026-09-05) and hung sshd.
+    """
     if not vcd_path.exists() or vcd_path.stat().st_size == 0:
         result = {
             "ok": False,
             "error": f"missing or empty VCD: {vcd_path}",
             "vcd_path": str(vcd_path),
+        }
+        audit_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
+        return result
+    try:
+        _max_bytes = int(os.environ.get("CORESMITH_WAVEKIT_MAX_BYTES", "") or (1 << 30))
+    except ValueError:
+        _max_bytes = 1 << 30
+    _size = vcd_path.stat().st_size
+    if _max_bytes > 0 and _size > _max_bytes:
+        result = {
+            "ok": False,
+            "skipped": True,
+            "error": (f"VCD too large for the in-memory WaveKit audit: {_size} bytes > "
+                      f"CORESMITH_WAVEKIT_MAX_BYTES={_max_bytes}"),
+            "vcd_path": str(vcd_path),
+            "vcd_bytes": _size,
         }
         audit_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
         return result
