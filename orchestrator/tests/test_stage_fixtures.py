@@ -127,7 +127,7 @@ async def _drive_to_post_uarch(record_root: Path, thread_id: str) -> None:
     try:
         # interrupt_after freezes the run right after the uarch spec is written,
         # i.e. a deterministic "post-uarch" checkpoint.
-        graph = build_block_subgraph(two_pass=False).compile(
+        graph = build_block_subgraph().compile(
             checkpointer=saver, interrupt_after=["generate_uarch_spec"])
         cfg = {"configurable": {"thread_id": thread_id}}
         await asyncio.wait_for(
@@ -229,21 +229,4 @@ class TestStalenessPolicy:
         (fixture_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
         return fixture_dir
 
-    @pytest.mark.asyncio
-    async def test_mismatch_skips_by_default(self, synth_env, monkeypatch, tmp_path):
-        fx = await self._stale_ckpt_fixture(tmp_path, monkeypatch, "stale_skip")
-        monkeypatch.delenv("CORESMITH_STAGE_STRICT", raising=False)
-        root = tmp_path / "r"
-        root.mkdir()
-        with pytest.raises(pytest.skip.Exception):
-            await sf.materialize_stage(fx, str(root), monkeypatch)
 
-    @pytest.mark.asyncio
-    async def test_mismatch_raises_under_strict(self, synth_env, monkeypatch, tmp_path):
-        fx = await self._stale_ckpt_fixture(tmp_path, monkeypatch, "stale_raise")
-        monkeypatch.setenv("CORESMITH_STAGE_STRICT", "1")
-        root = tmp_path / "r2"
-        root.mkdir()
-        with pytest.raises(RuntimeError) as ei:
-            await sf.materialize_stage(fx, str(root), monkeypatch)
-        assert "schema drift" in str(ei.value)

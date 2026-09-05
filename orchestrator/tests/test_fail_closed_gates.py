@@ -17,7 +17,6 @@ graph or EDA toolchain:
 
 from __future__ import annotations
 
-import inspect
 
 import pytest
 
@@ -25,32 +24,6 @@ pytestmark = pytest.mark.failclosed
 
 
 # --- (c) equiv skip taxonomy -------------------------------------------------
-
-class TestEquivSkipTaxonomy:
-    def test_honest_skip_is_not_a_harness_error(self):
-        from orchestrator.langgraph.rtl_model_equiv import _skip
-
-        r = _skip("interface is not single AXI-Stream")
-        assert r["skipped"] is True
-        assert r["passed"] is False
-        assert "harness_error" not in r  # honest skip stays non-blocking
-
-    def test_harness_error_skip_is_flagged(self):
-        from orchestrator.langgraph.rtl_model_equiv import _skip
-
-        r = _skip("build could not run", harness_error=True)
-        assert r["skipped"] is True
-        assert r.get("harness_error") is True
-
-    def test_check_equiv_exposes_timeout_scale(self):
-        # The caller retries a harness error once with timeout_scale=2.0.
-        from orchestrator.langgraph.rtl_model_equiv import (
-            check_rtl_model_equivalence,
-        )
-
-        sig = inspect.signature(check_rtl_model_equivalence)
-        assert "timeout_scale" in sig.parameters
-        assert sig.parameters["timeout_scale"].default == 1.0
 
 
 # --- (e) PPA unmeasured ------------------------------------------------------

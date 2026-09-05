@@ -536,30 +536,11 @@ class TestPromptPinning:
         assert "dependency window" in t.lower()
         assert "MANDATORY" in t
 
-    def test_block_golden_mandates_manifest(self):
-        t = self._read("block_golden_generator.md")
-        assert "# MEM <name>:" in t
-        assert "impl=<flop|fpmem|sram>" in t
-        assert "dependency window" in t.lower()
-
-    def test_ppa_judge_surfaces_ledger(self):
-        t = self._read("microarch_ppa_judge.md")
-        assert "mem_price.json" in t
-        assert "sanity cap" in t.lower()
-        assert "estimate source" in t.lower() or "estimate_source" in t
 
     def test_integration_review_surfaces_ledger(self):
         t = self._read("integration_review.md")
         assert "mem_price.json" in t
         assert "line-buffer" in t.lower() or "line buffer" in t.lower()
-
-    def test_justification_discipline_present(self):
-        # D3: the storage-justification discipline (the line-buffer-vs-frame-store
-        # question) appears in BOTH generators.
-        for name in ("uarch_spec_generator.md", "block_golden_generator.md"):
-            t = self._read(name).lower()
-            assert "line" in t and "store" in t
-            assert "dependency window" in t
 
 
 # ---------------------------------------------------------------------------

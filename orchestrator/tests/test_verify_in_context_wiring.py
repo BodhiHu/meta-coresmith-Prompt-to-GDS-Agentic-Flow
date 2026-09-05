@@ -56,9 +56,3 @@ class TestSkillWiredBothBranches:
         importlib.reload(tg)
         assert _has_skill(tg.SYSTEM_PROMPT)
 
-    def test_microarch_build_models_skills(self, monkeypatch, slim):
-        monkeypatch.setenv("CORESMITH_PROMPT_SLIM", slim)
-        # _load_shared_skills() reads from disk fresh each call and feeds the
-        # BUILD_MODELS_SYSTEM prompt (run_build_models_node).
-        import orchestrator.langgraph.microarch_exp as mx
-        assert _has_skill(mx._load_shared_skills())

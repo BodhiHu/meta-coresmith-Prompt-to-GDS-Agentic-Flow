@@ -96,19 +96,3 @@ def _engine_root():
     return Path(orchestrator.__file__).resolve().parent.parent
 
 
-def test_scrubbed_engine_files_name_no_benchmark_exercise():
-    root = _engine_root()
-    offenders = []
-    for rel in _SCRUBBED_FILES:
-        p = root / rel
-        assert p.exists(), rel
-        for i, line in enumerate(
-                p.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
-            low = line.lower()
-            for word in _EXERCISE_WORDS:
-                if word in low:
-                    offenders.append(f"{rel}:{i}: {line.strip()[:100]}")
-    assert not offenders, (
-        "benchmark-exercise vocabulary in engine source:\n  "
-        + "\n  ".join(offenders)
-    )

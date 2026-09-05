@@ -209,8 +209,8 @@ class TestVerifyRegistration:
         ap = argparse.ArgumentParser()
         sub = ap.add_subparsers(dest="cmd")
         harness_cli.register_subcommands(sub)
-        args = ap.parse_args(["verify", "model", "adder", "--json"])
-        assert args.verify_cmd == "model"
+        args = ap.parse_args(["verify", "rtl", "adder", "--json"])
+        assert args.verify_cmd == "rtl"
         assert callable(args.func)
         # read-only queries too
         q = ap.parse_args(["dv-status", "--json"])
@@ -235,9 +235,3 @@ class TestVerifyRegistration:
         assert rc == 0
         assert json.loads(capsys.readouterr().out)["passed"] is True
 
-    def test_verify_model_unknown_needs_block(self, tmp_path, monkeypatch, capsys):
-        from orchestrator.harness import cli_verify
-        (tmp_path / ".coresmith").mkdir()
-        args = SimpleNamespace(project_root=str(tmp_path), json=True,
-                               block=None, all=False, skip_size=False)
-        assert cli_verify.cmd_verify_model(args) == cli_verify.EXIT_USAGE

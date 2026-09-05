@@ -241,11 +241,6 @@ class BlockState(TypedDict):
     # (RTL gen + DV + synth). Threaded in from the orchestrator via Send.
     # Only meaningful when CORESMITH_BLOCK_GOLDENS is on; "rtl" (the default)
     # preserves single-pass behaviour when the flag is off.
-    pipeline_phase: str
-    # True only in pass 2 of the two-pass flow (after the µarch gate). Lets
-    # route_after_init distinguish flag-off "rtl" (re-spec each block) from
-    # pass-2 "rtl" (reuse the pass-1 spec/model, skip straight to RTL).
-    uarch_pass_done: bool
 
     # Routing-only flags (no content -- agents read/write disk directly) ────
     uarch_approved: bool
@@ -328,13 +323,6 @@ class OrchestratorState(TypedDict):
     tier_list: list[int]          # sorted unique tiers, e.g. [1, 2, 3]
     current_tier_index: int
 
-    # Two-pass restructure (CORESMITH_BLOCK_GOLDENS only) ────────────────────
-    # pipeline_phase: "uarch" (pass 1: spec+model, then µarch gate) | "rtl"
-    # (pass 2: RTL+DV+synth). uarch_pass_done flips True once the µarch gate
-    # passes and begin_rtl_pass resets the tier index. _last reducer so parallel
-    # Send branches merging the (identical) value back never conflict.
-    pipeline_phase: Annotated[str, _last]
-    uarch_pass_done: Annotated[bool, _last]
     # Count of µarch-gate revise/re-spec iterations (both block_math and
     # contract gaps). Bounds the in-loop re-spec so a non-composing decomposition
     # retries a few variance draws instead of dead-ending, but cannot loop
@@ -356,9 +344,6 @@ class OrchestratorState(TypedDict):
 
     # Integration check results ────────────────────────────────────────────
     integration_result: dict | None  # set by integration_check node
-
-    # Model-integration gate results ───────────────────────────────────────
-    model_integration_result: dict | None  # set by model_integration node (env-gated)
 
     # Integration DV results ───────────────────────────────────────────────
     integration_dv_result: dict | None  # set by integration_dv node
@@ -546,46 +531,6 @@ def record_carried_forward_defect(project_root: str, defect: dict) -> None:
         p.write_text(json.dumps(existing, indent=2))
     except Exception:  # noqa: BLE001
         pass
-
-
-def _advisory_composition_defect(project_root: str, gate: str,
-                                 violations: list) -> dict:
-    """Build a carried-forward defect from an ADVISORY composition-gate mismatch.
-
-    Names the SPECIFIC unmodeled bus role (DUT-blind, from the chip_top port
-    shape when it exists) instead of a generic single-role label, and carries a
-    few concrete expected/observed examples so the divergence stays auditable.
-    """
-    first = (violations or [{}])[0]
-    first_block = first.get("first_divergence_block", "")
-    unmodeled = ""
-    try:
-        from orchestrator.langgraph import bfm_lib as _bfm_lib
-        top_src = ""
-        for cand in (Path(project_root) / "rtl" / "user_project_wrapper.v",
-                     Path(project_root) / "rtl" / "chip_top.v"):
-            if cand.exists():
-                top_src = cand.read_text(encoding="utf-8", errors="replace")
-                break
-        unmodeled = _bfm_lib.describe_unmodeled_roles(project_root, top_src)
-    except Exception:  # noqa: BLE001
-        unmodeled = ""
-    return {
-        "gate": gate,
-        "kind": "composition_mismatch",
-        "advisory": True,
-        "first_divergence_block": first_block,
-        "violation_count": len(violations or []),
-        "unmodeled": unmodeled,
-        "examples": [{"expected": v.get("expected"), "observed": v.get("observed")}
-                     for v in (violations or [])[:5]],
-        "note": (
-            "ADVISORY bypass (CORESMITH_DETERMINISTIC_BFM) proceeded past a "
-            "REPRODUCIBLE model-composition mismatch. The deterministic "
-            "integration DV is expected to catch it on the real chip_top; "
-            "carried forward so it is re-checked, not silently swallowed."
-        ),
-    }
 
 
 def _persist_block_coverage(project_root: str, block_name: str,
@@ -784,23 +729,6 @@ def _park_conformance_unrepairable(state: BlockState, block_name: str,
     })
 
 
-def _guard_rtl_phase(state: BlockState, node_name: str) -> None:
-    """Fail loud if an RTL-pass node runs during the uArch pass (phase "uarch").
-
-    In the two-pass flow, pass 1 must only produce uArch specs + Amaranth block
-    models; RTL/testbench/synth nodes are pass-2-only. Reaching one in phase
-    "uarch" means the block-subgraph routing regressed -- raise so the bug
-    surfaces immediately instead of silently building RTL against placeholders.
-    """
-    if state.get("pipeline_phase", "rtl") == "uarch":
-        raise RuntimeError(
-            f"{node_name} reached in pipeline_phase='uarch' (pass 1). Pass 1 "
-            "is spec+block-model only; RTL/DV/synth are pass-2-only. The block "
-            "subgraph routing (route_after_init / route_after_uarch_review) "
-            "regressed."
-        )
-
-
 # Constraint sources that survive a fresh block lifecycle: chip-level DV
 # decisions and operator rules are pinned precisely because the spec appends
 # they mirror are destroyed by the per-tier re-spec.
@@ -897,7 +825,6 @@ async def init_block_node(state: BlockState) -> dict:
 
 def _env_truthy(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
-
 
 
 _CHIP_LEAD_TRIPPED = False
@@ -1060,7 +987,6 @@ def _artifact_up_to_date(path: Path, state: dict, block_name: str,
     return True
 
 
-
 def _is_content_free_revise(response: dict) -> bool:
     """True when a revise carries no substance (no block_actions, feedback,
     or reasoning) -- the reviewer-churn class that is safe to downgrade to
@@ -1068,7 +994,6 @@ def _is_content_free_revise(response: dict) -> bool:
     return not (response.get("block_actions")
                 or response.get("feedback")
                 or response.get("reasoning"))
-
 
 
 def _apply_revise_uarch(pr: str, response: dict, contract_audit: dict,
@@ -1122,7 +1047,6 @@ def _apply_revise_uarch(pr: str, response: dict, contract_audit: dict,
     return applied
 
 
-
 def _persist_chip_fix_constraint(pr: str, action: str, fix_desc: str,
                                  response: dict, contract_audit: dict) -> None:
     """Persist a chip-level fix into the affected blocks' constraints.json so
@@ -1148,8 +1072,6 @@ def _persist_chip_fix_constraint(pr: str, action: str, fix_desc: str,
             cpath.write_text(json.dumps(cur, indent=2))
         except OSError:
             continue
-
-
 
 
 def _spec_pins_ignored() -> bool:
@@ -1278,29 +1200,6 @@ async def generate_uarch_spec_node(state: BlockState) -> dict:
         # the pin suppressed exactly the regen it was written to steer. A
         # pinned SPEC still regenerates its model (OPERATOR_MODEL_PIN and the
         # gate-scope check inside the helper still protect the model file).
-        try:
-            from orchestrator.langgraph.pipeline_helpers import (
-                _maybe_generate_block_golden,
-            )
-
-            await _maybe_generate_block_golden(block, callbacks=_callbacks(state))
-        except Exception as _exc:  # noqa: BLE001 - best-effort; gate is the backstop
-            log(f"  [UARCH] {block_name}: pinned-spec model regen raised: "
-                f"{_exc}", YELLOW)
-        return {"uarch_approved": False, "phase": "uarch"}
-
-    # GATE-SCOPED REVISE [dv-hardening-7]: during a µarch-gate failure
-    # iteration, a block the gate did NOT implicate keeps its on-disk spec
-    # verbatim -- re-drawing it burns an LLM round for zero information and
-    # the churn cascades (reviewer edits -> spec mtime bump -> model regen).
-    from orchestrator.langgraph.pipeline_helpers import gate_scoped_reuse_reason
-
-    _scope = gate_scoped_reuse_reason(_pr(state), block_name)
-    if _scope and _pinned_spec.exists():
-        log(f"  [UARCH] {block_name}: {_scope}", YELLOW)
-        write_graph_event(_pr(state), "Generate Uarch Spec", "gate_scope_reuse", {
-            "block": block_name, "reason": _scope,
-        })
         return {"uarch_approved": False, "phase": "uarch"}
 
     write_graph_event(_pr(state), "Generate Uarch Spec", "graph_node_enter", {
@@ -1748,26 +1647,6 @@ async def review_uarch_spec_node(state: BlockState) -> dict:
         "block": block_name,
     })
 
-    # GATE-SCOPED REVISE [dv-hardening-7]: a non-implicated block's spec was
-    # reused verbatim by generate_uarch_spec_node -- it was already reviewed +
-    # priced when it first passed. Re-reviewing re-EDITS it (the reviewer
-    # always changes something), bumping mtimes and cascading regens of
-    # correct collateral. Skip straight to approval.
-    from orchestrator.langgraph.pipeline_helpers import gate_scoped_reuse_reason
-
-    _scope = gate_scoped_reuse_reason(_pr(state), block_name)
-    if _scope:
-        log(f"  [UARCH-REVIEW] {block_name}: {_scope}", YELLOW)
-        write_graph_event(_pr(state), "Review Uarch Spec", "gate_scope_reuse", {
-            "block": block_name, "reason": _scope,
-        })
-        write_graph_event(_pr(state), "Review Uarch Spec", "graph_node_exit", {
-            "block": block_name,
-        })
-        return {"human_response": {"action": "approve"},
-                "uarch_approved": True,
-                "mem_price_deferred": False}
-
     # uArch FEASIBILITY GATE (CORESMITH_UARCH_FEASIBILITY_GATE, default ON).
     # The spec's machine-readable {feasible, blocking_issues} verdict is the
     # engine's OWN diagnosis that a block cannot be built byte-exactly with its
@@ -1794,36 +1673,6 @@ async def review_uarch_spec_node(state: BlockState) -> dict:
             feasible, blocking_issues = True, []
 
     _bdir = Path(_pr(state)) / ".coresmith" / "blocks" / block_name
-
-    # C6: model/spec feasibility CONFLICT. The block-model generator declared
-    # it cannot realize this block's datapath from the frozen interface
-    # (model_interface_gap.txt, written at model generation) while the spec
-    # verdict claims feasible -- the residual_recon_engine stub wall: a stub
-    # model + stub-consistent TB/RTL passed per-block DV 6/6 and the chip
-    # failed only at integration. Surface the conflict HERE as a [capability]
-    # blocking issue so the existing interrupt engages the chip-lead pre-RTL.
-    # A revise regenerates the model (clearing or re-asserting the marker);
-    # the chip-lead override below silences it like any other blocker.
-    if _uarch_feasibility_gate_enabled():
-        _gap_p = _bdir / "model_interface_gap.txt"
-        if _gap_p.exists():
-            try:
-                _gap_txt = _gap_p.read_text(encoding="utf-8").strip()
-            except OSError:
-                _gap_txt = "model declared an interface gap"
-            _gap_issue = (
-                "[capability] model/spec conflict: the block-model generator "
-                "declared it cannot realize this block's datapath from the "
-                f"frozen interface ({_gap_txt}) while the spec verdict claims "
-                "feasible. Resolve where the missing data actually comes from "
-                "(an existing contract field, a shared memory region, or a new "
-                "contract field) and revise the interface -- do NOT let a stub "
-                "proceed to RTL: it will pass per-block DV against its own "
-                "stub-consistent TB and fail only at integration."
-            )
-            if _gap_issue not in blocking_issues:
-                blocking_issues.append(_gap_issue)
-                feasible = False
 
     if blocking_issues and _feas_override_scope(_pr(state), block_name):
         # A prior review round was overridden by the chip-lead; do not re-prompt
@@ -2322,7 +2171,6 @@ async def generate_rtl_node(state: BlockState) -> dict:
     regeneration AND reuse the passing testbench (re-validate only). Set
     CORESMITH_FORCE_TB_REGEN=1 to restore the old force-TB-regen behavior.
     """
-    _guard_rtl_phase(state, "generate_rtl_node")
     block = state["current_block"]
     block_name = block["name"]
     attempt = state["attempt"]
@@ -2882,7 +2730,6 @@ async def generate_testbench_node(state: BlockState) -> dict:
     Only escalates to the diagnose lead for failures that appear to be
     RTL bugs (wrong computation, stuck signals, etc.).
     """
-    _guard_rtl_phase(state, "generate_testbench_node")
     block = state["current_block"]
     block_name = block["name"]
     attempt = state["attempt"]
@@ -3246,44 +3093,6 @@ async def generate_testbench_node(state: BlockState) -> dict:
                 break
 
         span.set_attribute("sim_passed", sim_passed)
-
-        # RTL<->model byte-exact EQUIVALENCE GATE (fix #1 / A-Fix 5 / B3).
-        # Delegated to the SHARED harness gate (orchestrator.harness.verify.
-        # run_block_equiv_gate) so the CLI (`coresmith verify rtl`) and this node
-        # apply the IDENTICAL check -- parity by construction -- with the same
-        # fail-closed + harness-error-2x-retry semantics (commits 5/8). The
-        # per-block cocotb TB is LLM-authored and can be weakened; this
-        # engine-run check drives generated Verilog and the Amaranth block model
-        # on the same seeded vectors and asserts byte-exact. It SKIPs (never
-        # false-passes) on a non-AXIS interface / no deterministic reference;
-        # ran=False means the gate does not apply (equiv off / block-goldens off)
-        # -> the sim verdict stands.
-        if sim_passed and rtl_path:
-            from orchestrator.harness.verify import run_block_equiv_gate as _run_equiv
-            _eqr = await asyncio.to_thread(
-                _run_equiv, block_name, rtl_path, _pr(state),
-            )
-            if _eqr.get("ran"):
-                if _eqr.get("failed_closed") or (
-                    not _eqr.get("passed") and not _eqr.get("skipped")
-                ):
-                    sim_passed = False
-                    log(f"  [EQUIV] RTL != model -- FAIL: "
-                        f"{str(_eqr.get('reason', ''))[:160]}", RED)
-                    if _eqr.get("prev_error_text"):
-                        try:
-                            (block_dir / "previous_error.txt").write_text(
-                                _eqr["prev_error_text"]
-                            )
-                        except OSError:
-                            pass
-                    span.set_attribute("equiv_passed", False)
-                elif _eqr.get("skipped"):
-                    log(f"  [EQUIV] skipped ({_eqr.get('reason', '')})", YELLOW)
-                else:
-                    log(f"  [EQUIV] RTL == model byte-exact "
-                        f"({_eqr.get('checked_vectors', 0)} vectors)", GREEN)
-                    span.set_attribute("equiv_passed", True)
 
         # BRANCH-PARITY SMOKE (rung3 split-brain backstop). When the RTL still
         # carries a conditional-compilation region that survived the functional-
@@ -3963,7 +3772,6 @@ def _evaluate_ppa_gate(
         log(f"  [PPA] {block_name} within budget", GREEN)
         return True, [], dict(_meta)
     return _flag(verdict.reasons, verdict.checks)
-
 
 
 def _resolve_probe_top(design_name: str, top_txt: str) -> str:
@@ -4657,7 +4465,6 @@ async def synthesize_node(state: BlockState) -> dict:
     are exhausted, the routing function sends failures to the diagnose
     lead for deeper analysis.
     """
-    _guard_rtl_phase(state, "synthesize_node")
     block = state["current_block"]
     block_name = block["name"]
 
@@ -5138,7 +4945,6 @@ async def diagnose_node(state: BlockState) -> dict:
         _hist = _json.loads(_ah_path.read_text()) if _ah_path.exists() else []
         _hist.append({
             "attempt": state["attempt"],
-            "phase": phase,
             "error": error_log[:500],
             "category": "SIM_TIMEOUT",
         })
@@ -5196,7 +5002,6 @@ async def diagnose_node(state: BlockState) -> dict:
         history = _json.loads(_ah_path.read_text()) if _ah_path.exists() else []
         history.append({
             "attempt": state["attempt"],
-            "phase": phase,
             "error": error_log[:500],
             "category": "INFRASTRUCTURE_ERROR",
         })
@@ -5325,7 +5130,6 @@ async def diagnose_node(state: BlockState) -> dict:
         history = _json.loads(_ah_path.read_text()) if _ah_path.exists() else []
         history.append({
             "attempt": state["attempt"],
-            "phase": phase,
             "error": error_log[:500],
             "category": _fast_diag["category"],
         })
@@ -5753,27 +5557,15 @@ async def block_done_node(state: BlockState) -> dict:
     sim_passed = state.get("sim_passed", False)
     synth_success = state.get("synth_success", False)
     gate_count = state.get("synth_gate_count", 0)
-    phase = state.get("pipeline_phase", "rtl")
-
     human_resp = state.get("human_response") or {}
     is_skip = human_resp.get("action") == "skip"
     is_abort = human_resp.get("action") == "abort"
     is_escalate = state.get("debug_action") == "escalate"
 
-    # Pass 1 of the two-pass flow (phase "uarch") only produces a uArch spec +
-    # Amaranth block model -- there is NO RTL/sim/synth yet, so success is gated on
-    # the spec being approved (R2), NOT on sim_passed AND synth_success. Pass 2
-    # ("rtl") and the flag-off default keep the historical sim+synth gate.
-    if phase == "uarch":
-        all_passed = (
-            state.get("uarch_approved", False)
-            and not is_skip and not is_abort and not is_escalate
-        )
-    else:
-        all_passed = (
-            sim_passed and synth_success
-            and not is_skip and not is_abort and not is_escalate
-        )
+    all_passed = (
+        sim_passed and synth_success
+        and not is_skip and not is_abort and not is_escalate
+    )
 
     step_log_paths = dict(state.get("step_log_paths") or {})
 
@@ -5798,7 +5590,6 @@ async def block_done_node(state: BlockState) -> dict:
             "synth_success": True,
             "constraints_learned": len(constraints),
             "step_log_paths": step_log_paths,
-            "phase": phase,
             "completed_at": completed_at,
         }
         log(f"  [{block_name}] PASSED (attempt {attempt})", GREEN)
@@ -5817,7 +5608,6 @@ async def block_done_node(state: BlockState) -> dict:
             "sim_passed": sim_passed,
             "synth_success": synth_success,
             "step_log_paths": step_log_paths,
-            "phase": phase,
             "completed_at": completed_at,
         }
         reason = (
@@ -5854,13 +5644,9 @@ def route_after_uarch_review(state: BlockState) -> str:
     """
     response = state.get("human_response") or {}
     action = response.get("action", "abort")
-    phase = state.get("pipeline_phase", "rtl")
     if action == "revise":
         return "generate_uarch_spec"
     if action == "skip":
-        return "block_done"
-    # approve / default
-    if phase == "uarch":
         return "block_done"
     return "generate_rtl"
 
@@ -5869,28 +5655,6 @@ route_after_uarch_review.__edge_labels__ = {
     "generate_rtl": "APPROVED",
     "generate_uarch_spec": "REVISE",
     "block_done": "SKIP",
-}
-
-
-def route_after_init(state: BlockState) -> str:
-    """Route after init_block.
-
-    Two-pass: in phase ``"rtl"`` (pass 2) the uArch spec + Amaranth block model
-    already exist on disk from pass 1, so skip re-spec and go straight to
-    ``generate_rtl`` (which reuses the on-disk spec/model). Phase ``"uarch"``
-    (pass 1) and the flag-off default go to ``generate_uarch_spec`` -- identical
-    to today's hard ``init_block -> generate_uarch_spec`` edge.
-    """
-    if state.get("pipeline_phase", "rtl") == "rtl" and state.get(
-        "uarch_pass_done"
-    ):
-        return "generate_rtl"
-    return "generate_uarch_spec"
-
-
-route_after_init.__edge_labels__ = {
-    "generate_uarch_spec": "SPEC",
-    "generate_rtl": "RTL (pass 2)",
 }
 
 
@@ -6003,7 +5767,7 @@ route_after_human.__edge_labels__ = {
 # Block subgraph builder
 # ---------------------------------------------------------------------------
 
-def build_block_subgraph(two_pass: bool | None = None):
+def build_block_subgraph():
     """Build the block lifecycle subgraph (uncompiled StateGraph).
 
     Contains the full lifecycle for a single block:
@@ -6015,23 +5779,10 @@ def build_block_subgraph(two_pass: bool | None = None):
     Plus the diagnose/decide/retry failure loop, where decide routes
     directly back to generate_rtl (no intermediate increment node).
 
-    ``two_pass`` selects the topology:
-      - ``False`` (or flag off, the default) -> the historical single-pass
-        graph: a HARD ``init_block -> generate_uarch_spec`` edge. Byte-identical
-        node/edge set to before the two-pass restructure.
-      - ``True`` (block-goldens on) -> a CONDITIONAL ``init_block`` edge
-        (``route_after_init``) so pass 2 can skip re-spec and jump to
-        ``generate_rtl``.
-    ``None`` reads ``composition.block_goldens_enabled()``.
-
     Returns:
         Uncompiled ``StateGraph(BlockState)`` -- the caller compiles it
         (with or without a checkpointer) before adding it as a node.
     """
-    if two_pass is None:
-        from orchestrator.architecture import composition as _composition
-        two_pass = _composition.block_goldens_enabled()
-
     graph = StateGraph(BlockState)
 
     # Nodes (10 -- lint, simulate, increment_attempt are folded in)
@@ -6048,13 +5799,7 @@ def build_block_subgraph(two_pass: bool | None = None):
 
     # Happy path
     graph.add_edge(START, "init_block")
-    if two_pass:
-        # Conditional: pass 2 of the two-pass flow skips re-spec and goes
-        # straight to generate_rtl; pass 1 goes to generate_uarch_spec.
-        graph.add_conditional_edges("init_block", route_after_init)
-    else:
-        # Single-pass (flag off): historical hard edge, identical topology.
-        graph.add_edge("init_block", "generate_uarch_spec")
+    graph.add_edge("init_block", "generate_uarch_spec")
     graph.add_edge("generate_uarch_spec", "review_uarch_spec")
     graph.add_conditional_edges("review_uarch_spec", route_after_uarch_review)
     graph.add_conditional_edges("generate_rtl", route_after_rtl)
@@ -6077,30 +5822,13 @@ def build_block_subgraph(two_pass: bool | None = None):
 # ---------------------------------------------------------------------------
 
 def _current_phase_completed(state: OrchestratorState) -> list[dict]:
-    """Completed blocks for the CURRENT pipeline_phase, deduped by name.
-
-    The ``completed_blocks`` reducer is ``operator.add`` and NEVER resets, so
-    after the two-pass flow it holds BOTH the pass-1 ``(name,"uarch")`` and the
-    pass-2 ``(name,"rtl")`` results. Consumers (integration_review,
-    pipeline_complete, integration_check) must look only at the current phase to
-    avoid cross-pass contamination (R1).
-
-    Filter rule: keep entries whose ``phase`` matches the current
-    ``pipeline_phase``; entries with NO ``phase`` key (legacy / flag-off
-    checkpoints) are always kept so single-pass behaviour is unchanged. Then
-    dedup by name keeping the LAST entry (so a later pass / a retry overrides an
-    earlier failure).
-    """
-    cur = state.get("pipeline_phase", "rtl")
+    """Completed blocks deduped by name, keeping the LAST entry so a retry overrides an earlier failure (``completed_blocks`` is append-only)."""
     seen: dict[str, dict] = {}
     for b in state.get("completed_blocks", []):
         if not isinstance(b, dict):
             continue
         name = b.get("name")
         if not name:
-            continue
-        bphase = b.get("phase")
-        if bphase is not None and bphase != cur:
             continue
         seen[name] = b
     return list(seen.values())
@@ -6295,42 +6023,6 @@ async def init_tier_node(state: OrchestratorState) -> dict:
     # if it changes mid-run (a hot-swap that flipped behavior under the run).
     _stamp_engine_sha(pr)
 
-    # Engine Fix #5: thread the µarch gate's divergence diagnosis to disk for the
-    # blocks it implicated, so a gate-triggered re-spec is INFORMED (otherwise
-    # the Fix #4 bounded re-spec loop just redraws identical blocks). Disk-first:
-    # generate_uarch_spec_node reads .coresmith/blocks/<b>/gate_feedback.txt.
-    # Written per tier as each tier re-fans-out; CLEARED for unaffected blocks so
-    # stale feedback never leaks into a later draw or a clean first pass (mir
-    # absent/passed -> no feedback anywhere).
-    mir = state.get("model_integration_result") or {}
-    # An ADVISORY-bypassed gate (CORESMITH_DETERMINISTIC_BFM) reports
-    # passed=False on purpose: it is explicitly not hard-blocking and not
-    # re-speccing, so treating it as a gate failure here would broadcast a
-    # "gate FAILED" re-spec prescription to every block in the tier.
-    gate_failed = (bool(mir) and not mir.get("passed", True)
-                   and not mir.get("advisory_bypass"))
-    # Engine Fix #5b: when the gate precisely localized the failure (affected_
-    # blocks/edge), feed only those blocks; otherwise BROADCAST to all tier
-    # blocks (the first_divergence_block stub can't be trusted as a sole target).
-    precise = _gate_localization_precise(mir)
-    if precise:
-        targets = _gate_affected_blocks(mir)
-    else:
-        targets = {b["name"] for b in tier_blocks}
-    for b in tier_blocks:
-        fb = ""
-        if gate_failed and b["name"] in targets:
-            fb = _gate_feedback_for_block(mir, b["name"], localized=precise)
-        fbp = Path(pr) / ".coresmith" / "blocks" / b["name"] / "gate_feedback.txt"
-        try:
-            fbp.parent.mkdir(parents=True, exist_ok=True)
-            if fb:
-                fbp.write_text(fb, encoding="utf-8")
-            elif fbp.exists() and _is_own_gate_feedback(fbp):
-                fbp.unlink()
-        except OSError:
-            pass
-
     write_graph_event(pr, "Init Tier", "graph_node_enter", {
         "tier": tier, "tier_index": current_idx,
         "block_count": len(tier_blocks),
@@ -6357,191 +6049,7 @@ async def init_tier_node(state: OrchestratorState) -> dict:
         out["block_queue"] = block_queue
     if _retired_records:
         out["retired_blocks"] = _retired_records
-    # Seed the two-pass phase on the FIRST entry only. fan_out_tier defaults an
-    # unset pipeline_phase to "rtl", so without this a block-goldens run would
-    # send every block straight down the single-pass RTL path and pass 1
-    # (spec+model) + the µarch integration gate would never run. begin_rtl_pass
-    # is the sole writer of "rtl"; once set (pass-2 re-entry) we must not clobber
-    # it back to "uarch". Flag off: add nothing -> byte-identical single-pass.
-    if not state.get("pipeline_phase"):
-        from orchestrator.architecture import composition as _composition
-        if _composition.block_goldens_enabled():
-            out["pipeline_phase"] = "uarch"
-            # Engine Fix #6: stimulus<->contract consistency guard. On the FIRST
-            # entry of a block-goldens run, before any block is built, check that
-            # the gate stimulus is something the declared design can actually
-            # accept (the oracle can process it; every stimulus config field has
-            # a boundary input port). Catches the codec-class failure (arch
-            # hardcoded 640x360 vs a 16x16 in-contract gate frame) in seconds
-            # instead of after a multi-hour arch+pass-1 run. Never let the guard
-            # itself break a run; default is warn+report, strict raises.
-            try:
-                from orchestrator.architecture import (
-                    stimulus_contract_guard as _scg,
-                )
-                _viol = _scg.run_stimulus_contract_guard(pr)
-            except Exception as _exc:  # noqa: BLE001
-                _viol = []
-                log(f"  [STIMULUS-GUARD] guard error (ignored): {_exc}", YELLOW)
-            if _viol:
-                import json as _json
-                _errs = [v for v in _viol if v.get("severity") == "error"]
-                _col = RED if _errs else YELLOW
-                try:
-                    (Path(pr) / ".coresmith" / _scg.REPORT_FILENAME).write_text(
-                        _json.dumps(_viol, indent=2), encoding="utf-8")
-                except OSError:
-                    pass
-                log(f"\n{'='*60}", _col)
-                log(f"  STIMULUS<->CONTRACT GUARD: {len(_viol)} finding(s), "
-                    f"{len(_errs)} error", _col)
-                log(_scg.format_violations(_viol), _col)
-                log("  (the gate stimulus may be inconsistent with the declared "
-                    "design contract -- fix before this run dead-ends at the "
-                    "µarch gate)", _col)
-                log(f"{'='*60}\n", _col)
-                if _scg.guard_strict():
-                    raise RuntimeError(
-                        "stimulus<->contract guard failed (strict mode):\n"
-                        + _scg.format_violations(_viol))
-
     return out
-
-
-def _gate_localization_precise(mir: dict) -> bool:
-    """True when the gate genuinely localized the failure to specific block(s).
-
-    The gate's ``first_divergence_block`` is a best-effort STUB
-    (model_integration._first_divergence_block returns the first diagram block
-    in declared order -- it cannot localize a wrong-bytes divergence). So a
-    result carrying ONLY first_divergence_block is NOT trustworthy localization;
-    only an explicit ``affected_blocks`` list or an ``affected_edge`` is. When
-    localization is imprecise the re-spec feedback is broadcast to ALL blocks
-    (Engine Fix #5b) rather than misdirected to the (wrong) first block.
-    """
-    return bool(mir.get("affected_blocks")) or bool(mir.get("affected_edge"))
-
-
-def _gate_affected_blocks(mir: dict) -> set[str]:
-    """Block names the µarch gate PRECISELY implicated (affected_blocks / edge).
-
-    Excludes the unreliable ``first_divergence_block`` stub on purpose -- callers
-    use :func:`_gate_localization_precise` to decide between this targeted set
-    and a broadcast to all tier blocks. Engine Fix #5/#5b.
-    """
-    names: set[str] = set()
-    for b in mir.get("affected_blocks") or []:
-        if b:
-            names.add(b)
-    edge = mir.get("affected_edge") or {}
-    for k in ("from", "to"):
-        if edge.get(k):
-            names.add(edge[k])
-    return names
-
-
-def _gate_feedback_for_block(mir: dict, block_name: str,
-                             localized: bool = True) -> str:
-    """Build the re-spec feedback string for one block from the gate result.
-
-    ``localized`` False means the gate could not pin the divergence to a specific
-    block, so this feedback is being broadcast to every block -- the wording asks
-    each block to self-check its math against the reference at the divergence
-    point. Engine Fix #5/#5b.
-    """
-    parts = [
-        _GATE_FEEDBACK_HEADER + " -- the wired block models do "
-        "not compose into a chip that matches the reference.",
-        f"gap_class={mir.get('gap_class', 'block_math')}.",
-    ]
-    edge = mir.get("affected_edge") or {}
-    if edge.get("from") or edge.get("to"):
-        parts.append(f"affected interface edge: {edge.get('from','?')} -> "
-                     f"{edge.get('to','?')}.")
-    # Carry every suggested_fix the gate emitted (most actionable signal).
-    fixes = []
-    for v in (mir.get("violations") or []):
-        if isinstance(v, dict) and v.get("suggested_fix"):
-            fixes.append(str(v["suggested_fix"]))
-    if mir.get("suggested_fix"):
-        fixes.append(str(mir["suggested_fix"]))
-    for f in dict.fromkeys(fixes):  # dedupe, preserve order
-        parts.append(f"suggested fix: {f}")
-    # Compact expected-vs-observed so the re-spec sees the behavioural gap (esp.
-    # the FIRST divergence position -- the most useful clue when unlocalized).
-    gap_class = mir.get("gap_class", "block_math")
-    div_off = -1
-    # The gate nodes carry expected/observed per VIOLATION, not at top level
-    # (only hand-built results do), so fall back to the first violation that
-    # has them -- otherwise the bisect below never runs in production.
-    src = mir
-    if "expected" not in src and "observed" not in src:
-        for v in (mir.get("violations") or []):
-            if isinstance(v, dict) and ("expected" in v or "observed" in v):
-                src = v
-                break
-    if "expected" in src or "observed" in src:
-        exp = repr(src.get("expected"))[:200]
-        obs = repr(src.get("observed"))[:200]
-        parts.append(f"reference expected {exp}; composed chip observed {obs}.")
-        try:
-            from orchestrator.architecture.model_integration import (
-                _is_byteseq as _ibs,
-            )
-            from orchestrator.architecture.model_integration import (
-                first_divergence_offset as _fdo,
-            )
-            e, o = src.get("expected"), src.get("observed")
-            if _ibs(e) and _ibs(o):
-                div_off = _fdo(e, o)
-                if div_off >= 0:
-                    parts.append(
-                        f"FIRST DIVERGENCE at byte offset {div_off} "
-                        f"(bytes 0..{div_off-1} are byte-EXACT -> the framing/"
-                        f"earlier stages composed correctly; the producer of byte "
-                        f"{div_off} is the culprit).")
-        except Exception:  # noqa: BLE001
-            pass
-    if localized:
-        parts.append("Revise THIS block's microarchitecture so the composition "
-                     "matches the reference; do NOT hardcode geometry/sizes that "
-                     "the stimulus contract supplies at runtime.")
-    elif gap_class == "block_math":
-        # Targeted-restart instruction (the chip-lead localizes + restarts ONLY
-        # the producing block, instead of broadcasting a full re-fan). The
-        # framing composed correctly -> exactly ONE block emits wrong/short
-        # content; re-fanning all blocks wastes the run (>55% of tokens once).
-        # Keep the "could NOT be localized" phrasing: this text is still
-        # broadcast to every block (each self-audits), while the CHIP-LEAD does
-        # the precise single-block restart.
-        _bisect = (
-            f"A first-divergence byte offset ({div_off}) WAS found -- use it: "
-            f"trace which block produces byte {div_off} through the serialization "
-            f"chain and restart THAT block only. "
-            if div_off >= 0 else
-            "The first-divergence offset could NOT be bisected automatically -- "
-            "before touching any block, do the CHEAP localization: snoop each "
-            "block's output bus against the reference's per-stage output to find "
-            "the single producer that diverges. If that localization ALSO fails, "
-            "ESCALATE to a human interrupt (ask_human) -- do NOT broadcast a "
-            "re-spec of all blocks (that wastes >55% of the run's tokens on "
-            "blocks that compose correctly). ")
-        parts.append(
-            "The divergence could NOT be localized to a specific block "
-            "automatically -- but the framing/earlier stages compose byte-exact, "
-            "so this is a SINGLE-BLOCK content divergence: exactly ONE downstream "
-            "block emits wrong/truncated content. CHIP-LEAD: " + _bisect +
-            "restart_block(from_node='generate_uarch_spec') for THAT block ONLY "
-            "-- do NOT re-fan all blocks. Each block: audit YOUR math/encoding "
-            "against the reference at the divergence point and fix it if it "
-            "diverges; do NOT hardcode geometry/sizes supplied at runtime.")
-    else:
-        parts.append("The divergence could NOT be localized to a specific block. "
-                     "Audit whether YOUR block's math/encoding exactly matches the "
-                     "reference at the first divergence point (compare against the "
-                     "reference's per-stage behaviour); fix it if it diverges, and "
-                     "do NOT hardcode geometry/sizes supplied at runtime.")
-    return " ".join(parts)
 
 
 def fan_out_tier(state: OrchestratorState) -> list[Send]:
@@ -6558,12 +6066,6 @@ def fan_out_tier(state: OrchestratorState) -> list[Send]:
 
     tier_blocks = [b for b in block_queue if b.get("tier", 1) == tier]
 
-    # Two-pass phase: default "rtl" so flag-off (single-pass) behaviour is
-    # unchanged. begin_rtl_pass is the sole writer of phase "rtl"; pass 1 sets
-    # "uarch" once block-goldens is on.
-    pipeline_phase = state.get("pipeline_phase", "rtl")
-    uarch_pass_done = bool(state.get("uarch_pass_done", False))
-
     sends = []
     for block in tier_blocks:
         sends.append(Send("process_block", {
@@ -6574,8 +6076,6 @@ def fan_out_tier(state: OrchestratorState) -> list[Send]:
             "current_block": block,
             "attempt": 1,
             "phase": "init",
-            "pipeline_phase": pipeline_phase,
-            "uarch_pass_done": uarch_pass_done,
             "constraints": [],
             "attempt_history": [],
             "previous_error": "",
@@ -6647,38 +6147,6 @@ async def integration_review_node(state: OrchestratorState) -> dict:
     # avoids LangGraph re-running the reviewer LLM on every resume (slow / can
     # hang). Flag off -> unchanged. CORESMITH_STRICT_INTEGRATION_REVIEW=1 forces
     # the old per-tier review (and its auto-revise) back on for both passes.
-    import os as _os
-
-    from orchestrator.architecture import composition as _composition
-    if (
-        _composition.block_goldens_enabled()
-        and _os.environ.get("CORESMITH_STRICT_INTEGRATION_REVIEW") != "1"
-    ):
-        _phase = state.get("pipeline_phase", "rtl")
-        log("  [INTEGRATION REVIEW] block-goldens: deferring per-tier cross-block "
-            f"review (phase={_phase}) to the uarch gate + integration_dv/"
-            "validation_dv", GREEN)
-        # Even when the per-tier LLM review is skipped, still surface any
-        # mem-price DEFERs (over-budget storage) into the event stream so the
-        # deferred excess stays visible (Deliverable 3).
-        try:
-            from orchestrator.langgraph import mem_price as _mprice
-            _deferred = _mprice.deferred_over_budget_blocks(pr, block_names)
-        except Exception:  # noqa: BLE001
-            _deferred = []
-        if _deferred:
-            log("  [INTEGRATION REVIEW] mem-price DEFERRED (over-budget accepted): "
-                + "; ".join(f"{d['block']} {d.get('total_area_mm2')} mm^2"
-                            for d in _deferred), RED)
-        write_graph_event(pr, "Integration Review", "graph_node_exit", {
-            "action": f"skip (block-goldens phase={_phase}; deferred to gate + "
-                      "integration_dv/validation_dv)",
-            "tier": tier,
-            "mem_price_deferred": _deferred,
-        })
-        return {"integration_review_action": "approve",
-                "integration_review_failed": False}
-
     try:
         from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL
         from orchestrator.langchain.agents.integration_review_agent import (
@@ -6889,15 +6357,7 @@ route_after_integration_review.__edge_labels__ = {
 
 
 def route_next_tier(state: OrchestratorState) -> str:
-    """Route after tier advancement.
-
-    More tiers -> ``init_tier``. Tiers exhausted:
-      - two-pass phase ``"uarch"`` (pass 1 done) -> ``uarch_integration_gate``
-        (validate the decomposition before any RTL).
-      - phase ``"rtl"`` / flag-off default -> ``pipeline_complete`` (unchanged).
-    ``uarch_integration_gate`` is only ever returned when phase is ``"uarch"``,
-    which only happens with block-goldens on (where that node exists).
-    """
+    """Route after advance_tier: next tier, or pipeline_complete when the tier list is exhausted or a block aborted."""
     completed = state.get("completed_blocks", [])
     if any(b.get("aborted") for b in completed):
         return "pipeline_complete"
@@ -6906,14 +6366,11 @@ def route_next_tier(state: OrchestratorState) -> str:
     current_idx = state.get("current_tier_index", 0)
     if current_idx < len(tier_list):
         return "init_tier"
-    if state.get("pipeline_phase", "rtl") == "uarch":
-        return "uarch_integration_gate"
     return "pipeline_complete"
 
 
 route_next_tier.__edge_labels__ = {
     "init_tier": "NEXT TIER",
-    "uarch_integration_gate": "µARCH GATE",
     "pipeline_complete": "ALL DONE",
 }
 
@@ -8407,20 +7864,8 @@ async def integration_check_node(state: OrchestratorState) -> dict:
 
 
 def route_after_integration(state: OrchestratorState) -> str:
-    """Route after integration check: proceed to DV or END.
-
-    Two-pass (block-goldens on): the µarch gate already ran BEFORE RTL, so this
-    routes straight to ``integration_dv`` (no post-integration_check
-    model_integration node). Single-pass (flag off): unchanged -- routes to the
-    ``model_integration`` node (a flag-gated no-op pass-through to DV), so the
-    topology is byte-identical to before the restructure.
-    """
-    from orchestrator.architecture import composition as _composition
-    next_node = (
-        "integration_dv"
-        if _composition.block_goldens_enabled()
-        else "model_integration"
-    )
+    """Route after integration check: proceed to DV or END."""
+    next_node = "integration_dv"
     result = state.get("integration_result") or {}
     if result.get("aborted"):
         return END
@@ -8440,7 +7885,6 @@ def route_after_integration(state: OrchestratorState) -> str:
 
 route_after_integration.__edge_labels__ = {
     END: "DONE",
-    "model_integration": "Model Integration",
     "integration_dv": "DV",
 }
 
@@ -8461,424 +7905,6 @@ route_after_integration.__edge_labels__ = {
 # passes through to integration_dv.
 
 
-def _shape_of(value) -> str:
-    """Describe a value's CONTAINER (type + keys + element types), NEVER its
-    values -- a contract hint for the integrator, not the oracle."""
-    if isinstance(value, dict):
-        parts = []
-        for k, v in value.items():
-            parts.append(f"{k!r}: {_shape_of(v)}")
-        return "a dict with keys [" + ", ".join(repr(k) for k in value) + "] " \
-            "-> {" + ", ".join(parts) + "}"
-    if isinstance(value, (list, tuple)):
-        kind = "list" if isinstance(value, list) else "tuple"
-        if not value:
-            return f"an empty {kind}"
-        elem = _shape_of(value[0])
-        return f"a {kind}[{elem}] (len={len(value)})"
-    if isinstance(value, (bytes, bytearray)):
-        return f"bytes (len={len(value)})"
-    return type(value).__name__
-
-
-def _describe_reference_output_shape(pr: str, ref_entry_callable) -> str:
-    """Run the reference on the gate's actual stimulus and describe the SHAPE of
-    its return container (type/keys/element types -- never values). This tells the
-    integrator the EXACT container simulate() must return so a multi-output design
-    yields a dict-with-all-keys, not a flat list (gap_class=contract otherwise)."""
-    if ref_entry_callable is None:
-        return ""
-    from orchestrator.architecture import model_integration as _mi
-    # Reuse the gate's stimulus resolution (env file wins, else a small derived
-    # default) so the shape is exactly what the gate will expect.
-    stim, found = _mi._load_env_stimulus()
-    if not found:
-        stim = _mi._default_stimulus(ref_entry_callable)
-    if stim is None:
-        return ""
-    from orchestrator.architecture import composition as _composition
-    out = _composition._run_reference(ref_entry_callable, stim, reraise=False)
-    if out is None:
-        return ""
-    return _shape_of(out)
-
-
-async def _maybe_generate_chip_model(pr: str) -> None:
-    """LLM-generate arch/block_models/_chip_model.py if it is missing.
-
-    Best-effort: any failure is logged and swallowed -- the deterministic gate
-    then no-ops (no _chip_model.py) or flags the divergence.
-    """
-    from orchestrator.architecture import composition as _composition
-
-    root = Path(pr)
-    models_dir = root / "arch" / _composition.BLOCK_MODELS_DIRNAME
-    if not models_dir.is_dir() or not any(models_dir.glob("*.py")):
-        return
-    chip_model_path = models_dir / "_chip_model.py"
-    # Reuse the composed chip model ONLY if present and not stale. A revise_uarch
-    # re-generates the per-block models; blindly keeping the old _chip_model.py
-    # made the gate re-compose a STALE model and emit bit-identical (wrong) output
-    # on every revise, so the bounded revise loop could never converge.
-    if not _chip_model_needs_regen(models_dir, chip_model_path):
-        return
-    if chip_model_path.exists():
-        log("  [MODEL-INTEGRATION] block models changed since _chip_model.py "
-            "(stale); regenerating the composed chip model so revise actually "
-            "re-composes.", YELLOW)
-
-    # Generators need the FULL golden (per-block math), not the gate's bytes-only
-    # wrapper -- use the generator-specific reference.
-    ref_path = _composition.resolve_generator_reference(pr)
-    if not ref_path:
-        log("  [MODEL-INTEGRATION] no reference implementation; skipping "
-            "chip-model generation", YELLOW)
-        return
-    try:
-        reference_impl_source = Path(ref_path).read_text(encoding="utf-8")
-    except OSError as exc:
-        log(f"  [MODEL-INTEGRATION] cannot read {ref_path}: {exc}", YELLOW)
-        return
-
-    import json as _json
-    block_diagram: dict = {}
-    bd_path = root / ".coresmith" / "block_diagram.json"
-    if bd_path.exists():
-        try:
-            block_diagram = _json.loads(bd_path.read_text(encoding="utf-8"))
-        except (OSError, _json.JSONDecodeError):
-            block_diagram = {}
-
-    interface_contracts: dict = {}
-    ic_path = root / ".coresmith" / "interface_contracts.json"
-    if ic_path.exists():
-        try:
-            interface_contracts = _json.loads(ic_path.read_text(encoding="utf-8"))
-        except (OSError, _json.JSONDecodeError):
-            interface_contracts = {}
-
-    # Reference entry name for the agent (so simulate() matches its shape).
-    ref_entry_name = ""
-    ref_entry_callable = None
-    try:
-        from orchestrator.architecture.model_integration import (
-            _load_reference_module,
-        )
-        ref_module = _load_reference_module(ref_path)
-        ref_entry_callable, ref_entry_name = (
-            _composition.resolve_reference_entrypoint(pr, ref_module)
-        )
-    except Exception:  # noqa: BLE001
-        ref_entry_name = ""
-
-    # Derive the reference's OUTPUT CONTAINER shape so the integrator returns
-    # the SAME container (dict-with-all-keys vs flat list). The gate compares
-    # STRUCTURALLY -- a flat list when the reference returns a multi-key dict
-    # is a contract failure even when the streamed bytes are byte-exact. We
-    # describe the CONTAINER ONLY (type + keys + element types), never the
-    # values, so this is a contract hint, not the oracle.
-    ref_output_shape = ""
-    try:
-        ref_output_shape = _describe_reference_output_shape(pr, ref_entry_callable)
-    except Exception:  # noqa: BLE001
-        ref_output_shape = ""
-
-    try:
-        from orchestrator.langchain.agents.model_integration_generator import (
-            ModelIntegrationGenerator,
-        )
-        agent = ModelIntegrationGenerator(temperature=0.1)
-        log("  [MODEL-INTEGRATION] Generating integrated Amaranth chip model "
-            "(_chip_model.py)...", YELLOW)
-        if ref_output_shape:
-            log(f"  [MODEL-INTEGRATION] reference output shape: "
-                f"{ref_output_shape}", YELLOW)
-        await agent.generate(
-            project_root=pr,
-            block_models_dir=str(models_dir),
-            block_diagram=block_diagram,
-            interface_contracts=interface_contracts,
-            reference_impl_source=reference_impl_source,
-            reference_entry_name=ref_entry_name,
-            output_path=str(chip_model_path),
-            reference_output_shape=ref_output_shape,
-        )
-        log(f"  [MODEL-INTEGRATION] Wrote {chip_model_path}", GREEN)
-    except Exception as exc:  # noqa: BLE001 - best-effort; gate is the backstop
-        # A rejected chip model means the composition gate has nothing to
-        # compose: it NO-OPS, and the run proceeds with its strongest
-        # model-vs-golden check silently absent. On the two runs that hit this,
-        # the only trace was this one line, 400 lines up a daemon log. Carry it
-        # forward so the final report and the validation-DV context both say a
-        # gate did not run, and why.
-        log(f"  [MODEL-INTEGRATION] chip-model generation failed ({exc}); the "
-            f"COMPOSITION GATE will NO-OP (no _chip_model.py to compose) -- "
-            f"the run loses its model-vs-golden check", RED)
-        record_carried_forward_defect(pr, {
-            "gate": "model_integration",
-            "kind": "chip_model_generation_failed",
-            "advisory": True,
-            "first_divergence_block": "",
-            "violation_count": 0,
-            "unmodeled": (
-                "the integrated chip model (_chip_model.py) was not produced, "
-                "so the composition gate no-opped: NOTHING compared the wired "
-                "block models against the golden reference on this run"),
-            "detail": (
-                f"chip-model generation failed: {exc}. The composition gate is "
-                f"the run's model-vs-golden check; with no composed model it "
-                f"returns 'not applicable' and every downstream verdict rests "
-                f"on per-block DV alone."),
-            "note": "",
-        })
-
-
-async def model_integration_node(state: OrchestratorState) -> dict:
-    """Model-integration node: LLM integrate -> deterministic Amaranth verify.
-
-    Runs after the last tier + integration_check and BEFORE integration_dv.
-    """
-    from orchestrator.architecture import composition as _composition
-    from orchestrator.architecture import model_integration as _model_integration
-
-    pr = state.get("project_root", str(PROJECT_ROOT))
-
-    # Flag off -> pure no-op. No event, no state mutation: identical to today.
-    if not _composition.block_goldens_enabled():
-        return {}
-
-    write_graph_event(pr, "Model Integration", "graph_node_enter", {})
-
-    with _tracer.start_as_current_span("Model Integration") as span:
-        # (a) LLM model-integration: write _chip_model.py if missing.
-        try:
-            await _maybe_generate_chip_model(pr)
-        except Exception as exc:  # noqa: BLE001
-            log(f"  [MODEL-INTEGRATION] chip-model gen raised: {exc}", YELLOW)
-
-        # (b) deterministic Amaranth-simulation verify. A-Fix 2a: a gate that
-        # RAISES is NOT a pass -- fail-closed. Under CORESMITH_GATE_FAIL_OPEN it
-        # is tolerated (old fail-open behavior); otherwise a synthesized
-        # gate_error violation falls through to the existing interrupt.
-        from orchestrator.langgraph.gate_guard import gate_error_violation, gate_guard
-        _gr = await asyncio.to_thread(
-            gate_guard, "model_integration",
-            _model_integration.run_model_integration_gate, pr,
-        )
-        if _gr.errored and _gr.skipped:
-            # Global fail-open escape hatch engaged: tolerate the gate error.
-            log(f"  [MODEL-INTEGRATION] gate raised; FAIL-OPEN escape active, "
-                f"treating as pass: {_gr.reason}", YELLOW)
-            span.set_attribute("error", _gr.error)
-            write_graph_event(pr, "Model Integration", "graph_node_exit", {
-                "skipped": True, "reason": "gate_error_fail_open",
-            })
-            return {"model_integration_result": {"passed": True, "error": _gr.reason}}
-        if _gr.errored:
-            log(f"  [MODEL-INTEGRATION] gate ERRORED (fail-closed, NOT a pass): "
-                f"{_gr.reason}", RED)
-            span.set_attribute("error", _gr.error)
-            violations = [gate_error_violation(_gr.reason, _gr.error)]
-        else:
-            violations = _gr.value or []
-
-        span.set_attribute("violation_count", len(violations))
-
-        if not violations:
-            # rung2 defect 1: distinguish a real PASS (gate compared a composed
-            # chip model against a golden) from a no-op SKIP (goldenless /
-            # requirements-only run). A no-op must NOT report passed=True.
-            _status = _model_integration.describe_gate_status(pr)
-            if not _status["applicable"]:
-                span.set_attribute("skipped", True)
-                span.set_attribute("skip_reason", _status["reason"])
-                log("  [MODEL-INTEGRATION] SKIPPED (not applicable, NOT a "
-                    f"pass): {_status['reason']}", YELLOW)
-                _record_dv_row(
-                    pr, block="chip_model", scope="chip_model", source="gate",
-                    passed=False, skipped=True, detail=_status["reason"],
-                )
-                write_graph_event(pr, "Model Integration", "graph_node_exit", {
-                    "skipped": True,
-                    "reason": _status["reason"],
-                    "gate_status": _status,
-                })
-                return {"model_integration_result": {
-                    "skipped": True,
-                    "reason": "no golden reference; gate not applicable",
-                    "gate_status": _status,
-                }}
-            log("  [MODEL-INTEGRATION] PASSED (simulated chip model == reference)",
-                GREEN)
-            write_graph_event(pr, "Model Integration", "graph_node_exit", {
-                "passed": True, "violation_count": 0,
-            })
-            return {"model_integration_result": {"passed": True}}
-
-        # ADVISORY BYPASS (CORESMITH_DETERMINISTIC_BFM). The composition
-        # _chip_model.py pin driver is LLM-authored and stimulus/DUT-fragile (it
-        # can mis-decode the IN-window stimulus -> corrupt/all-zero composed
-        # output DESPITE byte-correct per-block models). When the deterministic
-        # integration DV is enabled it is the AUTHORITATIVE RTL-level contract
-        # check downstream on the real chip_top, so a model-level composition
-        # mismatch must NOT hard-block the run (nor trigger a full re-spec of all
-        # blocks). Log LOUDLY, name the mismatch, and PROCEED to integration_dv.
-        # Flag off -> this branch is never taken (byte-identical to before).
-        from orchestrator.langgraph import bfm_lib as _bfm_lib
-        if _bfm_lib.deterministic_bfm_enabled():
-            first = violations[0]
-            first_block = first.get("first_divergence_block", "")
-            log(f"\n{'='*60}", YELLOW)
-            log("  MODEL INTEGRATION GATE MISMATCH -- ADVISORY (non-blocking)",
-                YELLOW)
-            log("  CORESMITH_DETERMINISTIC_BFM=1: the deterministic integration "
-                "DV on the real chip_top RTL is the authoritative contract "
-                "check. The LLM-authored composition _chip_model.py harness is "
-                "stimulus/DUT-fragile; NOT hard-blocking and NOT re-speccing.",
-                YELLOW)
-            log(f"  First-divergence block: {first_block or '(unlocalized)'}",
-                YELLOW)
-            for v in violations[:5]:
-                log(f"    - expected {v.get('expected')!r} got "
-                    f"{v.get('observed')!r}", YELLOW)
-            # Section 3b: do NOT silently swallow a quantified mismatch. Record
-            # a carried-forward defect naming the SPECIFIC unmodeled thing so it
-            # surfaces in the final report + validation-DV context and is
-            # re-checked on the real chip_top rather than lost behind "advisory".
-            _defect = _advisory_composition_defect(pr, "model_integration", violations)
-            record_carried_forward_defect(pr, _defect)
-            if _defect.get("unmodeled"):
-                log(f"  UNMODELED: {_defect['unmodeled']}", YELLOW)
-            log(f"  PROCEEDING to integration_dv (advisory; carried forward).\n"
-                f"{'='*60}\n", YELLOW)
-            write_graph_event(pr, "Model Integration", "graph_node_exit", {
-                "passed": False,
-                "advisory_bypass": True,
-                "violation_count": len(violations),
-                "first_divergence_block": first_block,
-                "carried_forward_defect": True,
-                "unmodeled": _defect.get("unmodeled", ""),
-            })
-            return {"model_integration_result": {
-                "passed": False,
-                "advisory_bypass": True,
-                "first_divergence_block": first_block,
-                "violations": violations[:20],
-                "carried_forward_defect": _defect,
-            }}
-
-        first = violations[0]
-        first_block = first.get("first_divergence_block", "")
-        # Per-field localization (model_integration sets affected_blocks when only
-        # SOME output fields diverged). Carrying it into mir makes init_tier_node
-        # re-spec ONLY those blocks (targeted) instead of broadcasting to all --
-        # the convergence fix for framework-HDL composition runs.
-        affected_blocks: list[str] = []
-        for v in violations:
-            for b in v.get("affected_blocks") or []:
-                if b and b not in affected_blocks:
-                    affected_blocks.append(b)
-        log(f"\n{'='*60}", RED)
-        log("  MODEL INTEGRATION GATE FAILED", RED)
-        log(f"  First-divergence block: {first_block or '(unlocalized)'}", RED)
-        if affected_blocks:
-            log(f"  TARGETED re-spec blocks (field-localized): {affected_blocks}",
-                RED)
-        else:
-            log("  Localization: unlocalized -> broadcast re-spec to all blocks",
-                RED)
-        for v in violations[:5]:
-            log(f"    - expected {v.get('expected')!r} got "
-                f"{v.get('observed')!r}", RED)
-        log(f"{'='*60}\n", RED)
-
-        write_graph_event(pr, "Model Integration", "graph_node_exit", {
-            "passed": False,
-            "violation_count": len(violations),
-            "first_divergence_block": first_block,
-        })
-
-        payload = {
-            "type": "model_integration_failure",
-            "first_divergence_block": first_block,
-            "affected_blocks": affected_blocks,
-            "violations": violations[:20],
-            "suggested_fix": first.get("suggested_fix", ""),
-            "supported_actions": [
-                "revise_uarch",  # regenerate the named block's uArch + model
-                "fix_rtl",       # outer agent patched the block model / chip model on disk
-                "retry",         # re-run the gate (after an on-disk fix)
-                "abort",         # stop the pipeline
-            ],
-            "outer_agent_guidance": (
-                "The model-integration agent wired every per-block Amaranth block "
-                "model into a top-level Amaranth chip model; the deterministic gate "
-                "simulated it and its output diverged from the reference "
-                "implementation. The first-divergence block is "
-                f"'{first_block or 'unlocalized'}'. As the outer-loop agent:\n"
-                "1. Inspect arch/block_models/<block>.py for the named block and "
-                "compare its transcribed math to the reference implementation; "
-                "also inspect arch/block_models/_chip_model.py wiring / "
-                "handshake / feedback.\n"
-                "2. If you fixed the block model or chip model on disk, resume "
-                "with action='retry'.\n"
-                "3. To regenerate the uArch spec + block model via the LLM, "
-                "resume with action='revise_uarch'.\n"
-                "4. Only abort for a genuine architecture-level contradiction."
-            ),
-        }
-
-        response = await _resolve_interrupt(payload)
-        action = response.get("action", "abort")
-
-        result = {
-            "passed": False,
-            "violations": violations[:20],
-            "first_divergence_block": first_block,
-            "affected_blocks": affected_blocks,
-            "action_taken": action,
-        }
-        if action == "abort":
-            result["aborted"] = True
-            log("  [MODEL-INTEGRATION] Aborted", RED)
-        else:
-            log(f"  [MODEL-INTEGRATION] Action: {action}", YELLOW)
-
-        return {
-            "model_integration_result": result,
-            "pipeline_aborted": action == "abort",
-        }
-
-
-def route_after_model_integration(state: OrchestratorState) -> str:
-    """Route after the model-integration node.
-
-    Pass (or flag off) -> integration_dv. A parked failure resolved with
-    'retry' re-runs the node; 'abort' ends the pipeline. 'revise_uarch' and
-    'fix_rtl' both imply the operator patched disk, so re-run to confirm the fix.
-    """
-    result = state.get("model_integration_result") or {}
-    if result.get("aborted"):
-        return END
-    # A SKIPPED-HONEST gate (goldenless run; rung2 defect 1) is non-blocking ->
-    # proceed to integration_dv exactly like a pass. An ADVISORY BYPASS
-    # (CORESMITH_DETERMINISTIC_BFM: the deterministic integration DV is the
-    # authoritative contract check) is likewise non-blocking -> proceed.
-    if result.get("skipped") or result.get("advisory_bypass"):
-        return "integration_dv"
-    action = result.get("action_taken", "")
-    if action in ("retry", "revise_uarch", "fix_rtl"):
-        return "model_integration"
-    return "integration_dv"
-
-
-route_after_model_integration.__edge_labels__ = {
-    "model_integration": "Retry",
-    "integration_dv": "DV",
-    END: "DONE",
-}
-
-
 # ---------------------------------------------------------------------------
 # Two-pass: uarch_integration_gate + begin_rtl_pass (CORESMITH_BLOCK_GOLDENS)
 # ---------------------------------------------------------------------------
@@ -8888,490 +7914,6 @@ route_after_model_integration.__edge_labels__ = {
 # the model_integration_node logic (LLM stitch _chip_model.py + deterministic
 # Amaranth verify + park-on-fail) to its shift-left position so a bad decomposition
 # is caught in fast Python sims before any expensive RTL work.
-
-
-def _affected_edge_for_block(pr: str, block_name: str) -> dict:
-    """Best-effort: find a block-diagram edge touching ``block_name``.
-
-    Returns ``{"from","to"}`` for the first connection that references the
-    block, or ``{}``. Used to enrich a contract-gap interrupt so the outer
-    agent can re-open the right interface definition.
-    """
-    if not block_name:
-        return {}
-    bd_path = Path(pr) / ".coresmith" / "block_diagram.json"
-    if not bd_path.exists():
-        return {}
-    try:
-        bd = json.loads(bd_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    for c in bd.get("connections", []) or []:
-        src = c.get("from", c.get("from_block", ""))
-        dst = c.get("to", c.get("to_block", ""))
-        if block_name in (src, dst):
-            return {"from": src, "to": dst}
-    return {}
-
-
-async def uarch_integration_gate_node(state: OrchestratorState) -> dict:
-    """µARCH GATE (two-pass): LLM stitch chip model -> deterministic Amaranth verify.
-
-    Runs after pass 1 (uArch specs + block models) and BEFORE pass 2 (RTL). It
-    is the relocated ``model_integration_node`` logic plus section-D gap
-    classification. On a clean gate it returns ``{"passed": True}`` and routing
-    proceeds to ``begin_rtl_pass``. On divergence it PARKS an interrupt enriched
-    with ``gap_class`` / ``affected_edge`` and (for contract gaps) a
-    ``revise_contract`` action; ``pipeline_phase`` stays ``"uarch"`` so a retry
-    re-enters the gate -- the flip to ``"rtl"`` only happens in begin_rtl_pass.
-    """
-    from orchestrator.architecture import model_integration as _model_integration
-
-    pr = state.get("project_root", str(PROJECT_ROOT))
-
-    write_graph_event(pr, "uArch Integration Gate", "graph_node_enter", {})
-
-    # Composition-time honesty note for the deterministic-BFM flag. The
-    # composition _chip_model.py pin driver is LLM-authored (it drives the Amaranth
-    # block models over the same pins and can co-tune to their quirks). The
-    # CONTRACT-ENFORCING deterministic BFM runs downstream at integration_dv on
-    # the real chip_top RTL (the gate that matches the fixed external host); a
-    # deterministic Amaranth-substrate composition driver is the follow-on.
-    try:
-        from orchestrator.langgraph import bfm_lib as _bfm_lib
-        if _bfm_lib.deterministic_bfm_enabled() and _bfm_lib.arch_indicates_qspi_slave(pr):
-            log(
-                "  [µARCH-GATE] ADVISORY: CORESMITH_DETERMINISTIC_BFM=1 on a "
-                "QSPI-slave design. The composition _chip_model.py pin driver is "
-                "LLM-authored (co-tuning risk); the contract-enforcing "
-                "deterministic BFM runs at integration_dv on the real chip_top.",
-                YELLOW,
-            )
-    except Exception:  # noqa: BLE001
-        pass
-
-    with _tracer.start_as_current_span("uArch Integration Gate") as span:
-        # (a) LLM model-integration: write _chip_model.py if missing.
-        try:
-            await _maybe_generate_chip_model(pr)
-        except Exception as exc:  # noqa: BLE001
-            log(f"  [µARCH-GATE] chip-model gen raised: {exc}", YELLOW)
-
-        # (b) deterministic Amaranth-simulation verify. A-Fix 2a: fail-closed -- a
-        # gate that RAISES is NOT a pass. CORESMITH_GATE_FAIL_OPEN tolerates it;
-        # otherwise a synthesized gate_error violation falls through to the
-        # existing failure/interrupt handling below.
-        from orchestrator.langgraph.gate_guard import gate_error_violation, gate_guard
-        _gr = await asyncio.to_thread(
-            gate_guard, "uarch_integration",
-            _model_integration.run_model_integration_gate, pr,
-        )
-        if _gr.errored and _gr.skipped:
-            log(f"  [µARCH-GATE] gate raised; FAIL-OPEN escape active, treating "
-                f"as pass: {_gr.reason}", YELLOW)
-            span.set_attribute("error", _gr.error)
-            write_graph_event(pr, "uArch Integration Gate", "graph_node_exit", {
-                "skipped": True, "reason": "gate_error_fail_open",
-            })
-            return {"model_integration_result": {"passed": True, "error": _gr.reason}}
-        if _gr.errored:
-            log(f"  [µARCH-GATE] gate ERRORED (fail-closed, NOT a pass): "
-                f"{_gr.reason}", RED)
-            span.set_attribute("error", _gr.error)
-            violations = [gate_error_violation(_gr.reason, _gr.error)]
-        else:
-            violations = _gr.value or []
-
-        span.set_attribute("violation_count", len(violations))
-
-        if not violations:
-            # rung2 defect 1: an empty violation list is a real PASS only when
-            # the gate ACTUALLY compared a composed chip model against a golden
-            # reference. For a goldenless / requirements-only run (no golden,
-            # no block models -> gate no-op) it must record SKIPPED-HONEST and
-            # NOT report passed=True. Routing treats skipped like pass
-            # (non-blocking) but the state/events/scoreboard say SKIPPED.
-            _status = _model_integration.describe_gate_status(pr)
-            if not _status["applicable"]:
-                span.set_attribute("skipped", True)
-                span.set_attribute("skip_reason", _status["reason"])
-                log("  [µARCH-GATE] SKIPPED (not applicable, NOT a pass): "
-                    f"{_status['reason']}", YELLOW)
-                _record_dv_row(
-                    pr, block="chip_model", scope="chip_model", source="gate",
-                    passed=False, skipped=True, detail=_status["reason"],
-                )
-                write_graph_event(pr, "uArch Integration Gate",
-                                  "graph_node_exit", {
-                                      "skipped": True,
-                                      "reason": _status["reason"],
-                                      "gate_status": _status,
-                                  })
-                return {"model_integration_result": {
-                    "skipped": True,
-                    "reason": "no golden reference; gate not applicable",
-                    "gate_status": _status,
-                }}
-            # Real PASS: clear the no-progress signature so (a) the next
-            # failure is never mis-read as "no progress" against a stale
-            # verdict and (b) gate_scoped_reuse_reason() stops scoping regen
-            # (its "failure iteration in progress" signal is this file).
-            try:
-                (Path(pr) / ".coresmith" / "_last_gate_signature.txt").unlink(
-                    missing_ok=True
-                )
-            except OSError:
-                pass
-
-            # Derate sign-off (microarch step 3): the functional/fidelity gate
-            # PASSED, but if the fidelity tier recorded a within-budget derate
-            # large enough to need chip-lead sign-off (above escalate_floor),
-            # PARK for approval instead of silently shipping the derate. The
-            # chip-lead OWNS the be-exact / derate / escalate decision.
-            from orchestrator.architecture import fidelity as _fidelity
-            esc = _fidelity.read_derate_escalation(pr)
-            if esc is not None:
-                log("  [µARCH-GATE] within-budget DERATE needs chip-lead sign-off",
-                    YELLOW)
-                response = await _resolve_interrupt({
-                    "type": "derate_signoff",
-                    "fidelity": esc,
-                    "supported_actions": ["approve", "revise_uarch", "abort"],
-                    "outer_agent_guidance": (
-                        "The integrated chip model PASSED functionally but at a "
-                        "DERATED fidelity that is WITHIN budget yet above the "
-                        "escalate threshold (measured "
-                        f"{esc.get('measured')} vs floor {esc.get('floor')} / "
-                        f"escalate_floor {esc.get('escalate_floor')}, "
-                        f"{esc.get('direction')}-is-better; derate "
-                        f"{esc.get('derate_pct')}% vs ideal). As chip-lead you OWN "
-                        "this trade: resume 'approve' to accept the derate and "
-                        "proceed to the RTL pass (recorded in "
-                        ".coresmith/derate_ledger.json), 'revise_uarch' to re-spec "
-                        "the block(s) toward higher fidelity, or 'abort'."
-                    ),
-                })
-                action = response.get("action", "approve")
-                if action == "abort":
-                    log("  [µARCH-GATE] Derate sign-off: ABORTED", RED)
-                    write_graph_event(pr, "uArch Integration Gate",
-                                      "graph_node_exit",
-                                      {"passed": False, "derate_aborted": True})
-                    return {
-                        "model_integration_result": {
-                            "passed": False, "aborted": True,
-                            "derate_signoff": esc,
-                        },
-                        "pipeline_aborted": True,
-                    }
-                if action == "revise_uarch":
-                    log("  [µARCH-GATE] Derate sign-off: chip-lead chose to re-spec "
-                        "for higher fidelity", YELLOW)
-                    out = {
-                        "model_integration_result": {
-                            "passed": False, "derate_revise": True,
-                            # route_after_uarch_gate routes on action_taken;
-                            # without it the unknown-action fail-safe ENDs the
-                            # run instead of re-speccing.
-                            "action_taken": "revise_uarch",
-                            "derate_signoff": esc,
-                        },
-                        "uarch_revise_attempts": (
-                            int(state.get("uarch_revise_attempts", 0)) + 1
-                        ),
-                    }
-                    if route_after_uarch_gate({**state, **out}) == "init_tier":
-                        out["current_tier_index"] = 0
-                    return out
-                # approve -> record sign-off so we don't re-prompt, then proceed
-                _fidelity.mark_derate_signed_off(pr)
-                log("  [µARCH-GATE] Derate sign-off: APPROVED (within budget, "
-                    "recorded)", GREEN)
-            log("  [µARCH-GATE] PASSED (simulated chip model == reference)", GREEN)
-            write_graph_event(pr, "uArch Integration Gate", "graph_node_exit", {
-                "passed": True, "violation_count": 0,
-                "derate_signed_off": esc is not None,
-            })
-            return {"model_integration_result": {
-                "passed": True, "derate_signed_off": esc is not None}}
-
-        # ADVISORY BYPASS (CORESMITH_DETERMINISTIC_BFM). This gate runs BEFORE
-        # any RTL exists; the composition _chip_model.py pin driver is
-        # LLM-authored and stimulus/DUT-fragile (it can mis-decode the IN-window
-        # stimulus -> corrupt/all-zero composed output DESPITE byte-correct
-        # per-block models), and every mismatch here triggers a full re-spec of
-        # all blocks. When the deterministic integration DV is enabled it is the
-        # AUTHORITATIVE RTL-level contract check downstream on the real chip_top,
-        # so this model-level composition mismatch must NOT hard-block the run
-        # (nor re-spec). Log LOUDLY, name the mismatch, and PROCEED to the RTL
-        # pass. Flag off -> never taken (byte-identical to before).
-        from orchestrator.langgraph import bfm_lib as _bfm_lib
-        if _bfm_lib.deterministic_bfm_enabled():
-            first = violations[0]
-            first_block = first.get("first_divergence_block", "")
-            log(f"\n{'='*60}", YELLOW)
-            log("  µARCH INTEGRATION GATE MISMATCH -- ADVISORY (non-blocking)",
-                YELLOW)
-            log("  CORESMITH_DETERMINISTIC_BFM=1: the deterministic integration "
-                "DV on the real chip_top RTL is the authoritative contract "
-                "check. The LLM-authored composition _chip_model.py harness is "
-                "stimulus/DUT-fragile; NOT hard-blocking and NOT re-speccing "
-                "all blocks.", YELLOW)
-            log(f"  First-divergence block: {first_block or '(unlocalized)'}",
-                YELLOW)
-            for v in violations[:5]:
-                log(f"    - expected {v.get('expected')!r} got "
-                    f"{v.get('observed')!r}", YELLOW)
-            # Section 3b: record the quantified mismatch as a carried-forward
-            # defect (specific unmodeled role named) instead of swallowing it.
-            _defect = _advisory_composition_defect(pr, "uarch_integration", violations)
-            record_carried_forward_defect(pr, _defect)
-            if _defect.get("unmodeled"):
-                log(f"  UNMODELED: {_defect['unmodeled']}", YELLOW)
-            log(f"  PROCEEDING to RTL pass (advisory; carried forward).\n"
-                f"{'='*60}\n", YELLOW)
-            write_graph_event(pr, "uArch Integration Gate", "graph_node_exit", {
-                "passed": False,
-                "advisory_bypass": True,
-                "violation_count": len(violations),
-                "first_divergence_block": first_block,
-                "carried_forward_defect": True,
-                "unmodeled": _defect.get("unmodeled", ""),
-            })
-            return {"model_integration_result": {
-                "passed": False,
-                "advisory_bypass": True,
-                "first_divergence_block": first_block,
-                "violations": violations[:20],
-                "carried_forward_defect": _defect,
-            }}
-
-        first = violations[0]
-        first_block = first.get("first_divergence_block", "")
-        # gap_class: contract gap wins if ANY violation is a contract gap (a
-        # composition / throughput contract failure dominates per-block math).
-        gap_class = "block_math"
-        if any(v.get("gap_class") == "contract" for v in violations):
-            gap_class = "contract"
-        affected_edge = _affected_edge_for_block(pr, first_block)
-        # Per-field localization: model_integration sets affected_blocks when only
-        # SOME output fields diverged -> targeted re-spec (init_tier_node) instead
-        # of broadcast to all blocks. The convergence fix for composition runs.
-        affected_blocks: list[str] = []
-        for v in violations:
-            for b in v.get("affected_blocks") or []:
-                if b and b not in affected_blocks:
-                    affected_blocks.append(b)
-
-        log(f"\n{'='*60}", RED)
-        log("  µARCH INTEGRATION GATE FAILED", RED)
-        log(f"  First-divergence block: {first_block or '(unlocalized)'}", RED)
-        if affected_blocks:
-            log(f"  TARGETED re-spec blocks (field-localized): {affected_blocks}",
-                RED)
-        else:
-            log("  Localization: unlocalized -> broadcast re-spec to all blocks",
-                RED)
-        log(f"  gap_class: {gap_class}", RED)
-        for v in violations[:5]:
-            log(f"    - expected {v.get('expected')!r} got "
-                f"{v.get('observed')!r}", RED)
-        log(f"{'='*60}\n", RED)
-
-        write_graph_event(pr, "uArch Integration Gate", "graph_node_exit", {
-            "passed": False,
-            "violation_count": len(violations),
-            "first_divergence_block": first_block,
-            "gap_class": gap_class,
-        })
-
-        supported_actions = [
-            "revise_uarch",  # re-spec the offending block/tier (block_math)
-            "fix_rtl",       # outer agent patched block/chip model on disk
-            "retry",         # re-run the gate after an on-disk fix
-            "abort",
-        ]
-        if gap_class == "contract":
-            # Frozen interface contracts live in the (separate) architecture
-            # graph; the frontend cannot mutate them. Offer revise_contract so
-            # the outer agent re-runs the architecture interface specialist.
-            supported_actions.insert(1, "revise_contract")
-
-        # NO-PROGRESS GUARD. If this revise produced a BYTE-IDENTICAL composed
-        # output to the previous attempt (same observed + gap_class), the
-        # whole-chip re-fan is NOT converging -- steer the outer agent toward a
-        # targeted single-block fix instead of burning more re-fans (the Opus
-        # codec run re-fanned identical 50B output until it hit the quota).
-        no_progress = False
-        if os.environ.get("CORESMITH_GATE_NO_PROGRESS_GUARD", "1").strip() != "0":
-            try:
-                import hashlib
-                sig = hashlib.sha1(
-                    (repr(first.get("observed")) + "|" + gap_class)
-                    .encode("utf-8", "replace")
-                ).hexdigest()
-                sig_path = Path(pr) / ".coresmith" / "_last_gate_signature.txt"
-                prev = sig_path.read_text().strip() if sig_path.exists() else ""
-                no_progress = bool(prev) and prev == sig
-                sig_path.parent.mkdir(parents=True, exist_ok=True)
-                sig_path.write_text(sig)
-            except Exception:  # noqa: BLE001
-                pass
-        if no_progress:
-            log("  [µARCH-GATE] NO PROGRESS -- composed output is BYTE-IDENTICAL "
-                "to the previous attempt; re-fan is not converging", RED)
-
-        payload = {
-            "type": "model_integration_failure",
-            "first_divergence_block": first_block,
-            "gap_class": gap_class,
-            "affected_edge": affected_edge,
-            "affected_blocks": affected_blocks,
-            "no_progress": no_progress,
-            "violations": violations[:20],
-            "suggested_fix": first.get("suggested_fix", ""),
-            "supported_actions": supported_actions,
-            "outer_agent_guidance": (
-                "The µarch gate stitched every per-block Amaranth block model into "
-                "a chip model and its simulated output diverged from the "
-                "reference. gap_class="
-                f"'{gap_class}'. block_math => the named block's transcribed "
-                "math is wrong: resume 'revise_uarch' (re-specs the block/tier) "
-                "or fix arch/block_models/<block>.py then 'retry'. contract => "
-                "the per-block models are each self-consistent but their declared "
-                "handshake/width contract cannot compose: this needs an "
-                "architecture-level interface-definition change. Resume "
-                "'revise_contract' (writes a structured request to "
-                ".coresmith/interface_contract_revision_request.json and ends the "
-                "frontend run so the architecture interface specialist can "
-                f"re-open edge {affected_edge or '(see block_diagram.json)'})."
-            ),
-        }
-
-        if no_progress:
-            payload["outer_agent_guidance"] = (
-                "NO PROGRESS -- the last revise produced a BYTE-IDENTICAL composed "
-                "output, so re-fanning all blocks is NOT working. Do NOT "
-                "revise_uarch again. Localize the SINGLE diverging block (trace the "
-                "first-divergence byte offset through the serialization chain) and "
-                "restart_block it, or fix arch/block_models/<block>.py directly "
-                "then 'retry'. " + payload["outer_agent_guidance"]
-            )
-
-        response = await _resolve_interrupt(payload)
-        action = response.get("action", "abort")
-
-        result = {
-            "passed": False,
-            "violations": violations[:20],
-            "first_divergence_block": first_block,
-            "gap_class": gap_class,
-            "affected_edge": affected_edge,
-            "affected_blocks": affected_blocks,
-            "action_taken": action,
-        }
-        if action == "abort":
-            result["aborted"] = True
-            log("  [µARCH-GATE] Aborted", RED)
-        else:
-            log(f"  [µARCH-GATE] Action: {action} (gap_class={gap_class})", YELLOW)
-
-        out: dict = {
-            "model_integration_result": result,
-            "pipeline_aborted": action == "abort",
-        }
-        # Count each RE-SPEC so the in-loop re-spec is bounded
-        # (CORESMITH_UARCH_REVISE_MAX). This lets a non-composing decomposition
-        # iterate a few variance draws (block_math AND contract gaps) instead of
-        # dead-ending after one, while guaranteeing termination. `retry` /
-        # `fix_rtl` are NOT re-specs -- they re-run the gate over a fix the
-        # outer agent already made on disk -- so they do not spend the budget
-        # (charging them ended runs that had merely been re-checked).
-        if action not in ("abort", "retry", "fix_rtl"):
-            out["uarch_revise_attempts"] = (
-                int(state.get("uarch_revise_attempts", 0)) + 1
-            )
-        # When this gate routes back to init_tier for a block_math re-spec, the
-        # tier index sits at len(tier_list) (exhausted -- that's how we reached
-        # the gate). Reset it to 0 so the uarch pass re-fans-out from the first
-        # tier; phase stays "uarch" (begin_rtl_pass is the sole phase flipper).
-        # (The contract path resets the index in write_contract_request_node.)
-        if route_after_uarch_gate({**state, **out}) == "init_tier":
-            out["current_tier_index"] = 0
-        return out
-
-
-async def begin_rtl_pass_node(state: OrchestratorState) -> dict:
-    """Transition pass 1 -> pass 2: reset tier index, flip phase to "rtl".
-
-    The SOLE writer of ``pipeline_phase: "rtl"`` (R3). Runs only after a clean
-    µarch gate. Writes ONLY index + phase + flag -- ``tier_list`` is untouched
-    so ``init_tier_node``'s idempotent ``state.get("tier_list") or ...`` reuses
-    the already-computed list (R8).
-    """
-    pr = state.get("project_root", str(PROJECT_ROOT))
-    # run3-followups: the banner reflects the ACTUAL gate outcome -- a green
-    # CLEAN was printed four lines after an advisory-dismissed model mismatch,
-    # suppressing a true early detection for ~2.5 h of downstream work.
-    from orchestrator.langgraph.pipeline_helpers import uarch_gate_banner
-    _banner, _colour = uarch_gate_banner(state.get("model_integration_result"))
-    log(f"\n{'='*60}", _colour)
-    log(f"  {_banner}", _colour)
-    log(f"{'='*60}", _colour)
-    write_graph_event(pr, "Begin RTL Pass", "graph_node_exit", {
-        "pipeline_phase": "rtl",
-    })
-    return {
-        "current_tier_index": 0,
-        "pipeline_phase": "rtl",
-        "uarch_pass_done": True,
-    }
-
-
-def _uarch_revise_cap() -> int:
-    """Max in-loop µarch-gate re-spec iterations before giving up (END with a
-    contract-revision marker for the outer agent). CORESMITH_UARCH_REVISE_MAX,
-    default 4."""
-    try:
-        return int(os.environ.get("CORESMITH_UARCH_REVISE_MAX", "4") or 4)
-    except ValueError:
-        return 4
-
-
-def _regen_stale_chip_model() -> bool:
-    """Regenerate the composed _chip_model.py when block models changed after it
-    (so revise_uarch actually re-composes instead of re-checking a stale model).
-    Default ON; CORESMITH_REGEN_STALE_CHIP_MODEL=0 restores the old always-reuse."""
-    return os.environ.get(
-        "CORESMITH_REGEN_STALE_CHIP_MODEL", "1"
-    ).strip().lower() not in {"0", "false", "no", "off"}
-
-
-def _chip_model_needs_regen(models_dir, chip_model_path) -> bool:
-    """True if the composed ``_chip_model.py`` must be (re)generated: it is
-    missing, OR (stale-regen enabled) any block model is newer than it. This is
-    what lets ``revise_uarch`` actually re-compose after it regenerates the
-    per-block models — otherwise the gate re-checks a stale chip model and emits
-    bit-identical output every revise, so the bounded revise loop never
-    converges. With ``CORESMITH_REGEN_STALE_CHIP_MODEL=0`` only a missing chip
-    model triggers regen (old behavior)."""
-    from pathlib import Path as _P
-    chip_model_path = _P(chip_model_path)
-    models_dir = _P(models_dir)
-    if not chip_model_path.exists():
-        return True
-    if not _regen_stale_chip_model():
-        return False
-    try:
-        chip_mtime = chip_model_path.stat().st_mtime
-        newest_block = max(
-            (p.stat().st_mtime for p in models_dir.glob("*.py")
-             if p.name != "_chip_model.py"),
-            default=0.0,
-        )
-    except OSError:
-        return False
-    return newest_block > chip_mtime
 
 
 def _revalidate_enabled() -> bool:
@@ -9549,157 +8091,6 @@ def _pipeline_complete_route(state: OrchestratorState) -> str:
     return "integration_check"
 
 
-def route_after_uarch_gate(state: OrchestratorState) -> str:
-    """Route after the µarch gate.
-
-    Clean gate -> ``begin_rtl_pass`` (start pass 2). A parked failure:
-      - ``abort`` -> END.
-      - ``retry`` / ``fix_rtl`` (an ON-DISK fix, exactly as the park payload
-        advertises them) -> ``uarch_integration_gate``: re-run the gate on the
-        patched files. No re-spec budget is consumed and no contract request
-        is written.
-      - ``contract`` gap with ``revise_contract`` / ``revise_uarch`` -> END
-        (the frontend cannot mutate frozen contracts; a request marker is
-        written by the writer node before END).
-      - ``block_math`` gap with ``revise_uarch`` -> ``init_tier`` to re-spec
-        the offending block/tier in phase "uarch".
-    """
-    result = state.get("model_integration_result") or {}
-    # A SKIPPED-HONEST gate (goldenless / requirements-only run; rung2 defect 1)
-    # is non-blocking -- route it exactly like a pass into the RTL pass. An
-    # ADVISORY BYPASS (CORESMITH_DETERMINISTIC_BFM: the deterministic
-    # integration DV on the real chip_top is the authoritative contract check)
-    # is likewise non-blocking -- proceed to the RTL pass rather than re-spec.
-    if (not result or result.get("passed") or result.get("skipped")
-            or result.get("advisory_bypass")):
-        return "begin_rtl_pass"
-    if result.get("aborted"):
-        return END
-    action = result.get("action_taken", "")
-    gap_class = result.get("gap_class", "block_math")
-    if action not in ("retry", "revise_uarch", "fix_rtl", "revise_contract"):
-        # Unknown action: fail safe to END rather than silently proceeding.
-        return END
-    # ON-DISK FIX -> RE-RUN THIS GATE. The park advertises `retry` ("re-run the
-    # gate after an on-disk fix") and `fix_rtl` ("outer agent patched
-    # block/chip model on disk"); neither asks for a re-spec, so neither may
-    # consume the uarch_revise budget or write a contract-revision request.
-    # Sending them through write_contract_request instead ENDed the run under an
-    # exhausted cap (proven live: two `retry` decisions each produced an
-    # exhausted contract request, and only an out-of-graph
-    # POST /run/restart-node actually re-ran the gate). Re-entry is bounded by
-    # the outer agent: every pass costs it one explicit park decision.
-    if action in ("retry", "fix_rtl"):
-        return "uarch_integration_gate"
-    # Bound the in-loop re-spec. Over the cap, route through
-    # write_contract_request so it writes the machine-readable revision marker
-    # for the outer agent, then ENDs (it detects the cap and aborts). Under the
-    # cap, contract gaps go through write_contract_request (marker + re-spec) and
-    # block_math gaps re-spec directly via init_tier.
-    cap = _uarch_revise_cap()
-    attempts = int(state.get("uarch_revise_attempts", 0))
-    if attempts > cap:
-        return "write_contract_request"
-    if gap_class == "contract":
-        return "write_contract_request"
-    return "init_tier"
-
-
-route_after_uarch_gate.__edge_labels__ = {
-    "begin_rtl_pass": "GATE CLEAN",
-    "uarch_integration_gate": "RE-RUN GATE (on-disk fix)",
-    "init_tier": "RE-SPEC (block_math)",
-    "write_contract_request": "CONTRACT GAP",
-    END: "ABORT",
-}
-
-
-async def write_contract_request_node(state: OrchestratorState) -> dict:
-    """Write a structured interface-contract revision request.
-
-    Section D: a ``contract`` gap means the per-block models are each
-    self-consistent but their declared handshake/width contract cannot compose.
-    The frontend graph cannot mutate frozen contracts (architecture is a
-    separate graph), so we surface a machine-readable request for the outer
-    agent to re-run the architecture interface-definition specialist.
-
-    To avoid the historical dead-end (write marker -> END after a single gate
-    failure), this node is now part of a *bounded re-spec loop*. The marker is
-    always written for forensics / the outer agent. Then:
-      - Under the revise cap: loop back to ``init_tier`` (reset tier index) so
-        the µarch pass re-fans-out and draws a fresh decomposition; a variance
-        draw may compose where the prior one couldn't.
-      - At/over the cap: set ``pipeline_aborted`` so we END, handing off the
-        marker to the outer agent for architecture-level interface revision.
-    """
-    pr = state.get("project_root", str(PROJECT_ROOT))
-    result = state.get("model_integration_result") or {}
-    cap = _uarch_revise_cap()
-    attempts = int(state.get("uarch_revise_attempts", 0))
-    exhausted = attempts > cap
-    gap_class = result.get("gap_class", "contract")
-    if gap_class == "contract":
-        reason = "uarch_integration_gate contract gap (models cannot compose)"
-    else:
-        reason = (
-            f"uarch_integration_gate {gap_class} gap unresolved after "
-            f"{attempts} revise attempt(s)"
-        )
-    request = {
-        "type": "interface_contract_revision_request",
-        "gap_class": gap_class,
-        "reason": reason,
-        "first_divergence_block": result.get("first_divergence_block", ""),
-        "affected_edge": result.get("affected_edge", {}),
-        "violations": result.get("violations", [])[:20],
-        "revise_attempts": attempts,
-        "revise_cap": cap,
-        "exhausted": exhausted,
-        "suggested_action": (
-            "Re-run the architecture interface-definition specialist for the "
-            "affected edge; the per-block math is self-consistent but the "
-            "declared handshake/width contract cannot compose."
-        ),
-    }
-    try:
-        out = Path(pr) / ".coresmith" / "interface_contract_revision_request.json"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps(request, indent=2), encoding="utf-8")
-        log(f"  [µARCH-GATE] Wrote contract-revision request to {out}", YELLOW)
-    except OSError as exc:
-        log(f"  [µARCH-GATE] Could not write contract-revision request: {exc}",
-            RED)
-    write_graph_event(pr, "Write Contract Request", "graph_node_exit", {
-        "affected_edge": request["affected_edge"],
-        "revise_attempts": attempts,
-        "exhausted": exhausted,
-    })
-    if exhausted:
-        log(f"  [µARCH-GATE] Contract gap persists after {attempts} revise "
-            f"attempt(s) (cap={cap}); ending for outer-agent interface revision.",
-            RED)
-        return {"pipeline_aborted": True}
-    log(f"  [µARCH-GATE] Contract gap: re-fanning-out µarch pass "
-        f"(attempt {attempts}/{cap}) to draw a composing decomposition.",
-        YELLOW)
-    # Re-spec: reset the tier index so init_tier re-fans-out the uarch pass.
-    # phase stays "uarch" (begin_rtl_pass is the sole phase flipper).
-    return {"current_tier_index": 0}
-
-
-def route_after_write_contract_request(state: OrchestratorState) -> str:
-    """END once the contract gap is exhausted; otherwise re-spec via init_tier."""
-    if state.get("pipeline_aborted"):
-        return END
-    return "init_tier"
-
-
-route_after_write_contract_request.__edge_labels__ = {
-    "init_tier": "RE-SPEC (contract)",
-    END: "EXHAUSTED -> outer agent",
-}
-
-
 def _format_dv_retry_context(previous_result: dict | None) -> str:
     """Format prior top-level DV failure/audit context for retry prompts."""
     if not previous_result:
@@ -9750,107 +8141,6 @@ def _format_dv_retry_context(previous_result: dict | None) -> str:
 # ---------------------------------------------------------------------------
 # Node: integration_dv  (Lead DV -- generates + runs integration testbench)
 # ---------------------------------------------------------------------------
-
-def _chip_equiv_enabled() -> bool:
-    """A-Fix 5(d): after a green integration sim, re-drive chip_top + the
-    composed Amaranth chip model on the same seeded stimulus and assert byte
-    equivalence. Default ON (only active when block-goldens is on and a
-    _chip_model.py exists). Set ``CORESMITH_CHIP_EQUIV=0`` to disable."""
-    return (os.environ.get("CORESMITH_CHIP_EQUIV", "1") or "1") != "0"
-
-
-def _resolve_equiv_seed() -> int:
-    """Fresh seed for the chip-top equivalence stimulus (pinned via
-    ``CORESMITH_DV_SEED_PIN`` for reproducible debugging)."""
-    from orchestrator.harness.seed_provider import gate_seed
-    return gate_seed()
-
-
-def _maybe_run_chip_equiv(
-    pr: str, design_name: str, top_rtl_path: str, block_rtl_paths: dict,
-) -> dict | None:
-    """Run the chip-top RTL-vs-model equivalence gate when applicable.
-
-    Returns ``None`` when the gate does not apply (disabled, block-goldens off,
-    no chip model, RTL-model-equiv globally off). Otherwise returns the equiv
-    result dict. A harness-error skip is retried once at 2x timeout (A-Fix 2c);
-    a persistent harness error is turned into a fail-closed result (so the DV is
-    flipped to failed) unless ``CORESMITH_GATE_FAIL_OPEN`` is set. An honest skip
-    (non-AXIS top / no verilator / non-comparable model output) is returned
-    as-is and keeps the sim pass.
-    """
-    if not _chip_equiv_enabled():
-        return None
-    try:
-        from orchestrator.architecture import composition as _composition
-        if not _composition.block_goldens_enabled():
-            return None
-        chip_model = (
-            Path(pr) / "arch" / _composition.BLOCK_MODELS_DIRNAME / "_chip_model.py"
-        )
-        if not chip_model.exists():
-            return None
-    except Exception:  # noqa: BLE001
-        return None
-
-    from orchestrator.langgraph.gate_guard import gate_fail_open_enabled, gate_guard
-    from orchestrator.langgraph.rtl_model_equiv import (
-        check_chip_model_equivalence,
-        rtl_model_equiv_enabled,
-    )
-    if not rtl_model_equiv_enabled():
-        return None
-
-    seed = _resolve_equiv_seed()
-
-    # rung3-fixes-2 (c): when the design declares dimensional maxima, size the
-    # seeded RTL-vs-model stream long enough to reach the max index magnitude
-    # (so a geometry-dependent index/address-width truncation diverges here too)
-    # instead of the token default. Bounded to keep the sim tractable. No dims
-    # declared -> default 64 (byte-identical to before).
-    n_vectors = 64
-    try:
-        _dims = _declared_dimensions(pr)
-        if _dims:
-            n_vectors = max(64, min(_MAXGEO_EQUIV_NVEC_CAP, max(_dims.values())))
-    except Exception:  # noqa: BLE001
-        n_vectors = 64
-
-    def _run(scale: float):
-        return gate_guard(
-            "chip_model_equiv",
-            check_chip_model_equivalence,
-            design_name, top_rtl_path, block_rtl_paths, str(chip_model),
-            project_root=pr, seed=seed, n_vectors=n_vectors, timeout_scale=scale,
-        )
-
-    gr = _run(1.0)
-    if gr.errored:
-        if gate_fail_open_enabled():
-            return {"passed": True, "skipped": True,
-                    "reason": f"chip equiv gate errored (fail-open): {gr.reason}"}
-        return {"passed": False, "skipped": False,
-                "reason": f"chip equiv gate ERRORED (fail-closed): {gr.reason}"}
-    eq = gr.value or {}
-    # Harness-error skip -> retry once at 2x, then fail closed (A-Fix 2c).
-    if eq.get("skipped") and eq.get("harness_error"):
-        gr2 = _run(2.0)
-        if gr2.errored:
-            if gate_fail_open_enabled():
-                return {"passed": True, "skipped": True,
-                        "reason": f"chip equiv retry errored (fail-open): {gr2.reason}"}
-            return {"passed": False, "skipped": False,
-                    "reason": f"chip equiv retry ERRORED (fail-closed): {gr2.reason}"}
-        eq2 = gr2.value or {}
-        if eq2.get("skipped") and eq2.get("harness_error"):
-            if gate_fail_open_enabled():
-                return {"passed": True, "skipped": True,
-                        "reason": f"chip equiv harness error (fail-open): {eq2.get('reason','')}"}
-            return {"passed": False, "skipped": False,
-                    "reason": ("chip equiv harness error persisted after retry "
-                               f"(fail-closed): {eq2.get('reason', '')}")}
-        return eq2
-    return eq
 
 
 # ---------------------------------------------------------------------------
@@ -10609,17 +8899,6 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
                 # so the prompt + generated TB are byte-identical to before.
                 chip_model_path = ""
                 try:
-                    from orchestrator.architecture import composition as _composition
-                    if _composition.block_goldens_enabled():
-                        _cm = (
-                            Path(pr) / "arch" / _composition.BLOCK_MODELS_DIRNAME
-                            / "_chip_model.py"
-                        )
-                        if _cm.exists():
-                            chip_model_path = str(_cm)
-                except Exception:  # noqa: BLE001
-                    chip_model_path = ""
-                try:
                     tb_result = await generate_integration_testbench(
                         project_root=_pr(state),
                         design_name=design_name,
@@ -10738,42 +9017,6 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
         passed = sim_result.get("passed", False)
         sim_log = sim_result.get("log", "")
 
-        chip_equiv_result: dict | None = None
-        if passed:
-            # A-Fix 5(d): a green integration sim (esp. with a loosened or
-            # operator-edited TB) is NOT sufficient. The ENGINE re-drives
-            # chip_top + the composed Amaranth chip model on the same seeded
-            # stimulus and asserts byte equivalence. A real divergence flips the
-            # DV to failed -> the existing failure interrupt; an honest skip
-            # keeps the pass; a harness error is retried then fails closed.
-            chip_equiv_result = await asyncio.to_thread(
-                _maybe_run_chip_equiv,
-                pr, design_name, top_rtl_path, block_rtl_paths,
-            )
-            if (
-                chip_equiv_result is not None
-                and not chip_equiv_result.get("passed")
-                and not chip_equiv_result.get("skipped")
-            ):
-                passed = False
-                equiv_reason = chip_equiv_result.get("reason", "")
-                sim_log = (
-                    (sim_log + "\n\n") if sim_log else ""
-                ) + (
-                    "CHIP-TOP RTL-vs-MODEL EQUIVALENCE FAILED (the integration "
-                    "sim passed but chip_top does not byte-match the composed "
-                    "Amaranth chip model on a fresh seeded stimulus):\n"
-                    + equiv_reason
-                )
-                span.set_attribute("chip_equiv_failed", True)
-                log("  [INTEG-DV] chip-top equivalence FAILED -- flipping DV "
-                    f"to failed: {equiv_reason}", RED)
-            elif chip_equiv_result is not None and chip_equiv_result.get("passed"):
-                log("  [INTEG-DV] chip-top equivalence PASSED", GREEN)
-            elif chip_equiv_result is not None and chip_equiv_result.get("skipped"):
-                log("  [INTEG-DV] chip-top equivalence skipped "
-                    f"(non-blocking): {chip_equiv_result.get('reason','')}", YELLOW)
-
         # MAX-GEOMETRY gate (rung3-fixes-2): a green sim is NOT sufficient when
         # the design declares dimensional maxima but the TB never exercised
         # them -- that is how a truncated index-width bug ships in a "verified"
@@ -10876,7 +9119,6 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
                 "passed": True,
                 "test_count": test_count,
                 "log_path": sim_result.get("log_path", ""),
-                "chip_equiv": (chip_equiv_result or {}).get("reason", ""),
             })
 
             _record_dv_row(
@@ -10892,7 +9134,6 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
                     "testbench_path": tb_path,
                     "sim_log_path": sim_result.get("log_path", ""),
                     "design_name": design_name,
-                    "chip_equiv_result": chip_equiv_result,
                     "measured_cyc_per_op_chip": (chip_tput or {}).get(
                         "measured_cyc_per_op_chip"),
                 },
@@ -11005,7 +9246,6 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
                 "design_name": design_name,
                 "contract_audit": contract_audit,
                 "contract_audit_path": contract_audit.get("audit_path", ""),
-                "chip_equiv_result": chip_equiv_result,
             },
             "pipeline_done": False,
         }
@@ -11623,27 +9863,6 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
             reference_path = ""
             reference_entry = ""
             try:
-                from orchestrator.architecture import composition as _composition
-                if _composition.block_goldens_enabled():
-                    _ref = _composition.resolve_reference_implementation(pr)
-                    if _ref:
-                        reference_path = _ref
-                        try:
-                            from orchestrator.architecture.model_integration import (
-                                _load_reference_module,
-                            )
-                            _ref_mod = _load_reference_module(_ref)
-                            _fn, reference_entry = (
-                                _composition.resolve_reference_entrypoint(
-                                    pr, _ref_mod
-                                )
-                            )
-                        except Exception:  # noqa: BLE001
-                            reference_entry = ""
-            except Exception:  # noqa: BLE001
-                reference_path = ""
-                reference_entry = ""
-            try:
                 tb_result = await generate_validation_testbench(
                     project_root=_pr(state),
                     design_name=design_name,
@@ -12205,17 +10424,8 @@ def build_pipeline_graph(checkpointer=None):
     Returns:
         Compiled StateGraph ready for ``ainvoke`` / ``astream``.
 
-    Topology is gated by ``CORESMITH_BLOCK_GOLDENS``. When OFF (default) the
-    historical SINGLE-PASS graph is built, byte-identical node/edge set to
-    before the two-pass restructure (the ``model_integration`` no-op node still
-    sits after ``integration_check``; no ``uarch_integration_gate`` /
-    ``begin_rtl_pass`` / ``write_contract_request`` nodes). When ON the TWO-PASS
-    graph is built: pass 1 (spec+model) -> µarch gate -> pass 2 (RTL+DV+synth).
     """
-    from orchestrator.architecture import composition as _composition
-    two_pass = _composition.block_goldens_enabled()
-
-    block_subgraph = build_block_subgraph(two_pass=two_pass).compile()
+    block_subgraph = build_block_subgraph().compile()
 
     orchestrator = StateGraph(OrchestratorState)
 
@@ -12295,65 +10505,7 @@ def build_pipeline_graph(checkpointer=None):
         },
     )
 
-    if not two_pass:
-        # ---- SINGLE-PASS (flag off): byte-identical to before -------------
-        orchestrator.add_node("model_integration", model_integration_node)
-        orchestrator.add_conditional_edges("advance_tier", route_next_tier)
-        orchestrator.add_conditional_edges("integration_check", route_after_integration)
-        orchestrator.add_conditional_edges(
-            "model_integration", route_after_model_integration
-        )
-    else:
-        # ---- TWO-PASS (flag on): µarch gate between the two fan-outs -------
-        orchestrator.add_node(
-            "uarch_integration_gate", uarch_integration_gate_node
-        )
-        orchestrator.add_node("begin_rtl_pass", begin_rtl_pass_node)
-        orchestrator.add_node(
-            "write_contract_request", write_contract_request_node
-        )
-        # advance_tier -> {init_tier | uarch_integration_gate | pipeline_complete}
-        orchestrator.add_conditional_edges(
-            "advance_tier",
-            route_next_tier,
-            {
-                "init_tier": "init_tier",
-                "uarch_integration_gate": "uarch_integration_gate",
-                "pipeline_complete": "pipeline_complete",
-            },
-        )
-        # µarch gate -> {begin_rtl_pass | uarch_integration_gate | init_tier |
-        #                write_contract_request | END}
-        # The self-edge is the `retry` / `fix_rtl` path: the outer agent fixed
-        # the block/chip model on disk and asked for a re-check, so the gate
-        # re-runs itself (it reads everything it needs from disk + state, and
-        # the tier index it was entered with is unchanged).
-        orchestrator.add_conditional_edges(
-            "uarch_integration_gate",
-            route_after_uarch_gate,
-            {
-                "begin_rtl_pass": "begin_rtl_pass",
-                "uarch_integration_gate": "uarch_integration_gate",
-                "init_tier": "init_tier",
-                "write_contract_request": "write_contract_request",
-                END: END,
-            },
-        )
-        orchestrator.add_edge("begin_rtl_pass", "init_tier")
-        # write_contract_request -> {init_tier (bounded re-spec) | END (exhausted)}
-        orchestrator.add_conditional_edges(
-            "write_contract_request",
-            route_after_write_contract_request,
-            {
-                "init_tier": "init_tier",
-                END: END,
-            },
-        )
-        # Pass 2 post-integration_check goes straight to DV (gate already ran).
-        orchestrator.add_conditional_edges(
-            "integration_check",
-            route_after_integration,
-            {END: END, "integration_dv": "integration_dv"},
-        )
+    orchestrator.add_conditional_edges("advance_tier", route_next_tier)
+    orchestrator.add_conditional_edges("integration_check", route_after_integration)
 
     return orchestrator.compile(checkpointer=checkpointer)

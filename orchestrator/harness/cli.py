@@ -235,53 +235,6 @@ def cmd_contracts(args) -> int:
     return EXIT_PASS
 
 
-def cmd_golden_check(args) -> int:
-    """Practice tool: probe a block's generated golden/model for degeneracy.
-
-    Runs the SAME check `_maybe_generate_block_golden` runs to close the swallow:
-    the model imports + defines its `@block`, the golden reference resolves, and
-    (for free-function goldens) the block's golden slice is exercised on a
-    stimulus. Honest-SKIPs where it can't conclude (method-based goldens, no
-    slice) rather than false-failing.
-    """
-    try:
-        root = _bootstrap(args)
-    except ValueError as exc:
-        print(str(exc), file=sys.stderr)
-        return EXIT_USAGE
-    try:
-        # Lazy import: model_integration lives under orchestrator.architecture
-        # (not langgraph), keeping this module langgraph-free at import.
-        from orchestrator.architecture.model_integration import (
-            check_golden_feasibility,
-        )
-    except Exception as exc:  # noqa: BLE001
-        print(f"golden-check unavailable: {exc}", file=sys.stderr)
-        return EXIT_INFRA
-    res = check_golden_feasibility(str(root), args.block)
-    ran, passed, skipped = res.get("ran"), res.get("passed"), res.get("skipped")
-    # The WORDS follow the probe's tri-state verdict: PASS only when a
-    # discriminating check concluded, NOT RUN when the probe ran but nothing
-    # capable of returning the other answer did. Exit codes are deliberately
-    # unchanged -- this probe is advisory by design (see
-    # golden_feasibility_gate_enabled), and a caller keying on EXIT_PASS should
-    # not start seeing EXIT_SKIP because the report got more precise.
-    status = ("SKIP" if skipped or not ran else
-              "PASS" if res.get("verdict") == "pass" else
-              "NOT RUN" if passed else "FAIL")
-    reach = (res.get("checks", {}) or {}).get("slice_reachability", {}) or {}
-    human = f"golden-check {args.block}: {status}  ({res.get('reason') or 'ok'})"
-    if res.get("not_run_reason"):
-        human += f"\n  {res['not_run_reason']}"
-    if reach:
-        human += (f"\n  slice reachability: {reach.get('verdict')} -- "
-                  f"{reach.get('reason', '')}")
-    _emit(args, res, human)
-    if skipped or not ran:
-        return EXIT_SKIP
-    return EXIT_PASS if passed else EXIT_FAIL
-
-
 def cmd_complexity(args) -> int:
     """Decomposition checker: score a block's golden slice (or every block in
     the block diagram) on the modeling-complexity axes -- the SAME deterministic
@@ -428,14 +381,6 @@ def _register_queries(sub) -> None:
     ct.add_argument("block")
     ct.set_defaults(func=_run(cmd_contracts))
 
-    # golden-check <block>
-    gc = sub.add_parser(
-        "golden-check",
-        help="probe a block's golden/model for degeneracy (practice tool)")
-    _add_project_root(gc)
-    _add_json(gc)
-    gc.add_argument("block")
-    gc.set_defaults(func=_run(cmd_golden_check))
 
 
 def _register_verify(sub) -> None:

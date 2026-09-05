@@ -517,17 +517,19 @@ def run_acceptance_dv(project_root: str, top_rtl: str,
         return _skip("verilator not on PATH")
 
     from orchestrator.architecture.composition import (
+        _run_reference,
         resolve_reference_entrypoint,
         resolve_reference_implementation,
     )
-    from orchestrator.architecture.model_integration import (
-        _acceptance_stimulus_path,
-        _import_module_from_path,
-        _load_reference_module,
-        _run_reference,
+    from orchestrator.architecture.fidelity import (
         compute_fidelity_derate,
         fidelity_gate_enabled,
         resolve_fidelity_metric,
+    )
+    from orchestrator.architecture.reference_oracle import (
+        _acceptance_stimulus_path,
+        _import_module_from_path,
+        _load_reference_module,
     )
 
     art = _acceptance_stimulus_path(project_root)

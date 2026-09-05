@@ -112,29 +112,3 @@ class TestRunSimulationProjectRoot:
         assert str(checkout) not in parts
 
 
-class TestGoldenModelWrapperProjectRoot:
-    def test_wrapper_lands_under_the_explicit_project_root(self, roots,
-                                                           monkeypatch):
-        checkout, run = roots
-        monkeypatch.setenv("CORESMITH_BLOCK_GOLDENS", "1")
-        models = run / "arch" / "block_models"
-        models.mkdir(parents=True)
-        (models / "blk.py").write_text("VALUE = 42\n")
-
-        ph.create_golden_model_wrapper("blk", "", project_root=run)
-
-        wrapper = run / "tb" / "cocotb" / "blk_model.py"
-        assert wrapper.exists()
-        assert 'import_module("arch.block_models.blk")' in wrapper.read_text()
-        assert not (checkout / "tb").exists()
-
-    def test_defaults_to_the_module_constant(self, roots, monkeypatch):
-        checkout, _run = roots
-        monkeypatch.setenv("CORESMITH_BLOCK_GOLDENS", "1")
-        models = checkout / "arch" / "block_models"
-        models.mkdir(parents=True)
-        (models / "blk.py").write_text("VALUE = 42\n")
-
-        ph.create_golden_model_wrapper("blk", "")
-
-        assert (checkout / "tb" / "cocotb" / "blk_model.py").exists()

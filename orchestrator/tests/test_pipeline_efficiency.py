@@ -214,61 +214,6 @@ class TestRtlRegressionGuard:
         result = await generate_rtl_node(state)
         assert result.get("force_regen_tb") is not True
 
-    @pytest.mark.asyncio
-    async def test_sim_pass_writes_best_result(self, tmp_path):
-        # simulate_node was merged into generate_testbench_node; the
-        # best_result.json side-effect is now produced inside that node.
-        from unittest.mock import patch
-
-        from orchestrator.langgraph.pipeline_graph import generate_testbench_node
-
-        block_name = "test_block"
-        block_dir = tmp_path / ".coresmith" / "blocks" / block_name
-        block_dir.mkdir(parents=True)
-
-        rtl_file = tmp_path / "test.v"
-        rtl_file.write_text("module test_block(); endmodule\n")
-        tb_file = tmp_path / "test_tb.py"
-        tb_file.write_text("import cocotb\n")
-
-        state = {
-            "current_block": {
-                "name": block_name,
-                # generate_testbench_node uses block["testbench"] to derive
-                # tb_path_obj; point it at the pre-existing fixture file.
-                "testbench": "test_tb.py",
-            },
-            "rtl_path": str(rtl_file),
-            "tb_path": str(tb_file),
-            "attempt": 1,
-            "project_root": str(tmp_path),
-            "pipeline_run_start": 0,
-            "step_log_paths": {},
-            # Reuse the existing tb file -- skip the (mocked-out) LLM call.
-            "preserve_testbench": True,
-            "force_regen_tb": False,
-        }
-
-        mock_result = {
-            "passed": True,
-            "log": "PASS",
-            "tests_passed": 6,
-            "tests_total": 6,
-            "log_path": "/tmp/sim.log",
-        }
-
-        with patch(
-            "orchestrator.langgraph.pipeline_graph.run_simulation",
-            return_value=mock_result,
-        ):
-            await generate_testbench_node(state)
-
-        best_path = block_dir / "best_result.json"
-        assert best_path.exists()
-        best = json.loads(best_path.read_text())
-        assert best["sim_passed"] is True
-        assert best["attempt"] == 1
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # R4: Testbench reuse prompt

@@ -761,51 +761,6 @@ class TestBestResultPersistence:
     sim-pass / sim-fail persistence behaviour is exercised through the
     combined node now."""
 
-    @pytest.mark.asyncio
-    async def test_sim_pass_writes_best_result(self, tmp_path):
-        from unittest.mock import patch
-
-        from orchestrator.langgraph.pipeline_graph import generate_testbench_node
-
-        block_name = "my_alu"
-        block = {"name": block_name, "testbench": f"tb/cocotb/test_{block_name}.py"}
-
-        (tmp_path / ".coresmith" / "blocks" / block_name).mkdir(parents=True)
-
-        rtl_file = tmp_path / "rtl" / block_name / f"{block_name}.v"
-        rtl_file.parent.mkdir(parents=True)
-        rtl_file.write_text("module my_alu(); endmodule\n")
-
-        tb_file = tmp_path / "tb" / "cocotb" / f"test_{block_name}.py"
-        tb_file.parent.mkdir(parents=True)
-        tb_file.write_text("# test\n")
-
-        sim_pass = {"passed": True, "log": "ok", "returncode": 0,
-                     "tests_passed": 3, "tests_total": 3}
-        state = {
-            "current_block": block,
-            "project_root": str(tmp_path),
-            "attempt": 1,
-            "rtl_path": str(rtl_file),
-            "tb_path": str(tb_file),
-            # preserve_testbench=True keeps the existing TB file and skips
-            # the (mocked-out) generate_testbench LLM call.
-            "force_regen_tb": False,
-            "preserve_testbench": True,
-        }
-
-        with patch(
-            "orchestrator.langgraph.pipeline_graph.run_simulation",
-            return_value=sim_pass,
-        ):
-            await generate_testbench_node(state)
-
-        best_path = tmp_path / ".coresmith" / "blocks" / block_name / "best_result.json"
-        assert best_path.exists()
-        best = json.loads(best_path.read_text())
-        assert best["sim_passed"] is True
-        assert best["attempt"] == 1
-        assert best["tests_passed"] == 3
 
     @pytest.mark.asyncio
     async def test_sim_fail_no_best_result(self, tmp_path):

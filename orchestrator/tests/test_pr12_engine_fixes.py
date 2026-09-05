@@ -77,33 +77,6 @@ class TestStorageLintThresholds:
 
 
 # --- #5: stimulus auto-discovery --------------------------------------------
-class TestStimulusAutoDiscovery:
-    def test_autodiscovers_inputs_model_stimulus(self, tmp_path, monkeypatch):
-        from orchestrator.architecture import model_integration as mi
-        monkeypatch.delenv("CORESMITH_MODEL_STIMULUS", raising=False)
-        inp = tmp_path / "inputs"
-        inp.mkdir()
-        (inp / "model_stimulus.py").write_text(
-            "stimulus = {'data': [1, 2, 3], 'mode': 'fwd'}\n")
-        stim, found = mi._load_env_stimulus(str(tmp_path))
-        assert found and stim == {"data": [1, 2, 3], "mode": "fwd"}
-
-    def test_env_wins_over_autodiscovery(self, tmp_path, monkeypatch):
-        from orchestrator.architecture import model_integration as mi
-        (tmp_path / "inputs").mkdir()
-        (tmp_path / "inputs" / "model_stimulus.py").write_text(
-            "stimulus = 'AUTO'\n")
-        envf = tmp_path / "env_stim.py"
-        envf.write_text("stimulus = 'ENV'\n")
-        monkeypatch.setenv("CORESMITH_MODEL_STIMULUS", str(envf))
-        stim, found = mi._load_env_stimulus(str(tmp_path))
-        assert found and stim == "ENV"
-
-    def test_none_when_neither(self, tmp_path, monkeypatch):
-        from orchestrator.architecture import model_integration as mi
-        monkeypatch.delenv("CORESMITH_MODEL_STIMULUS", raising=False)
-        stim, found = mi._load_env_stimulus(str(tmp_path))
-        assert not found and stim is None
 
 
 # --- #9: oracle-manifest spec re-baseline vs immutable tamper ---------------

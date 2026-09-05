@@ -6,12 +6,10 @@
 
 from __future__ import annotations
 
-from unittest.mock import patch
 
 import pytest
 
 from orchestrator.state_store.store import Scoreboard
-from orchestrator.state_store.trust import write_oracle_manifest
 
 
 class TestRecordHelpers:
@@ -69,45 +67,4 @@ class TestGenerateTestbenchRecording:
             "force_regen_tb": False,
         }
 
-    async def test_records_gate_dv_row_on_pass(self, tmp_path):
-        from orchestrator.langgraph.pipeline_graph import generate_testbench_node
-        state = self._state(tmp_path)
-        mock = {"passed": True, "log": "PASS", "tests_passed": 6,
-                "tests_total": 6, "tests_failed": 0, "log_path": "/tmp/sim.log"}
-        with patch("orchestrator.langgraph.pipeline_graph.run_simulation",
-                   return_value=mock):
-            out = await generate_testbench_node(state)
-        assert out["sim_passed"] is True
-        row = Scoreboard(tmp_path).latest_dv(block="test_block", scope="rtl")[0]
-        assert row["source"] == "gate"
-        assert row["passed"] == 1
-        assert row["tests_total"] == 6
 
-    async def test_oracle_tamper_fails_closed(self, tmp_path, monkeypatch):
-        # Seed + snapshot an oracle, then tamper it -> node must flip to failed.
-        (tmp_path / "inputs").mkdir()
-        (tmp_path / "inputs" / "golden.py").write_text("def g(x):\n    return x\n")
-        write_oracle_manifest(tmp_path)
-        (tmp_path / "inputs" / "golden.py").write_text("def g(x):\n    return 0\n")
-
-        from orchestrator.langgraph.pipeline_graph import generate_testbench_node
-        state = self._state(tmp_path)
-        mock = {"passed": True, "log": "PASS", "tests_passed": 6,
-                "tests_total": 6, "tests_failed": 0, "log_path": "/tmp/sim.log"}
-        with patch("orchestrator.langgraph.pipeline_graph.run_simulation",
-                   return_value=mock):
-            out = await generate_testbench_node(state)
-        assert out["sim_passed"] is False
-        row = Scoreboard(tmp_path).latest_dv(block="test_block", scope="rtl")[0]
-        assert row["passed"] == 0
-
-    async def test_no_manifest_does_not_block(self, tmp_path):
-        # No oracle manifest -> non-blocking, a clean sim still passes.
-        from orchestrator.langgraph.pipeline_graph import generate_testbench_node
-        state = self._state(tmp_path)
-        mock = {"passed": True, "log": "PASS", "tests_passed": 1,
-                "tests_total": 1, "tests_failed": 0, "log_path": "/tmp/sim.log"}
-        with patch("orchestrator.langgraph.pipeline_graph.run_simulation",
-                   return_value=mock):
-            out = await generate_testbench_node(state)
-        assert out["sim_passed"] is True

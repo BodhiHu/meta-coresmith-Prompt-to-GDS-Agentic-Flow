@@ -287,7 +287,7 @@ def run_stimulus_contract_guard(project_root: str) -> list[dict]:
     # Lazy imports: reuse the gate's reference/stimulus machinery verbatim so the
     # guard's oracle check matches what the µarch gate will later do.
     from orchestrator.architecture import composition as _composition
-    from orchestrator.architecture import model_integration as _mi
+    from orchestrator.architecture import reference_oracle as _mi
 
     violations: list[dict] = []
 

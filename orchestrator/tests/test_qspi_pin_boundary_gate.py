@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
 
 from orchestrator.langgraph import bfm_lib, pipeline_graph
 from orchestrator.langgraph.bfm_lib import (
@@ -391,100 +390,3 @@ def _setup_node(monkeypatch, tmp_path, *, wrapper: str = "", qspi: bool = True):
     return run, state
 
 
-@pytest.mark.asyncio
-async def test_off_top_boundary_fails_closed_and_never_reaches_the_llm_bfm(
-    monkeypatch, tmp_path
-):
-    """The load-bearing test: keeping the co-tuned BFM must be impossible."""
-    monkeypatch.delenv("CORESMITH_QSPI_BOUNDARY_GATE", raising=False)
-    monkeypatch.delenv("CORESMITH_GATE_FAIL_OPEN", raising=False)
-    run, state = _setup_node(monkeypatch, tmp_path, wrapper=_CARAVEL_WRAPPER)
-
-    async def _must_not_run(**kw):
-        raise AssertionError(
-            "the LLM-authored (DUT-co-tuned) BFM must not be generated once the "
-            "pin-boundary gate has failed closed"
-        )
-    monkeypatch.setattr(
-        pipeline_graph, "generate_integration_testbench", _must_not_run)
-
-    # The node hands the failure to integration_dv_decision_node as
-    # `interrupt_payload` instead of interrupting itself (run3-followups).
-    monkeypatch.setattr(pipeline_graph, "interrupt", _must_not_interrupt)
-
-    result = await pipeline_graph.integration_dv_node(state)
-
-    dv = result["integration_dv_result"]
-    payload = dv.get("interrupt_payload") or {}
-    assert payload.get("type") == "integration_dv_failure"
-    assert payload.get("phase") == "tb_generation"
-    assert "QSPI pin-boundary gate" in payload.get("sim_log", "")
-    assert "user_project_wrapper.v" in payload.get("sim_log", "")
-    assert dv["passed"] is False
-    assert result["pipeline_done"] is False
-
-
-@pytest.mark.asyncio
-async def test_contradiction_fails_closed(monkeypatch, tmp_path):
-    """Spec says QSPI, no pin boundary anywhere -> same fail-closed interrupt."""
-    monkeypatch.delenv("CORESMITH_QSPI_BOUNDARY_GATE", raising=False)
-    monkeypatch.delenv("CORESMITH_GATE_FAIL_OPEN", raising=False)
-    run, state = _setup_node(monkeypatch, tmp_path, wrapper="")
-
-    async def _must_not_run(**kw):
-        raise AssertionError("LLM BFM must not be generated")
-    monkeypatch.setattr(
-        pipeline_graph, "generate_integration_testbench", _must_not_run)
-    monkeypatch.setattr(pipeline_graph, "interrupt", _must_not_interrupt)
-
-    result = await pipeline_graph.integration_dv_node(state)
-    payload = result["integration_dv_result"].get("interrupt_payload") or {}
-    assert payload.get("type") == "integration_dv_failure"
-    assert "CONTRADICTION" in payload.get("sim_log", "")
-
-
-@pytest.mark.asyncio
-async def test_gate_off_restores_the_llm_bfm_but_records_a_defect(
-    monkeypatch, tmp_path
-):
-    """Flag-off branch: old behavior, and the bypass is NOT silent."""
-    monkeypatch.setenv("CORESMITH_QSPI_BOUNDARY_GATE", "0")
-    run, state = _setup_node(monkeypatch, tmp_path, wrapper=_CARAVEL_WRAPPER)
-    tb = run / "tb" / "integration" / "test_raster_top.py"
-    tb.parent.mkdir(parents=True, exist_ok=True)
-    tb.write_text("# llm tb\n")
-
-    async def _llm_tb(**kw):
-        return {"testbench_path": str(tb), "tb_path": str(tb), "test_count": 3}
-    monkeypatch.setattr(pipeline_graph, "generate_integration_testbench", _llm_tb)
-    monkeypatch.setattr(
-        pipeline_graph, "interrupt",
-        lambda p: (_ for _ in ()).throw(AssertionError("no interrupt expected")))
-
-    result = await pipeline_graph.integration_dv_node(state)
-    assert result["integration_dv_result"]["passed"] is True
-    defects = pipeline_graph.read_carried_forward_defects(str(run))
-    assert any(d.get("gate") == "qspi_pin_boundary" for d in defects), defects
-    assert any("io_oeb" in str(d.get("unmodeled", "")) for d in defects)
-
-
-@pytest.mark.asyncio
-async def test_non_qspi_design_still_uses_the_llm_bfm(monkeypatch, tmp_path):
-    """A genuinely non-QSPI design is untouched by the gate."""
-    monkeypatch.delenv("CORESMITH_QSPI_BOUNDARY_GATE", raising=False)
-    run, state = _setup_node(monkeypatch, tmp_path, wrapper="", qspi=False)
-    tb = run / "tb" / "integration" / "test_raster_top.py"
-    tb.parent.mkdir(parents=True, exist_ok=True)
-    tb.write_text("# llm tb\n")
-
-    async def _llm_tb(**kw):
-        return {"testbench_path": str(tb), "tb_path": str(tb), "test_count": 2}
-    monkeypatch.setattr(pipeline_graph, "generate_integration_testbench", _llm_tb)
-    monkeypatch.setattr(
-        pipeline_graph, "interrupt",
-        lambda p: (_ for _ in ()).throw(AssertionError("no interrupt expected")))
-
-    result = await pipeline_graph.integration_dv_node(state)
-    assert result["integration_dv_result"]["passed"] is True
-    defects = pipeline_graph.read_carried_forward_defects(str(run))
-    assert not any(d.get("gate") == "qspi_pin_boundary" for d in defects)

@@ -465,38 +465,6 @@ class TestWiredIntoTheBlockFlow:
             "preserve_testbench": True,
         }
 
-    @pytest.mark.asyncio
-    async def test_the_node_repairs_before_it_simulates(self, tmp_path):
-        from unittest.mock import patch
-
-        from orchestrator.langgraph.pipeline_graph import generate_testbench_node
-        root = _project(tmp_path, [
-            _edge("ap", "s", "host_write", sideband=["write_enable"])])
-        rtl = _rtl(tmp_path, "ap", ["host_write_enable"])
-        tb = tmp_path / "tb" / "test_ap.py"
-        tb.parent.mkdir(parents=True)
-        tb.write_text("def t(dut):\n    dut.host_write_enable.value = 1\n")
-        seen = {}
-
-        def _sim(block, rtl_path, tb_path, attempt, **kw):
-            # The sim that runs is the one AFTER the repair -- that is the
-            # whole reason the stage sits here and not after the testbench.
-            seen["rtl"] = Path(rtl_path).read_text()
-            seen["tb"] = Path(tb_path).read_text()
-            return {"passed": True, "log": "ok", "returncode": 0,
-                    "tests_passed": 1, "tests_total": 1}
-
-        with patch("orchestrator.langgraph.pipeline_graph.run_simulation", _sim):
-            out = await generate_testbench_node(
-                self._state(tmp_path, rtl, tb))
-        assert out["sim_passed"] is True
-        assert out["conformance_renames"] == {
-            "host_write_enable": "host_write_write_enable"}
-        assert "host_write_write_enable" in seen["rtl"]
-        assert "dut.host_write_write_enable" in seen["tb"]
-        rec = json.loads((root / ".coresmith" / "blocks" / "ap"
-                          / "contract_conformance.json").read_text())
-        assert rec["renames"] and rec["ok"]
 
     @pytest.mark.asyncio
     async def test_a_deviating_block_never_reaches_sim(self, tmp_path):
@@ -520,27 +488,6 @@ class TestWiredIntoTheBlockFlow:
                 / "previous_error.txt").read_text()
         assert "CONTRACT-CONFORMANCE" in prev and "ch_data" in prev
 
-    @pytest.mark.asyncio
-    async def test_the_env_gate_turns_it_off(self, tmp_path, monkeypatch):
-        from unittest.mock import patch
-
-        from orchestrator.langgraph.pipeline_graph import generate_testbench_node
-        monkeypatch.setenv("CORESMITH_CONTRACT_CONFORMANCE_GATE", "0")
-        root = _project(tmp_path, [
-            _edge("ap", "s", "host_write", sideband=["write_enable"])])
-        rtl = _rtl(tmp_path, "ap", ["host_write_enable"])
-        tb = tmp_path / "tb" / "test_ap.py"
-        tb.parent.mkdir(parents=True)
-        tb.write_text("# tb\n")
-        with patch("orchestrator.langgraph.pipeline_graph.run_simulation",
-                   lambda *a, **k: {"passed": True, "log": "", "returncode": 0}):
-            out = await generate_testbench_node(
-                self._state(tmp_path, rtl, tb))
-        assert out["sim_passed"] is True
-        assert "host_write_enable" in rtl.read_text()
-        assert "host_write_write_enable" not in rtl.read_text()
-        assert not (root / ".coresmith" / "blocks" / "ap"
-                    / "contract_conformance.json").exists()
 
     @pytest.mark.asyncio
     async def test_the_second_failure_parks_instead_of_looping(self, tmp_path):

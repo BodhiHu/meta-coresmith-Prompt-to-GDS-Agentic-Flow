@@ -410,14 +410,6 @@ class TestContractPortTable:
         from orchestrator.langchain.agents import rtl_generator as rg
         assert "data_write_write_enable" in rg.SYSTEM_PROMPT
 
-    def test_block_model_system_prompt_has_port_naming_skill(self):
-        from orchestrator.langchain.agents import block_golden_generator as bgg
-        prompt = bgg.build_system_prompt(
-            block_spec=_REGFILE_SPEC, contracts=_REGFILE_CONTRACTS)
-        assert "data_write_write_enable" in prompt
-        # anti-cheat stays unconditional too
-        assert _anchor("no_stimulus_keyed_memorization") in prompt
-
 
 # ---------------------------------------------------------------------------
 # Task C -- phase truthfulness

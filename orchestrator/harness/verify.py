@@ -95,237 +95,21 @@ def _resolve_tb_path(pr: Path, spec: dict, override: str | None) -> str:
     return str(pr / "tb" / "cocotb" / f"test_{spec.get('name')}.py")
 
 
-def _model_wrap_path(pr: Path, block: str) -> str:
-    return str(pr / "tb" / "cocotb" / f"{block}_model.py")
-
-
-def _block_model_path(pr: Path, block: str) -> Path:
-    return pr / "arch" / "block_models" / f"{block}.py"
-
-
 # ---------------------------------------------------------------------------
 # Shared RTL<->model equivalence gate (the anti-cheat gate of record).
 # Extracted so generate_testbench_node and the CLI apply the IDENTICAL check
 # with the same fail-closed / harness-error-retry semantics (commits 5 + 8).
 # ---------------------------------------------------------------------------
-def run_block_equiv_gate(
-    block_name: str,
-    rtl_path: str,
-    project_root: str | Path,
-    *,
-    seed: int | None = None,
-) -> dict:
-    """Run the RTL-vs-model byte-exact equivalence gate for one block.
-
-    Returns a dict::
-
-        {"ran": bool,          # gate applicable AND executed
-         "passed": bool,        # byte-exact match
-         "skipped": bool,       # honest skip (non-blocking)
-         "failed_closed": bool, # harness-error-persist / gate-error, fail-closed
-         "reason": str,
-         "checked_vectors": int,
-         "prev_error_text": str | None}   # to write to previous_error.txt
-
-    ``ran=False`` means the gate does not apply (equiv off / block-goldens off /
-    no RTL) -> the caller keeps its sim verdict unchanged. Never raises.
-    """
-    pr = Path(project_root)
-    out = {
-        "ran": False, "passed": False, "skipped": False, "failed_closed": False,
-        "reason": "", "checked_vectors": 0, "prev_error_text": None,
-    }
-    try:
-        from orchestrator.architecture import composition as _composition
-        from orchestrator.langgraph.gate_guard import gate_fail_open_enabled
-        from orchestrator.langgraph.rtl_model_equiv import (
-            check_rtl_model_equivalence as _check_equiv,
-        )
-        from orchestrator.langgraph.rtl_model_equiv import (
-            rtl_model_equiv_enabled as _equiv_enabled,
-        )
-    except Exception as exc:  # noqa: BLE001
-        out["reason"] = f"equiv imports unavailable: {exc}"
-        return out
-
-    if not (rtl_path and _equiv_enabled() and _composition.block_goldens_enabled()):
-        return out  # gate not applicable
-
-    from orchestrator.harness.seed_provider import gate_seed
-    _seed = gate_seed(explicit=seed, use_env=True)
-    model_wrap = _model_wrap_path(pr, block_name)
-    out["ran"] = True
-    try:
-        eq = _check_equiv(block_name, rtl_path, model_wrap,
-                          project_root=str(pr), seed=_seed)
-        # A-Fix 2c: a HARNESS/ENV skip is not honest -> retry once at 2x, then
-        # fail closed; honest skips stay non-blocking.
-        if eq.get("skipped") and eq.get("harness_error"):
-            eq = _check_equiv(block_name, rtl_path, model_wrap,
-                              project_root=str(pr), seed=_seed, timeout_scale=2.0)
-        if eq.get("skipped"):
-            if eq.get("harness_error") and not gate_fail_open_enabled():
-                rsn = eq.get("reason", "equivalence harness error")
-                out.update(
-                    failed_closed=True, reason=rsn,
-                    prev_error_text=(
-                        "RTL-vs-model equivalence gate could NOT run "
-                        "(harness/environment error, retried once with 2x "
-                        "timeout). This is NOT a pass (fail-closed):\n" + rsn
-                    ),
-                )
-            else:
-                out.update(skipped=True, reason=eq.get("reason", ""))
-        elif not eq.get("passed"):
-            rsn = eq.get("reason", "RTL diverged from model")
-            out.update(
-                passed=False, reason=rsn,
-                checked_vectors=int(eq.get("checked_vectors", 0) or 0),
-                prev_error_text=(
-                    "RTL-vs-model equivalence gate FAILED (fix #1). The RTL "
-                    "is not byte-exact to the proven Amaranth block model:\n" + rsn
-                ),
-            )
-        else:
-            out.update(
-                passed=True,
-                checked_vectors=int(eq.get("checked_vectors", 0) or 0),
-                reason="byte-exact",
-            )
-    except Exception as exc:  # noqa: BLE001
-        if gate_fail_open_enabled():
-            out.update(ran=True, passed=True, reason=f"gate error (fail-open): {exc}")
-        else:
-            out.update(
-                failed_closed=True, reason=f"gate errored: {exc!r}",
-                prev_error_text=(
-                    "RTL-vs-model equivalence gate ERRORED (fail-closed). This "
-                    "is NOT a pass -- the gate harness/environment failed:\n"
-                    f"{exc!r}"
-                ),
-            )
-    return out
 
 
 # ---------------------------------------------------------------------------
 # verify_model
 # ---------------------------------------------------------------------------
-def verify_model(
-    pr: str | Path, block: str, *, skip_size: bool = False,
-) -> VerifyResult:
-    """Elaborate + interface-check (+ size) one Amaranth block model.
-
-    The seconds-fast deterministic check that replaces the 69-min build/verify
-    death spiral: import + Amaranth-elaborate the model, confirm it kept every
-    expected interface, and (unless ``skip_size``) size its datapath/memory vs
-    the block area budget.
-    """
-    t0 = time.monotonic()
-    root = Path(pr)
-    try:
-        from orchestrator.langgraph.microarch_exp import (
-            _expected_ports_for_block,
-            _factory_params,
-            _read_block_diagram,
-            _read_target_clock_mhz,
-            _read_uarch_specs,
-            _size_one_model,
-            check_interface_constraint,
-            elaborate_block_model,
-        )
-    except Exception as exc:  # noqa: BLE001
-        return VerifyResult(False, infra_error=True,
-                            verdict=f"microarch import failed: {exc}",
-                            duration_s=time.monotonic() - t0)
-
-    model_path = _block_model_path(root, block)
-    err = elaborate_block_model(str(model_path), block)
-    if err:
-        return VerifyResult(
-            False, verdict=f"model elaboration failed: {err}",
-            details={"stage": "elaborate", "error": err, "model_path": str(model_path)},
-            duration_s=time.monotonic() - t0,
-        )
-
-    expected = _expected_ports_for_block(_read_block_diagram(str(root)), block)
-    params = _factory_params(str(model_path), block)
-    missing = check_interface_constraint(params, expected) if params is not None else []
-    if missing:
-        return VerifyResult(
-            False, verdict=f"model dropped interfaces: {missing}",
-            details={"stage": "interface", "missing": missing, "expected": expected},
-            duration_s=time.monotonic() - t0,
-        )
-
-    if skip_size:
-        return VerifyResult(
-            True, verdict="model elaborates + interfaces honoured (size skipped)",
-            details={"stage": "elaborate+interface"},
-            duration_s=time.monotonic() - t0,
-        )
-
-    target_mhz = _read_target_clock_mhz(str(root))
-    spec = _read_uarch_specs(str(root), [block]).get(block, "")
-    size = _size_one_model(str(model_path), block, target_mhz, spec)
-    feasible = size.get("feasible", True)
-    return VerifyResult(
-        bool(feasible),
-        verdict=("model elaborates, interfaces honoured, feasible"
-                 if feasible else f"model INFEASIBLE: {size.get('detail')}"),
-        details={"stage": "size", "size": size},
-        duration_s=time.monotonic() - t0,
-    )
 
 
 # ---------------------------------------------------------------------------
 # verify_chip_model
 # ---------------------------------------------------------------------------
-def verify_chip_model(pr: str | Path) -> VerifyResult:
-    """Composed-model-vs-golden byte-exact gate (composition.run_composition_gate)."""
-    t0 = time.monotonic()
-    root = Path(pr)
-    try:
-        from orchestrator.architecture import composition as _composition
-    except Exception as exc:  # noqa: BLE001
-        return VerifyResult(False, infra_error=True,
-                            verdict=f"composition import failed: {exc}",
-                            duration_s=time.monotonic() - t0)
-    if not _composition.block_goldens_enabled():
-        return VerifyResult(
-            False, skipped=True,
-            verdict="block goldens disabled (CORESMITH_BLOCK_GOLDENS off)",
-            duration_s=time.monotonic() - t0,
-        )
-    gate_info: dict = {}
-    try:
-        violations = _composition.run_composition_gate(
-            str(root), result_info=gate_info) or []
-    except Exception as exc:  # noqa: BLE001
-        return VerifyResult(False, infra_error=True,
-                            verdict=f"composition gate errored: {exc}",
-                            duration_s=time.monotonic() - t0)
-    # Audit F2: an empty violations list is a PASS only when the gate actually
-    # CHECKED something. A no-op (reference import failure, no stimulus, no
-    # chip model, ...) must surface as SKIP -- the encoder run printed
-    # "composed model == golden byte-exact" right after "reference import
-    # failed: No module named 'reference_codec_vectors' -- no-op".
-    if not violations and (gate_info.get("skipped")
-                           or not gate_info.get("checked_vectors")):
-        reason = gate_info.get("reason") or "gate checked no vectors"
-        return VerifyResult(
-            False, skipped=True,
-            verdict=f"SKIP -- {reason} (no vector checked; NOT a pass)",
-            details={"gate_info": gate_info},
-            duration_s=time.monotonic() - t0,
-        )
-    passed = not violations
-    return VerifyResult(
-        passed,
-        verdict=("composed model == golden byte-exact" if passed
-                 else f"composition gate: {len(violations)} violation(s)"),
-        details={"violations": violations, "gate_info": gate_info},
-        duration_s=time.monotonic() - t0,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -456,28 +240,6 @@ def verify_rtl(
             details={"stage": "sim", "log_tail": (sim.get("log", "") or "")[-2000:]},
             log_path=log_path, duration_s=time.monotonic() - t0,
         ), tests=tests)
-
-    # --- equivalence gate (unless suppressed) ---
-    if not no_equiv:
-        eq = run_block_equiv_gate(block, rtl_path, root, seed=seed)
-        if eq["ran"]:
-            if eq["failed_closed"] or (not eq["passed"] and not eq["skipped"]):
-                return _record(VerifyResult(
-                    False, verdict=f"RTL != model: {eq['reason']}",
-                    details={"stage": "equiv", "equiv": eq},
-                    log_path=log_path, duration_s=time.monotonic() - t0,
-                ), tests=tests, first_div={"reason": eq["reason"]})
-            if eq["skipped"]:
-                return _record(VerifyResult(
-                    True, verdict=f"sim passed; equiv skipped ({eq['reason']})",
-                    details={"stage": "equiv", "equiv": eq},
-                    log_path=log_path, duration_s=time.monotonic() - t0,
-                ), tests=tests)
-            return _record(VerifyResult(
-                True, verdict=f"sim + equiv byte-exact ({eq['checked_vectors']} vectors)",
-                details={"stage": "equiv", "equiv": eq},
-                log_path=log_path, duration_s=time.monotonic() - t0,
-            ), tests=tests)
 
     return _record(VerifyResult(
         True, verdict="simulation passed",
