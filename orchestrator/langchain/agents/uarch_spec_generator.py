@@ -702,6 +702,16 @@ class UarchSpecGenerator:
             system_prompt = build_system_prompt()  # no per-block evidence: all skills inline
             span.set_attribute("system_prompt_chars", len(system_prompt))
             span.set_attribute("user_prompt_chars", len(user_message))
+            # One session writes every spec sequentially, so the per-block
+            # budget (CORESMITH_UARCH_TIMEOUT, 45 min) cannot bound it: allow
+            # the per-block budget plus 15 min per extra block, overridable.
+            try:
+                _budget = scaled(2700 + 900 * max(0, len(names) - 1),
+                                 env="CORESMITH_UARCH_MANY_TIMEOUT")
+                self.llm.timeout = max(int(getattr(self.llm, "timeout", 0) or 0), int(_budget))
+                span.set_attribute("timeout_s", self.llm.timeout)
+            except Exception:  # noqa: BLE001 - keep the default budget on any error
+                pass
             content = await self.llm.call(
                 system=system_prompt,
                 prompt=user_message,
