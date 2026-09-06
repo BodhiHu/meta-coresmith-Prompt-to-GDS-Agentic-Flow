@@ -53,6 +53,12 @@ Omit fields you don't need. `action` MUST be one of the payload's
   decisions), either fix the RTL/TB yourself on disk and answer `fix_rtl` /
   `fix_tb` (ONLY if you actually edited and saved the file), or `skip` the
   block. `abort` only for unrecoverable infrastructure failure.
+  INFRASTRUCTURE attempts DO NOT COUNT: when the error / diagnosis says
+  the LLM itself failed (`[ClaudeLLM error:`, usage limit, rate limit,
+  timed out, empty response, "Agent did not write RTL" with such a
+  response tail), the block was never actually attempted -- answer
+  `retry`, never `skip`, regardless of how many such attempts repeated
+  (observed: a block skipped over three usage-limit failures).
 - `integration_check`: `accept` when the assembled chip_top lints clean and
   wiring matches the block diagram; lint-clean is NOT functionally-correct,
   so never claim more than acceptance to proceed to DV.
@@ -67,7 +73,12 @@ Omit fields you don't need. `action` MUST be one of the payload's
   audit's) -- the pipeline appends the feedback to those blocks' uArch specs
   and regenerates them on tier re-entry. `abort` only when even a spec-level
   revision cannot resolve it (a truly external constraint).
-- `pipeline_incomplete`: `abort`.
+- `pipeline_incomplete`: `retry` by default -- it re-validates ONLY the
+  failed/missing blocks against their on-disk RTL (passing blocks reuse
+  their result), so a block that was skipped/escalated over an LLM outage,
+  or whose RTL you fixed on disk, simply gets re-run. `abort` only when
+  the same blocks failed identically at the previous incomplete gate or
+  the payload says the re-validation cap is reached.
 
 ## Long-horizon discipline
 

@@ -4490,9 +4490,18 @@ def _route_decision(debug_result: dict, attempt_history: list[dict],
             return "escalate"
         return "retry_rtl"
 
-    # Rule 0: Infrastructure errors get special handling -- escalate on 2+
+    # Rule 0: Infrastructure errors get special handling. WP-16: an LLM
+    # outage is not the block's fault -- retry (without consuming the
+    # attempt budget, see route_decision_node) and only ask a human after
+    # CORESMITH_INFRA_MAX_RETRIES consecutive failures. Asking after 2
+    # meant calling the chip lead (also an LLM) during the same outage,
+    # and once it answered it skipped a block over 3 'attempts'.
     if category == "INFRASTRUCTURE_ERROR":
-        if category_counts.get("INFRASTRUCTURE_ERROR", 0) >= 2:
+        try:
+            _infra_max = int(os.environ.get("CORESMITH_INFRA_MAX_RETRIES", "6") or 6)
+        except ValueError:
+            _infra_max = 6
+        if category_counts.get("INFRASTRUCTURE_ERROR", 0) >= _infra_max:
             return "ask_human"
         return "retry_rtl"
 
@@ -4572,6 +4581,28 @@ async def decide_node(state: BlockState) -> dict:
                 _diag_cat = (_db(_pr(state)).diagnosis(block_name) or {}).get("category")
             except Exception:  # noqa: BLE001
                 _diag_cat = None
+            if _diag_cat == "INFRASTRUCTURE_ERROR":
+                # WP-16: the LLM was unavailable; re-run the SAME attempt
+                # after a real backoff. Budget is for design failures.
+                _infra_n = 0
+                try:
+                    _infra_n = sum(
+                        1 for a in (_db(_pr(state)).attempt_history(block_name) or [])
+                        if (a.get("diagnosis") or {}).get("category") == "INFRASTRUCTURE_ERROR"
+                        or a.get("category") == "INFRASTRUCTURE_ERROR")
+                except Exception:  # noqa: BLE001
+                    _infra_n = 1
+                backoff_s = min(60 * (2 ** max(_infra_n - 1, 0)), 900)
+                log(f"  [RETRY] INFRASTRUCTURE_ERROR -- re-running attempt "
+                    f"{state['attempt']} after {backoff_s}s backoff (budget not "
+                    f"consumed; infra failures so far: {_infra_n})", YELLOW)
+                write_graph_event(_pr(state), "Route Decision", "graph_node_exit", {
+                    "block": block_name, "decision": action,
+                    "infra_retry": True, "backoff_s": backoff_s,
+                })
+                await asyncio.sleep(backoff_s)
+                span.set_attribute("final_decision", action)
+                return update
             if _diag_cat == "SIM_TIMEOUT":
                 log(f"  [RETRY] SIM_TIMEOUT -- re-running attempt {state['attempt']} "
                     f"with extended sim timeout (budget not consumed)", YELLOW)
