@@ -1757,6 +1757,35 @@ def lint_top_level(
 # Load architecture connections
 # ---------------------------------------------------------------------------
 
+
+def _existing_top_module(int_dir: Path, preferred: str = "") -> str:
+    """Name of the real top module in an existing ``rtl/integration`` file.
+
+    Preference: ``preferred`` when declared; a module matching the file stem;
+    the unique module never instantiated in the file; else the last declared
+    module. ``""`` when no file declares a module. The ``module`` keyword is
+    matched anywhere (a top declared behind a same-line comment still counts).
+    """
+    if not int_dir.is_dir():
+        return ""
+    for vf in sorted(int_dir.glob("*.v")):
+        try:
+            src = vf.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        mods = re.findall(r"\bmodule\s+([A-Za-z_]\w*)", src)
+        if not mods:
+            continue
+        if preferred and preferred in mods:
+            return preferred
+        if vf.stem in mods:
+            return vf.stem
+        uninst = [m for m in mods if len(re.findall(rf"\b{re.escape(m)}\b", src)) == 1]
+        if len(uninst) == 1:
+            return uninst[0]
+        return mods[-1]
+    return ""
+
 def load_architecture_connections(project_root: str) -> tuple[list[dict], str]:
     """Load block-to-block connections from architecture state.
 
@@ -1775,34 +1804,25 @@ def load_architecture_connections(project_root: str) -> tuple[list[dict], str]:
             data = json.loads(arch_path.read_text(encoding="utf-8"))
             bd = data.get("block_diagram", {})
             connections = bd.get("connections", [])
-            # Extract design name: prefer actual module name from
-            # integration RTL on disk, fall back to block_diagram title,
-            # and only use PRD title as last resort.
-            _int_dir = root / "rtl" / "integration"
-            _found_module = ""
-            if _int_dir.is_dir():
-                for _vf in sorted(_int_dir.glob("*.v")):
-                    try:
-                        _src = _vf.read_text(encoding="utf-8", errors="replace")
-                        _mm = re.search(r'^\s*module\s+(\w+)', _src, re.MULTILINE)
-                        if _mm:
-                            _found_module = _mm.group(1)
-                            break
-                    except OSError:
-                        pass
+            prd = data.get("prd_spec", data.get("ers_spec", {}))
+            prd_doc = prd.get("prd", prd.get("ers", {})) if isinstance(prd, dict) else {}
+            _prd_name = ""
+            if prd_doc.get("title"):
+                _raw = prd_doc["title"]
+                _raw = re.sub(r'^(?:PRD|ERS)\s*[—–-]\s*', '', _raw)
+                _prd_name = re.sub(r'[^a-zA-Z0-9_]', '_', _raw).strip('_').lower()
+                _prd_name = re.sub(r'_+', '_', _prd_name)
+                _prd_name = f"{_prd_name}_top"
+            # WP-17: an existing top file names the design by its REAL top
+            # module, not by whichever `module` keyword happens to start a
+            # line (observed: the top declared behind a same-line comment,
+            # the helper arbiter picked instead, the chip re-emitted under
+            # the helper's name).
+            _found_module = _existing_top_module(root / "rtl" / "integration", _prd_name)
             if _found_module:
                 design_name = _found_module
-            else:
-                # Fall back to a clean name from PRD title
-                prd = data.get("prd_spec", data.get("ers_spec", {}))
-                prd_doc = prd.get("prd", prd.get("ers", {})) if isinstance(prd, dict) else {}
-                if prd_doc.get("title"):
-                    _raw = prd_doc["title"]
-                    # Strip common prefixes like "PRD — " or "ERS — "
-                    _raw = re.sub(r'^(?:PRD|ERS)\s*[—–-]\s*', '', _raw)
-                    design_name = re.sub(r'[^a-zA-Z0-9_]', '_', _raw).strip('_').lower()
-                    design_name = re.sub(r'_+', '_', design_name)
-                    design_name = f"{design_name}_top"
+            elif _prd_name:
+                design_name = _prd_name
             if connections:
                 return connections, design_name
         except (json.JSONDecodeError, OSError):
