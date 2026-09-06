@@ -233,90 +233,6 @@ def cmd_contracts(args) -> int:
     return EXIT_PASS
 
 
-def cmd_complexity(args) -> int:
-    """Decomposition checker: score a block's golden slice (or every block in
-    the block diagram) on the modeling-complexity axes -- the SAME deterministic
-    check the architecture Complexity Review gate runs. A block over the
-    LOC/distinct-algorithm/cyclomatic budget fuses too many golden algorithms to
-    be reproduced byte-exactly and should be split. Exposed so the Block Diagram
-    author (and a human) can score a candidate decomposition BEFORE committing.
-
-    Exit: PASS when all scored blocks are within budget, FAIL when any is over,
-    SKIP when no golden or no block carries a python_source slice to score.
-    """
-    try:
-        root = _bootstrap(args)
-    except ValueError as exc:
-        print(str(exc), file=sys.stderr)
-        return EXIT_USAGE
-    try:
-        from orchestrator.langgraph import block_complexity as _bc
-    except Exception as exc:  # noqa: BLE001
-        print(f"complexity checker unavailable: {exc}", file=sys.stderr)
-        return EXIT_INFRA
-
-    # golden path
-    golden = ""
-    try:
-        from orchestrator.langgraph.microarch_rd import resolve_golden_path
-        golden = resolve_golden_path(str(root)) or ""
-    except Exception:  # noqa: BLE001
-        golden = ""
-    if not golden:
-        _emit(args, {"skipped": True, "reason": "no golden resolvable"},
-              "complexity: SKIP (no golden reference resolvable)")
-        return EXIT_SKIP
-
-    stats = _bc._parse_functions(_bc._read_golden_source(golden))
-
-    # blocks from the live block diagram (each carries its python_source slice)
-    import json as _json
-    try:
-        bd = _json.loads((root / ".coresmith" / "block_diagram.json")
-                         .read_text(encoding="utf-8"))
-        blocks = bd.get("blocks", []) or []
-    except Exception:  # noqa: BLE001
-        blocks = []
-    if args.block:
-        blocks = [b for b in blocks if b.get("name") == args.block]
-        if not blocks:
-            print(f"block '{args.block}' not in block_diagram.json",
-                  file=sys.stderr)
-            return EXIT_USAGE
-
-    results, over = [], []
-    for b in blocks:
-        name = b.get("name", "")
-        sl = _bc.python_source_slice_fns(b.get("python_source", ""), stats) or None
-        if sl is None:
-            continue  # no scoreable slice (pure memory/IO/wrapper)
-        est = _bc.estimate_block_complexity(name, golden, stats=stats,
-                                            slice_fns=sl)
-        results.append(est)
-        if est.get("over_budget"):
-            over.append(est)
-
-    if not results:
-        _emit(args, {"skipped": True, "reason": "no block has a python_source slice"},
-              "complexity: SKIP (no block carries a python_source slice to score)")
-        return EXIT_SKIP
-
-    human = []
-    for est in results:
-        tag = "OVER" if est.get("over_budget") else "ok"
-        human.append(
-            f"[{tag}] {est.get('block_name')}: "
-            f"modeling_complexity={est.get('modeling_complexity')} "
-            f"cyclo={est.get('cyclomatic')}"
-            + ("".join(f"\n    - {x}" for x in est.get("axis_breaches", []))
-               if est.get("over_budget") else ""))
-    _emit(args, {"blocks": results, "over_budget": len(over)}, "\n".join(human))
-    return EXIT_FAIL if over else EXIT_PASS
-
-
-# ---------------------------------------------------------------------------
-# Registration
-# ---------------------------------------------------------------------------
 def _run(handler):
     """Wrap an int-returning handler so the CLI exits with its code."""
     def _f(args):
@@ -449,14 +365,7 @@ def _register_queries(sub) -> None:
     ds.set_defaults(func=_run(cmd_dv_status))
 
     # complexity [block] -- decomposition checker
-    cx = sub.add_parser(
-        "complexity",
-        help="score a block's golden slice for decomposition (over-budget = "
-             "fuses too many algorithms; split it)")
-    _add_project_root(cx)
-    _add_json(cx)
-    cx.add_argument("block", nargs="?", help="restrict to one block")
-    cx.set_defaults(func=_run(cmd_complexity))
+
 
     # ppa <block> [--history]
     pp = sub.add_parser("ppa", help="PPA (FF/area/cells) for a block")

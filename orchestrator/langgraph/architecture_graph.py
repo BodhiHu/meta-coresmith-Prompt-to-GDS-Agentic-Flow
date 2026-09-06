@@ -390,140 +390,6 @@ def _persist_frd(project_root: str, frd_result: dict) -> None:
     atomic_write(arch_dir / "frd_spec.md", frd_text)
 
 
-def _persist_memory_map(project_root: str, mm_result: dict) -> None:
-    """Write the memory map to disk as JSON and Markdown.
-
-    Files written:
-      .coresmith/memory_map.json  -- structured memory map for programmatic use
-      arch/memory_map.md     -- human-readable Markdown
-    """
-    coresmith_dir = Path(project_root) / ".coresmith"
-    coresmith_dir.mkdir(parents=True, exist_ok=True)
-    arch_dir = Path(project_root) / ARCH_DOC_DIR
-    arch_dir.mkdir(parents=True, exist_ok=True)
-
-    from orchestrator.utils import atomic_write
-
-    atomic_write(coresmith_dir / "memory_map.json", json.dumps(mm_result, indent=2, default=str))
-
-    mm = mm_result.get("result", mm_result)
-    peripherals = mm.get("peripherals", [])
-    sram = mm.get("sram")
-    top_csr = mm.get("top_csr")
-    reasoning = mm.get("reasoning", "")
-
-    md_lines = ["# Memory Map", ""]
-
-    if reasoning:
-        md_lines += [reasoning, ""]
-
-    if sram:
-        base = sram.get("base_address", "0x00000000")
-        size = sram.get("size", 0)
-        size_str = f"0x{size:X}" if isinstance(size, int) else str(size)
-        md_lines += [
-            "## SRAM",
-            f"- **Base:** `{base}`",
-            f"- **Size:** {size_str}",
-            "",
-        ]
-
-    if peripherals:
-        md_lines += [
-            "## Peripherals",
-            "",
-            "| Peripheral | Base Address | Size |",
-            "|---|---|---|",
-        ]
-        for p in peripherals:
-            name = p.get("name", "?")
-            base = p.get("base_address", "?")
-            size = p.get("size", 0)
-            size_str = f"0x{size:X}" if isinstance(size, int) else str(size)
-            md_lines.append(f"| {name} | `{base}` | {size_str} |")
-        md_lines.append("")
-
-    if top_csr:
-        base = top_csr.get("base_address", "?")
-        size = top_csr.get("size", 0)
-        size_str = f"0x{size:X}" if isinstance(size, int) else str(size)
-        md_lines += [
-            "## Top-Level CSR",
-            f"- **Base:** `{base}`",
-            f"- **Size:** {size_str}",
-            "",
-        ]
-
-    atomic_write(arch_dir / "memory_map.md", "\n".join(md_lines))
-
-
-def _persist_clock_tree(project_root: str, ct_result: dict) -> None:
-    """Write the clock tree to disk as JSON and Markdown.
-
-    Files written:
-      .coresmith/clock_tree.json  -- structured clock tree for programmatic use
-      arch/clock_tree.md     -- human-readable Markdown
-    """
-    coresmith_dir = Path(project_root) / ".coresmith"
-    coresmith_dir.mkdir(parents=True, exist_ok=True)
-    arch_dir = Path(project_root) / ARCH_DOC_DIR
-    arch_dir.mkdir(parents=True, exist_ok=True)
-
-    from orchestrator.utils import atomic_write
-
-    atomic_write(coresmith_dir / "clock_tree.json", json.dumps(ct_result, indent=2, default=str))
-
-    ct = ct_result.get("result", ct_result)
-    domains = ct.get("domains", [])
-    crossings = ct.get("crossings", [])
-    reset_spec = ct.get("reset_spec", {})
-
-    md_lines = ["# Clock Tree", ""]
-
-    if domains:
-        md_lines += [
-            "## Clock Domains",
-            "",
-            "| Domain | Frequency | Source |",
-            "|---|---|---|",
-        ]
-        for d in domains:
-            name = d.get("name", "?")
-            freq = d.get("frequency_mhz", "?")
-            src = d.get("source", d.get("parent", "\u2014"))
-            md_lines.append(f"| {name} | {freq} MHz | {src} |")
-        md_lines.append("")
-
-    if crossings:
-        md_lines += ["## Clock Domain Crossings", ""]
-        for c in crossings:
-            if isinstance(c, dict):
-                src = c.get("from", c.get("source", "?"))
-                dst = c.get("to", c.get("dest", "?"))
-                mech = c.get("mechanism", c.get("type", "2-FF synchronizer"))
-                md_lines.append(f"- **{src} \u2192 {dst}**: {mech}")
-            else:
-                md_lines.append(f"- {c}")
-        md_lines.append("")
-
-    if reset_spec:
-        strategy = reset_spec.get("strategy", "synchronous")
-        rst_domains = reset_spec.get("domains", [])
-        md_lines += [
-            "## Reset Strategy",
-            f"- **Strategy:** {strategy}",
-        ]
-        if rst_domains:
-            md_lines.append(f"- **Domains:** {', '.join(rst_domains)}")
-        md_lines.append("")
-
-    cdc_required = ct.get("cdc_required", False)
-    md_lines.append(f"**CDC required:** {'Yes' if cdc_required else 'No'}")
-    md_lines.append("")
-
-    atomic_write(arch_dir / "clock_tree.md", "\n".join(md_lines))
-
-
 def _persist_block_diagram(project_root: str, bd_result: dict) -> None:
     """Write the block diagram to disk as JSON and Markdown.
 
@@ -579,48 +445,6 @@ def _persist_block_diagram(project_root: str, bd_result: dict) -> None:
         md_lines.append("")
 
     atomic_write(arch_dir / "block_diagram.md", "\n".join(md_lines))
-
-
-def _persist_register_spec(project_root: str, rs_result: dict) -> None:
-    """Write the register spec to disk as JSON and Markdown.
-
-    Files written:
-      .coresmith/register_spec.json  -- structured register spec for programmatic use
-      arch/register_spec.md     -- human-readable Markdown
-    """
-    coresmith_dir = Path(project_root) / ".coresmith"
-    coresmith_dir.mkdir(parents=True, exist_ok=True)
-    arch_dir = Path(project_root) / ARCH_DOC_DIR
-    arch_dir.mkdir(parents=True, exist_ok=True)
-
-    from orchestrator.utils import atomic_write
-
-    atomic_write(coresmith_dir / "register_spec.json", json.dumps(rs_result, indent=2, default=str))
-
-    rs = rs_result.get("result", rs_result)
-    reg_blocks = rs.get("blocks", [])
-
-    md_lines = ["# Register Specification", ""]
-
-    if reg_blocks:
-        md_lines += [
-            "## Register Blocks",
-            "",
-            "| Block | Config Regs | Status Regs |",
-            "|---|---|---|",
-        ]
-        for b in reg_blocks:
-            name = b.get("name", "?")
-            num_cfg = b.get("num_config", 0)
-            num_sts = b.get("num_status", 0)
-            md_lines.append(f"| {name} | {num_cfg} | {num_sts} |")
-        md_lines.append("")
-
-    total = rs.get("total_blocks", len(reg_blocks))
-    md_lines.append(f"**Total register blocks:** {total}")
-    md_lines.append("")
-
-    atomic_write(arch_dir / "register_spec.md", "\n".join(md_lines))
 
 
 def _persist_ers(project_root: str, ers_result: dict) -> None:
@@ -1216,165 +1040,6 @@ async def interface_definition_node(state: ArchGraphState) -> dict:
         _persist_intermediate_state(state, update)
         return update
 
-
-async def memory_map_node(state: ArchGraphState) -> dict:
-    """Generate memory map via LLM specialist.
-
-    Bypassed by default for streaming designs. Set
-    ``CORESMITH_ENABLE_MEMORY_MAP=1`` to run it. The legacy
-    ``CORESMITH_SKIP_MEMORY_MAP=1`` still forces a skip.
-    """
-    if not _stage_enabled("CORESMITH_ENABLE_MEMORY_MAP", "CORESMITH_SKIP_MEMORY_MAP"):
-        _event(state, "Memory Map", "graph_node_enter", {"round": state["round"], "skipped": True})
-        empty = {"skipped": True,
-                 "result": {"skipped": True, "peripheral_count": 0, "peripherals": []},
-                 "rationale": "bypassed by default; set CORESMITH_ENABLE_MEMORY_MAP=1 to run"}
-        _event(state, "Memory Map", "graph_node_exit", {"round": state["round"], "skipped": True})
-        update = {"memory_map": empty, "phase": "memory_map"}
-        _persist_intermediate_state(state, update)
-        _persist_memory_map(state["project_root"], empty)
-        return update
-
-    from orchestrator.architecture.specialists.memory_map import (
-        analyze_memory_map,
-    )
-
-    _event(state, "Memory Map", "graph_node_enter", {"round": state["round"]})
-
-    round_label = f" - Iteration #{state['round']}" if state["round"] > 1 else ""
-    with _tracer.start_as_current_span(f"Memory Map{round_label}") as span:
-        span.set_attribute("round", state["round"])
-        result = await analyze_memory_map(
-            block_diagram=state["block_diagram"],
-            target_clock_mhz=state["target_clock_mhz"],
-            requirements=state.get("requirements", ""),
-            ers_spec=state.get("prd_spec"),
-        )
-        periph_count = result.get("result", {}).get("peripheral_count", 0)
-        span.set_attribute("peripheral_count", periph_count)
-
-        _event(state, "Memory Map", "graph_node_exit", {
-            "round": state["round"],
-            "peripheral_count": periph_count,
-        })
-
-        update = {"memory_map": result, "phase": "memory_map"}
-        _persist_intermediate_state(state, update)
-        _persist_memory_map(state["project_root"], result)
-        return update
-
-
-async def clock_tree_node(state: ArchGraphState) -> dict:
-    """Generate clock tree via LLM specialist.
-
-    Bypassed by default for streaming soft-IP exploration. Set
-    ``CORESMITH_ENABLE_CLOCK_TREE=1`` to run it.
-    """
-    if not _stage_enabled("CORESMITH_ENABLE_CLOCK_TREE", "CORESMITH_SKIP_CLOCK_TREE"):
-        _event(state, "Clock Tree", "graph_node_enter", {"round": state["round"], "skipped": True})
-        empty = {"skipped": True,
-                 "result": {"skipped": True, "num_domains": 0, "domains": []},
-                 "rationale": "bypassed by default; set CORESMITH_ENABLE_CLOCK_TREE=1 to run"}
-        _event(state, "Clock Tree", "graph_node_exit", {"round": state["round"], "skipped": True})
-        update = {"clock_tree": empty, "phase": "clock_tree"}
-        _persist_intermediate_state(state, update)
-        _persist_clock_tree(state["project_root"], empty)
-        return update
-
-    from orchestrator.architecture.specialists.clock_tree import (
-        analyze_clock_tree,
-    )
-
-    _event(state, "Clock Tree", "graph_node_enter", {"round": state["round"]})
-
-    round_label = f" - Iteration #{state['round']}" if state["round"] > 1 else ""
-    with _tracer.start_as_current_span(f"Clock Tree{round_label}") as span:
-        span.set_attribute("round", state["round"])
-        result = await analyze_clock_tree(
-            block_diagram=state["block_diagram"],
-            target_clock_mhz=state["target_clock_mhz"],
-            requirements=state.get("requirements", ""),
-        )
-        num_domains = result.get("result", {}).get("num_domains", 0)
-        span.set_attribute("num_domains", num_domains)
-
-        _event(state, "Clock Tree", "graph_node_exit", {
-            "round": state["round"],
-            "num_domains": num_domains,
-        })
-
-        update = {"clock_tree": result, "phase": "clock_tree"}
-        _persist_intermediate_state(state, update)
-        _persist_clock_tree(state["project_root"], result)
-        return update
-
-
-async def register_spec_node(state: ArchGraphState) -> dict:
-    """Generate register spec via LLM specialist.
-
-    Bypassed by default for streaming designs with no CSR surface. Set
-    ``CORESMITH_ENABLE_REGISTER_SPEC=1`` to run it. The legacy
-    ``CORESMITH_SKIP_REGISTER_SPEC=1`` still forces a skip.
-    """
-    if not _stage_enabled("CORESMITH_ENABLE_REGISTER_SPEC", "CORESMITH_SKIP_REGISTER_SPEC"):
-        _event(state, "Register Spec", "graph_node_enter", {"round": state["round"], "skipped": True})
-        empty = {"skipped": True,
-                 "result": {"skipped": True, "total_blocks": 0, "register_blocks": []},
-                 "rationale": "bypassed by default; set CORESMITH_ENABLE_REGISTER_SPEC=1 to run"}
-        _event(state, "Register Spec", "graph_node_exit", {"round": state["round"], "skipped": True})
-        update = {"register_spec": empty, "phase": "register_spec"}
-        _persist_intermediate_state(state, update)
-        _persist_register_spec(state["project_root"], empty)
-        return update
-
-    from orchestrator.architecture.specialists.register_spec import (
-        analyze_register_spec,
-    )
-
-    _event(state, "Register Spec", "graph_node_enter", {"round": state["round"]})
-
-    round_label = f" - Iteration #{state['round']}" if state["round"] > 1 else ""
-    with _tracer.start_as_current_span(f"Register Spec{round_label}") as span:
-        span.set_attribute("round", state["round"])
-        result = await analyze_register_spec(
-            block_diagram=state["block_diagram"],
-            memory_map=state.get("memory_map"),
-            requirements=state.get("requirements", ""),
-        )
-        total_blocks = result.get("result", {}).get("total_blocks", 0)
-        span.set_attribute("register_block_count", total_blocks)
-
-        _event(state, "Register Spec", "graph_node_exit", {
-            "round": state["round"],
-            "register_blocks": total_blocks,
-        })
-
-        update = {"register_spec": result, "phase": "register_spec"}
-        _persist_intermediate_state(state, update)
-        _persist_register_spec(state["project_root"], result)
-        return update
-
-
-# ---------------------------------------------------------------------------
-# ERS emission (moved AHEAD of the constraint gate)
-# ---------------------------------------------------------------------------
-#
-# The ERS used to be generated by ``create_documentation_node``, which runs
-# AFTER ``Finalize Architecture`` -- i.e. after the only automated gate in the
-# whole architecture phase. That ordering made an ERS-vs-anything check
-# structurally impossible: at Constraint Check time ``state["ers_spec"]`` was
-# the seeded ``None`` and ``arch/ers_spec.md`` did not exist on disk, so the
-# artifact bundle the constraint subagents read simply had no ERS in it.
-#
-# The ERS depends only on PRD/SAD/FRD/block_diagram/memory_map/clock_tree/
-# register_spec, all of which are complete by the time Register Spec finishes,
-# so it can be emitted one node earlier with no other change to the flow. The
-# Doc Fix repair path routes through here too, so a regenerated FRD produces a
-# regenerated ERS before constraints are re-checked -- otherwise the gate would
-# flag an FRD/ERS disagreement that Doc Fix could never clear.
-#
-# ``CORESMITH_ERS_BEFORE_CONSTRAINTS=0`` restores the pre-fix ordering: this
-# node no-ops and ``create_documentation_node`` generates the ERS as before.
 
 def _ers_before_constraints_enabled() -> bool:
     """Default-ON: emit the ERS before the constraint gate can read it."""
@@ -2575,8 +2240,6 @@ def _post_diagram_gate_target() -> str:
     wired 'Interface Definition', so ANY design whose block diagram asked a
     clarifying question (the common case) SKIPPED the complexity/decomposition
     gate entirely -- the residual_recon_engine fusion was never checked."""
-    if _complexity_gate_enabled():
-        return "Complexity Review"
     if _output_contract_gate_enabled():
         return "Output Contract Review"
     return "Interface Definition"
@@ -2764,23 +2427,6 @@ route_after_output_contract_review.__edge_labels__ = {
 # Block-complexity gate (A-Fix 3b)
 # ---------------------------------------------------------------------------
 
-def _complexity_gate_enabled() -> bool:
-    """Opt-in (default OFF since WP-10c) gate for the per-block
-    complexity/tractability review; the score stays available as advice via
-    `coresmith complexity`. Set CORESMITH_COMPLEXITY_GATE=1 to route a
-    clean diagram through the re-decomposition loop."""
-    import os as _os
-    return (_os.environ.get("CORESMITH_COMPLEXITY_GATE", "0") or "0") == "1"
-
-
-def _complexity_max_redecompose() -> int:
-    import os as _os
-    try:
-        return max(0, int(_os.environ.get("CORESMITH_COMPLEXITY_MAX_REDECOMPOSE", "2")))
-    except ValueError:
-        return 2
-
-
 def _clean_diagram_target() -> str:
     """The CLEAN-diagram target AFTER the complexity gate: the output-contract
     ownership gate if enabled, else Interface Definition. Mirrors the tail of
@@ -2803,144 +2449,6 @@ def _resolve_complexity_golden(project_root: str) -> str | None:
         return None
 
 
-async def block_complexity_review_node(state: ArchGraphState) -> dict:
-    """Gate: flag any block whose golden slice is too complex to reproduce
-    byte-exactly (fused many distinct algorithms / very high LOC or cyclomatic).
-    Mirrors the output-contract gate: over-budget -> re-decompose feedback back
-    to Block Diagram (bounded by CORESMITH_COMPLEXITY_MAX_REDECOMPOSE, default
-    2), then proceed with the breach recorded.
-
-    Deterministic + no-LLM. C16: scores each block's OWN ``python_source``
-    slice (the architecture-assigned golden mapping), so it generalises to any
-    design -- the legacy legacy-hint resolver returned an empty slice (score 0,
-    never flagged) for every other codec. Passes through as a no-op only when
-    no golden is resolvable or a block carries no ``python_source`` slice, so it
-    never blocks a design it cannot reason about."""
-    from orchestrator.langgraph import block_complexity as _bc
-
-    bd = state.get("block_diagram", {}) or {}
-    blocks = bd.get("blocks", []) or []
-    tries = int(state.get("block_complexity_retries", 0) or 0)
-    _event(state, "Complexity Review", "graph_node_enter", {
-        "round": state["round"], "retry": tries, "blocks": len(blocks),
-    })
-
-    with _tracer.start_as_current_span("Complexity Review") as span:
-        golden_path = _resolve_complexity_golden(state["project_root"])
-        over_budget: list[dict] = []
-        proposals: dict[str, list] = {}
-        stats: dict = {}
-
-        if golden_path:
-            try:
-                src = _bc._read_golden_source(golden_path)
-                stats = _bc._parse_functions(src)
-            except Exception:  # noqa: BLE001
-                stats = {}
-            for blk in blocks:
-                name = str(blk.get("name") or "").strip()
-                if not name:
-                    continue
-                spec_text = json.dumps(blk)[:4000]
-                # C16: score the block's OWN python_source slice (the
-                # architecture-assigned golden mapping) -- the legacy
-                # legacy-hint resolver returned an empty slice for every
-                # non-the video codec design, so the gate scored 0 and never flagged a
-                # fat block (residual_recon_engine: 6 algos / 582 LOC /
-                # cyclomatic 158, all silently passed). None -> the estimator
-                # falls back to the hint resolver (older designs unchanged).
-                _sl = None
-                if stats:
-                    _sl = _bc.python_source_slice_fns(
-                        blk.get("python_source", ""), stats) or None
-                try:
-                    est = _bc.estimate_block_complexity(
-                        name, golden_path, spec_text, stats=stats or None,
-                        slice_fns=_sl)
-                except Exception:  # noqa: BLE001
-                    continue
-                # A no-match slice yields empty golden_functions and no breach.
-                if est.get("over_budget"):
-                    over_budget.append(est)
-                    try:
-                        proposals[name] = _bc.propose_decomposition(
-                            name, golden_path, spec_text, stats=stats or None,
-                            slice_fns=_sl)
-                    except Exception:  # noqa: BLE001
-                        proposals[name] = []
-
-        passed = not over_budget
-        span.set_attribute("passed", passed)
-        span.set_attribute("over_budget_blocks", len(over_budget))
-        span.set_attribute("golden_found", bool(golden_path))
-
-        do_redecompose = (not passed) and tries < _complexity_max_redecompose()
-        verdict: dict = {
-            "passed": passed,
-            "golden_path": golden_path or "",
-            "over_budget_blocks": over_budget,
-            "_redecompose": do_redecompose,
-        }
-        update: dict = {"block_complexity_verdict": verdict}
-        if do_redecompose:
-            lines = [
-                "BLOCK COMPLEXITY: one or more blocks fused too many distinct "
-                "golden algorithms to be reproducible byte-exactly. Re-decompose "
-                "each flagged block into tractable sub-blocks (the golden already "
-                "exposes clean cut-points).",
-            ]
-            for est in over_budget:
-                bn = est.get("block_name", "?")
-                breaches = "; ".join(est.get("axis_breaches", []) or [])
-                lines.append(f"\n- Block '{bn}': {breaches}")
-                subs = proposals.get(bn) or []
-                sub_names = [
-                    s.get("sub_block", "?") for s in subs
-                    if s.get("sub_block") and s.get("sub_block") != bn
-                ]
-                if sub_names:
-                    lines.append(
-                        f"  Suggested sub-blocks (advisory): {', '.join(sub_names)}"
-                    )
-            update["block_complexity_retries"] = tries + 1
-            update["human_feedback"] = "\n".join(lines)
-
-        _event(state, "Complexity Review", "graph_node_exit", {
-            "round": state["round"], "passed": passed,
-            "over_budget_blocks": len(over_budget), "retry": tries,
-            "will_redecompose": do_redecompose,
-        })
-        return update
-
-
-def route_after_block_complexity_review(state: ArchGraphState) -> str:
-    """Over-budget (retries left) -> re-decompose at Block Diagram; pass /
-    exhausted -> the clean-diagram target (output-contract gate or Interface
-    Definition). Reads the node's explicit `_redecompose` so exhaustion can't
-    loop."""
-    verdict = state.get("block_complexity_verdict", {}) or {}
-    redecompose = bool(verdict.get("_redecompose", False))
-    passed = bool(verdict.get("passed", True))
-    target = "Block Diagram" if redecompose else _clean_diagram_target()
-
-    span = trace.get_current_span()
-    if span.is_recording():
-        label = (
-            "OVER-BUDGET -> RE-DECOMPOSE" if redecompose
-            else ("PASS" if passed else "EXHAUSTED->PROCEED")
-        )
-        span.update_name(f"Route: Complexity Review - {label}")
-        span.add_event("route", {"from": "Complexity Review", "to": target,
-                                 "passed": passed})
-    return target
-
-route_after_block_complexity_review.__edge_labels__ = {
-    "Block Diagram": "OVER-BUDGET -> RE-DECOMPOSE",
-    "Output Contract Review": "TRACTABLE",
-    "Interface Definition": "TRACTABLE",
-}
-
-
 def route_after_interface_definition(state: ArchGraphState) -> str:
     """A-Fix 3(c): after freezing interface contracts, route structural
     contract violations to Escalate Constraints; otherwise continue to
@@ -2948,7 +2456,7 @@ def route_after_interface_definition(state: ArchGraphState) -> str:
     diverts the flow (a stale constraint_result from a prior round is
     ignored)."""
     if not _interface_contract_gate_enabled():
-        return "Memory Map"
+        return "Engineering Requirements"
     cr = state.get("constraint_result", {}) or {}
     violations = cr.get("violations", []) or []
     interface_blocked = (
@@ -2956,7 +2464,7 @@ def route_after_interface_definition(state: ArchGraphState) -> str:
         and cr.get("has_structural")
         and len(violations) > 0
     )
-    target = "Escalate Constraints" if interface_blocked else "Memory Map"
+    target = "Escalate Constraints" if interface_blocked else "Engineering Requirements"
 
     span = trace.get_current_span()
     if span.is_recording():
@@ -2972,7 +2480,7 @@ def route_after_interface_definition(state: ArchGraphState) -> str:
     return target
 
 route_after_interface_definition.__edge_labels__ = {
-    "Memory Map": "OK",
+    "Engineering Requirements": "OK",
     "Escalate Constraints": "CONTRACT VIOLATIONS",
 }
 
@@ -3322,12 +2830,8 @@ def build_architecture_graph(checkpointer=None):
 
     # Specialist nodes
     graph.add_node("Block Diagram", block_diagram_node)
-    graph.add_node("Complexity Review", block_complexity_review_node)
     graph.add_node("Output Contract Review", output_contract_review_node)
     graph.add_node("Interface Definition", interface_definition_node)
-    graph.add_node("Memory Map", memory_map_node)
-    graph.add_node("Clock Tree", clock_tree_node)
-    graph.add_node("Register Spec", register_spec_node)
     graph.add_node("Engineering Requirements", engineering_requirements_node)
     graph.add_node("Constraint Check", constraint_check_node)
     graph.add_node("Finalize Architecture", finalize_node)
@@ -3363,12 +2867,6 @@ def build_architecture_graph(checkpointer=None):
     # output-contract ownership gate (when enabled) before interfaces freeze.
     graph.add_conditional_edges("Block Diagram", review_diagram)
 
-    # Complexity Review -> tractable (output-contract / interface) or
-    # re-decompose (Block Diagram) when a block is too complex to reproduce.
-    graph.add_conditional_edges(
-        "Complexity Review", route_after_block_complexity_review,
-    )
-
     # Output Contract Review -> pass (Interface Definition) or re-decompose (Block Diagram)
     graph.add_conditional_edges(
         "Output Contract Review", route_after_output_contract_review,
@@ -3383,12 +2881,10 @@ def build_architecture_graph(checkpointer=None):
         "Interface Definition", route_after_interface_definition,
     )
 
-    # Memory Map -> Clock Tree -> Register Spec -> ERS -> Constraint Check.
+    # Interface Definition -> ERS -> Constraint Check (WP-13 dropped the
+    # Memory Map / Clock Tree / Register Spec stages).
     # The ERS lands BEFORE the gate so the cross-artifact consistency check
     # has it to compare against (it used to be written after Finalize).
-    graph.add_edge("Memory Map", "Clock Tree")
-    graph.add_edge("Clock Tree", "Register Spec")
-    graph.add_edge("Register Spec", "Engineering Requirements")
     graph.add_edge("Engineering Requirements", "Constraint Check")
 
     # After constraints: 4-way route (pass / structural / doc-fix / auto-fix)

@@ -180,7 +180,7 @@ def test_node_clean_routes_to_memory_map(monkeypatch, tmp_path):
     # router reads the clean constraint_result -> Memory Map
     state_after = dict(_state(tmp_path))
     state_after.update(out)
-    assert ag.route_after_interface_definition(state_after) == "Memory Map"
+    assert ag.route_after_interface_definition(state_after) == "Engineering Requirements"
 
 
 def test_node_gate_off_never_blocks(monkeypatch, tmp_path):
@@ -193,7 +193,7 @@ def test_node_gate_off_never_blocks(monkeypatch, tmp_path):
     out = _run(ag.interface_definition_node(_state(tmp_path)))
     # gate off -> violations ignored, no structural constraint_result
     assert "constraint_result" not in out
-    assert ag.route_after_interface_definition(out) == "Memory Map"
+    assert ag.route_after_interface_definition(out) == "Engineering Requirements"
 
 
 def test_router_ignores_stale_constraint_result(monkeypatch):
@@ -202,7 +202,7 @@ def test_router_ignores_stale_constraint_result(monkeypatch):
     stale = {"constraint_result": {"has_structural": True,
                                    "source": "constraint_check",
                                    "violations": [{"violation": "x"}]}}
-    assert ag.route_after_interface_definition(stale) == "Memory Map"
+    assert ag.route_after_interface_definition(stale) == "Engineering Requirements"
 
 
 # ---------------------------------------------------------------------------
