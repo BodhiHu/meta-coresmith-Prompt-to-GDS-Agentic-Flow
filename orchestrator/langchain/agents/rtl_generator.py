@@ -134,7 +134,7 @@ Output format:
 # the spec correctly described an N-stage pipeline, but the RTL generator --
 # which never saw this skill or the PDK budget -- collapsed the datapath into
 # one combinational always-block cloud that walls the synth gate at >600s.
-_SKILLS_TEXT = _load_skills("pipeline_contract", "verify_in_context")
+_SKILLS_TEXT = _load_skills("pipeline_contract", "verify_in_context", "srdy_drdy")
 if _SKILLS_TEXT:
     SYSTEM_PROMPT = (
         SYSTEM_PROMPT

@@ -356,6 +356,21 @@ def signal_specs(edge: dict) -> list[dict]:
                 "dir": str(direction),
                 "kind": kind,
             })
+    # WP-9c: the handshake pair is part of the channel. The contract carries it
+    # in ``handshake_protocol`` (and spells it in the producer_port /
+    # consumer_port strings), not in fields[]/sideband_signals[] -- so this
+    # union, which both the gate and the RTL prompt's port table read, must add
+    # it here or the generator is shown a port set without flow control and
+    # the gate then rejects the very ports the contract-port check demands
+    # (Arm E2, 2026-09-06: three blocks parked on "undeclared port *_srdy").
+    proto = str(edge.get("handshake_protocol") or "").strip().lower()
+    hs = {"srdy_drdy": ("srdy", "drdy"),
+          "axi_stream": ("tvalid", "tready")}.get(proto, ())
+    present = {str(o["name"]).split("/", 1)[0] for o in out}
+    for name in hs:
+        if name in present:
+            continue
+        out.append({"name": name, "width": "1", "dir": "", "kind": "handshake"})
     seen, uniq = set(), []
     for spec in out:
         if spec["name"] not in seen:

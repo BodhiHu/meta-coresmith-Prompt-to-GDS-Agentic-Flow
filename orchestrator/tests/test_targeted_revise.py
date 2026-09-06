@@ -590,3 +590,28 @@ endmodule
 endmodule
 """)
         assert pipeline_helpers.check_rtl_contract_ports(tmp_path, "intra16", str(p)) == []
+
+
+class TestSignalSpecsHandshake:
+    def test_srdy_drdy_edge_yields_the_pair_once(self):
+        from orchestrator.langgraph import contract_conformance as cc
+        edge = {"handshake_protocol": "srdy_drdy",
+                "fields": [{"name": "samples", "width": 9}],
+                "sideband_signals": []}
+        names = [s["name"] for s in cc.signal_specs(edge)]
+        assert names == ["samples", "srdy", "drdy"]
+        rows = cc.channel_signals(edge, "s_residual_drdy/s_residual_data")
+        assert {r["port"] for r in rows} >= {"s_residual_samples", "s_residual_srdy", "s_residual_drdy"}
+
+    def test_explicit_sideband_pair_not_duplicated(self):
+        from orchestrator.langgraph import contract_conformance as cc
+        edge = {"handshake_protocol": "srdy_drdy", "fields": [{"name": "v", "width": 4}],
+                "sideband_signals": ["srdy", "drdy"]}
+        names = [s["name"] for s in cc.signal_specs(edge)]
+        assert names.count("srdy") == 1 and names.count("drdy") == 1
+
+    def test_other_protocols_untouched(self):
+        from orchestrator.langgraph import contract_conformance as cc
+        edge = {"handshake_protocol": "req_resp", "fields": [{"name": "addr", "width": 8}],
+                "sideband_signals": ["ren", "rvalid"]}
+        assert [s["name"] for s in cc.signal_specs(edge)] == ["addr", "ren", "rvalid"]
