@@ -391,6 +391,46 @@ def _resolve_netlist(state: BackendState) -> tuple[str, str]:
 # Node: init_design  (Backend Lead -- discovers flat integration top)
 # ---------------------------------------------------------------------------
 
+
+def _file_top_module(src: str) -> str:
+    """The real top module declared in one RTL file.
+
+    WP-17b: ``module`` is matched anywhere (a top declared behind a same-line
+    comment counts); among several modules the unique one never instantiated
+    in the file wins, else the last declared one. ``""`` when none.
+    """
+    mods = re.findall(r"\bmodule\s+([A-Za-z_]\w*)", src or "")
+    if not mods:
+        return ""
+    if len(mods) == 1:
+        return mods[0]
+    uninst = [m for m in mods if len(re.findall(rf"\b{re.escape(m)}\b", src)) == 1]
+    if len(uninst) == 1:
+        return uninst[0]
+    return mods[-1]
+
+
+def _recorded_integration_top(root: Path) -> tuple[str, str]:
+    """(top_file, top_module) recorded by the Integration Check, or ("", "").
+
+    Only when the recorded file still exists on disk; the module falls back
+    to the recorded design_name, then to the file's own top module.
+    """
+    try:
+        rec = json.loads((root / ".coresmith" / "integration_result.json").read_text())
+    except (OSError, ValueError):
+        return "", ""
+    top = str(rec.get("top_rtl_path") or "")
+    if not top or not Path(top).exists():
+        return "", ""
+    mod = str(rec.get("top_module") or rec.get("design_name") or "")
+    if not mod:
+        try:
+            mod = _file_top_module(Path(top).read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            mod = ""
+    return top, mod
+
 def _select_integration_top(integration_dir: Path) -> tuple[str, str]:
     """Return (top_file, top_module) for the real integration top.
 
@@ -410,9 +450,9 @@ def _select_integration_top(integration_dir: Path) -> tuple[str, str]:
         except OSError:
             continue
         text_of[str(f)] = src
-        m = re.search(r"^\s*module\s+(\w+)", src, re.MULTILINE)
-        if m:
-            mod_of[str(f)] = m.group(1)
+        _top_in_file = _file_top_module(src)
+        if _top_in_file:
+            mod_of[str(f)] = _top_in_file
     if not mod_of:
         return str(files[0]), ""
     all_mods = set(mod_of.values())
@@ -478,7 +518,15 @@ async def init_design_node(state: BackendState) -> dict:
     # "COMPLETE 1/1" while never touching the real design.
     integration_dir = root / "rtl" / "integration"
     integration_top = ""
-    if integration_dir.is_dir():
+    # WP-17b: the top the frontend DV'd is recorded by the Integration Check;
+    # trust it over directory heuristics (observed: a stale first-round top
+    # file sorted first and was synthesized instead of the re-emitted chip).
+    _rec_top, _rec_mod = _recorded_integration_top(root)
+    if _rec_top:
+        integration_top = _rec_top
+        if _rec_mod:
+            design_name = _rec_mod
+    elif integration_dir.is_dir():
         _top_f, _top_mod = _select_integration_top(integration_dir)
         if _top_f:
             integration_top = str(_top_f)
