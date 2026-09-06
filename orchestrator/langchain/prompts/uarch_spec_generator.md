@@ -33,6 +33,42 @@ processing, or when blocks need flow control):
 - tdata/tvalid/tready/tlast signals
 - Registered tvalid to avoid the "valid self-cancellation" bug
 - Backpressure handling via tready
+
+**Chip-boundary stream ports** (in_valid/in_ready/in_data/in_last,
+out_valid/out_ready/out_data/out_last of the top level) are graded by the
+published sampler, not by the internal AXI-Stream convention. The spec of the
+block that owns them MUST state, verbatim, the acceptance rules below and
+design the ready/valid registers to them.
+
+PUBLISHED STREAM SAMPLER CONTRACT (chip-boundary stream ports ONLY):
+The grader drives the chip's top-level stream ports (in_valid/in_ready/in_data/
+in_last, out_valid/out_ready/out_data/out_last) before each rising edge and
+samples them in the read-only phase AFTER the edge. It counts:
+  input word accepted on edge N  <=> in_valid (driven before N) && in_ready as it
+                                     reads AFTER N (the value in_ready takes at N)
+  output beat consumed on edge N <=> out_valid/out_data as they read after N &&
+                                     out_ready as driven for cycle N
+Rules that follow. Violating either desyncs the grader; the failure is
+seed-dependent under backpressure and is NOT caught by a testbench that samples
+ready before the edge (arms A, B and E of the h264 experiment all shipped it):
+  - in_ready: hold it high through the whole input phase and drop it only on the
+    final word, OR pause with refuse-and-drop: on the edge where the ready
+    register goes low do NOT latch the offered word (accept = in_valid &&
+    in_ready_next, never in_valid && in_ready_q alone), and when ready goes high
+    with in_valid already high the word on that edge IS accepted -- latch it and
+    count it. Never drop in_ready on an edge that accepts a word (for example the
+    last byte of a frame): the grader re-offers that word and every later byte
+    is shifted by one.
+  - out side: the beat visible after edge N is consumed by the out_ready driven
+    for cycle N. Register it (`out_ready_q <= out_ready`), keep out_valid/out_data
+    on registered state, hold the beat until `out_valid_q && out_ready_q`, and
+    only then advance to the next beat. Retiring on the raw out_ready sampled at
+    the next edge skips a beat on every ready 0->1 transition.
+  - If the task ships a reference sampler/testbench (for example a cocotb
+    `StreamHarness`), its sampling is the contract; the ERS must transcribe it
+    and the DV must drive the DUT exactly as it does.
+Internal block-to-block interfaces keep the standard convention (a transfer is
+`valid && ready` sampled at the edge); this section is about the chip boundary.
 - Packet boundaries via tlast
 
 **Memory-mapped / CSR** (use when ERS specifies bus-accessible registers):

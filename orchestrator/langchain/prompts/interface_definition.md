@@ -136,6 +136,13 @@ Produce JSON with a single top-level object:
    ACTUAL signals" is SUBORDINATE to the declared family: if a signal you
    were about to invent contradicts the declared family (e.g. a stray
    `wr_ready` / `tready` on a `mem_write` write edge, or an `elastic_fifo`
+
+PUBLISHED STREAM SAMPLER: the contract entries for the chip's top-level
+stream ports (in_*/out_*) must record that a word is accepted on edge N iff
+in_valid && in_ready AS IT READS AFTER N, and that the output beat visible
+after edge N is consumed by the out_ready driven for cycle N (register it and
+retire on `out_valid_q && out_ready_q`). Internal edges keep the standard
+`valid && ready` at-the-edge convention.
    on a `valid_only` strobe), DROP the contradicting signal — the declared
    family wins. Only when the block diagram omits `handshake_protocol` for
    an edge do you infer the truthful family from the ports the two blocks

@@ -233,11 +233,44 @@ When converting Python to {rtl_language}:
   skill below.
 - Map floating-point math to fixed-point (specify Q format in comments).
 - Handle variable-length data with valid/ready handshaking.
-- A ready/valid transfer is exactly `valid && ready` sampled on the clock edge.
-  Do not qualify the handshake with a registered copy of `ready`, a previous
-  cycle's ready, or a requirement that ready stay high for two cycles. If a
-  registered output token is held valid, a one-cycle `ready` pulse must retire
-  exactly one token and advance state once.
+- INTERNAL block-to-block interfaces: a ready/valid transfer is exactly
+  `valid && ready` sampled on the clock edge. Do not qualify the handshake with
+  a registered copy of `ready`, a previous cycle's ready, or a requirement that
+  ready stay high for two cycles. If a registered output token is held valid, a
+  one-cycle `ready` pulse must retire exactly one token and advance state once.
+  The chip-boundary stream ports are the ONE exception -- see PUBLISHED STREAM
+  SAMPLER CONTRACT below; a block that owns them (the stream controller /
+  chip top) must follow that contract on those ports.
+
+PUBLISHED STREAM SAMPLER CONTRACT (chip-boundary stream ports ONLY):
+The grader drives the chip's top-level stream ports (in_valid/in_ready/in_data/
+in_last, out_valid/out_ready/out_data/out_last) before each rising edge and
+samples them in the read-only phase AFTER the edge. It counts:
+  input word accepted on edge N  <=> in_valid (driven before N) && in_ready as it
+                                     reads AFTER N (the value in_ready takes at N)
+  output beat consumed on edge N <=> out_valid/out_data as they read after N &&
+                                     out_ready as driven for cycle N
+Rules that follow. Violating either desyncs the grader; the failure is
+seed-dependent under backpressure and is NOT caught by a testbench that samples
+ready before the edge (arms A, B and E of the h264 experiment all shipped it):
+  - in_ready: hold it high through the whole input phase and drop it only on the
+    final word, OR pause with refuse-and-drop: on the edge where the ready
+    register goes low do NOT latch the offered word (accept = in_valid &&
+    in_ready_next, never in_valid && in_ready_q alone), and when ready goes high
+    with in_valid already high the word on that edge IS accepted -- latch it and
+    count it. Never drop in_ready on an edge that accepts a word (for example the
+    last byte of a frame): the grader re-offers that word and every later byte
+    is shifted by one.
+  - out side: the beat visible after edge N is consumed by the out_ready driven
+    for cycle N. Register it (`out_ready_q <= out_ready`), keep out_valid/out_data
+    on registered state, hold the beat until `out_valid_q && out_ready_q`, and
+    only then advance to the next beat. Retiring on the raw out_ready sampled at
+    the next edge skips a beat on every ready 0->1 transition.
+  - If the task ships a reference sampler/testbench (for example a cocotb
+    `StreamHarness`), its sampling is the contract; the ERS must transcribe it
+    and the DV must drive the DUT exactly as it does.
+Internal block-to-block interfaces keep the standard convention (a transfer is
+`valid && ready` sampled at the edge); this section is about the chip boundary.
 
 If the previous attempt failed, the error will be provided. Fix the specific
 issue while maintaining correctness.
