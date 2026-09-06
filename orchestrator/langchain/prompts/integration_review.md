@@ -22,8 +22,11 @@ For EVERY connection in the block diagram:
    connection's `data_width` field.
 2. **Direction consistency**: For `from: A, to: B`, block A must have an
    output port and block B must have an input port for that signal.
-3. **Protocol match**: If the PRD specifies AXI-Stream, all data interfaces
-   must use tvalid/tready/tdata. If dedicated pins, no AXI-Stream.
+3. **Protocol match**: both sides of a connection must honour the edge's
+   `handshake_protocol` (a valid/ready pair for stream edges, the declared
+   commit/enable signals for direct-write edges). Port SHAPE is free: a
+   decomposed per-field port set (`<channel>_<field>`) is equivalent to a
+   packed `tdata` bus and is NOT a mismatch -- do not "fix" it.
 4. **Clock/reset naming**: All blocks must use the same clock port name
    (`clk`) and reset port name (`rst_n`) unless multiple clock domains
    exist.

@@ -486,6 +486,7 @@ def _parse_codex_json(stdout: str) -> tuple[str, dict]:
     final_text = ""
     usage: dict = {}
     session_id: str = ""
+    error_msgs: list[str] = []
     for raw in stdout.splitlines():
         raw = raw.strip()
         if not raw:
@@ -512,6 +513,20 @@ def _parse_codex_json(stdout: str) -> tuple[str, dict]:
                 final_text = item.get("text", "") or final_text
         elif ev_type == "turn.completed":
             usage = obj.get("usage") or usage
+        elif ev_type in ("error", "turn.failed"):
+            # WP-15: codex reports provider/quota failures as an `error`
+            # event and exits 0 with no agent_message (observed: "You've
+            # hit your usage limit"). Without this the empty answer looked
+            # like an agent that silently did nothing, and diagnose filed
+            # it as a design bug needing a human.
+            _m = obj.get("message") or obj.get("error") or ""
+            if isinstance(_m, dict):
+                _m = _m.get("message") or ""
+            if _m:
+                error_msgs.append(str(_m))
+    if not final_text and error_msgs:
+        final_text = ("[ClaudeLLM error: codex CLI reported: "
+                      + " | ".join(error_msgs)[:600] + "]")
     if session_id:
         # usage may be the raw turn.completed dict; copy so we don't mutate
         # a shared object, and stamp the session id onto it.

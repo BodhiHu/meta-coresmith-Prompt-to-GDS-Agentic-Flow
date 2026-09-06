@@ -2105,135 +2105,6 @@ def _is_likely_testbench_bug(sim_log: str) -> bool:
     return any(p in sim_log for p in _TB_BUG_PATTERNS)
 
 
-# ---------------------------------------------------------------------------
-# v3 Section 4: bounded post-block-DV throughput squeeze
-# ---------------------------------------------------------------------------
-async def _maybe_squeeze_throughput(state, block, block_name, rtl_path, tb_path,
-                                    attempt, sim_result, block_dir, span):
-    """Bounded cycle-minimization squeeze for a block that passed EVERY gate.
-
-    Fires ONLY when the block's measured cyc/op still sits above the roofline
-    PEAK x 1.1. Each round asks the worker (with the measured number, the peak,
-    and the binding constraint) to close the gap, then re-runs DV + measurement
-    AND the byte-exact equivalence gate; the new RTL is KEPT only if it still
-    passes and STRICTLY improves the measured rate, else the prior RTL is
-    restored. Bounded by CORESMITH_SQUEEZE_MAX_ROUNDS (default 2); never loops on
-    a block already at <= peak x 1.1; never regresses function/area/Fmax (a
-    worse or failing attempt is reverted). Best-effort: any error returns the
-    original result unchanged. Returns the (possibly-updated) sim_result.
-    """
-    import shutil
-    try:
-        from orchestrator.langgraph import throughput_gate as _tg
-        if not _tg.throughput_squeeze_enabled():
-            return sim_result
-        max_rounds = _tg.squeeze_max_rounds()
-        if max_rounds <= 0 or not rtl_path or not Path(rtl_path).exists():
-            return sim_result
-        cur = sim_result
-        best_measured = ((cur or {}).get("throughput") or {}).get(
-            "measured_cyc_per_op")
-        need = _tg.squeeze_needed(_pr(state), block_name, best_measured)
-        if need is None:
-            return sim_result  # no peak / no measured / already within peak x1.1
-
-        from orchestrator.harness.verify import run_block_equiv_gate as _run_equiv
-        backup = block_dir / "rtl_pre_squeeze.v.bak"
-        for rnd in range(1, max_rounds + 1):
-            log(f"  [SQUEEZE] {block_name}: measured "
-                f"{need['measured_cyc_per_op']} cyc/op > peak "
-                f"{need['peak_cyc_per_op']} x1.1 = {need['threshold_cyc_per_op']}"
-                f" -- round {rnd}/{max_rounds}", YELLOW)
-            try:
-                shutil.copyfile(rtl_path, backup)
-            except OSError:
-                return cur
-            try:
-                (block_dir / "previous_error.txt").write_text(
-                    _tg.format_squeeze_request(block_name, need))
-            except OSError:
-                return cur
-            write_graph_event(_pr(state), "Throughput Squeeze", "llm_start", {
-                "block": block_name, "round": rnd,
-                "measured": need["measured_cyc_per_op"],
-                "peak": need["peak_cyc_per_op"],
-            })
-            rgen = await generate_rtl(block, attempt + rnd,
-                                      callbacks=_callbacks(state))
-            improved = False
-            if not rgen.get("error"):
-                new_sim = await asyncio.to_thread(
-                    run_simulation, block, rtl_path, tb_path, attempt,
-                    project_root=_pr(state))
-                new_meas = ((new_sim or {}).get("throughput") or {}).get(
-                    "measured_cyc_per_op")
-                ok = (bool(new_sim.get("passed")) and new_meas is not None
-                      and (best_measured is None or new_meas < best_measured))
-                if ok:
-                    # RTL changed -> re-confirm byte-exact equivalence.
-                    eqr = await asyncio.to_thread(
-                        _run_equiv, block_name, rtl_path, _pr(state))
-                    if eqr.get("ran") and (
-                        eqr.get("failed_closed")
-                        or (not eqr.get("passed") and not eqr.get("skipped"))
-                    ):
-                        ok = False
-                        log(f"  [SQUEEZE] {block_name}: faster RTL broke "
-                            "equivalence -- reverting", YELLOW)
-                if ok:
-                    improved = True
-                    log(f"  [SQUEEZE] {block_name}: improved {best_measured} -> "
-                        f"{new_meas} cyc/op (peak {need['peak_cyc_per_op']})",
-                        GREEN)
-                    cur = new_sim
-                    best_measured = new_meas
-                    span.set_attribute("throughput_squeezed", True)
-                    # keep best_result.json + throughput fact in sync with the
-                    # kept RTL (rtl_sha1 gates the reuse-skip logic).
-                    try:
-                        _db(_pr(state)).set_result(block_name, "best", {
-                            "sim_passed": True, "attempt": attempt,
-                            "tests_passed": new_sim.get("tests_passed", 0),
-                            "tests_total": new_sim.get("tests_total", 0),
-                            "coverage": new_sim.get("coverage"),
-                            "throughput": new_sim.get("throughput"),
-                            # dv-hardening-10 + C5: full pass provenance
-                            # (RTL + TB + contract), same as the sim node.
-                            **_pass_provenance(
-                                _pr(state), block_name, rtl_path, tb_path),
-                        })
-                    except Exception:  # noqa: BLE001
-                        pass
-            write_graph_event(_pr(state), "Throughput Squeeze", "llm_end", {
-                "block": block_name, "round": rnd, "improved": improved,
-                "measured": best_measured,
-            })
-            if not improved:
-                # a non-improving / failing / equiv-breaking attempt: restore the
-                # last good RTL and stop (the worker won't do better next round).
-                try:
-                    shutil.copyfile(backup, rtl_path)
-                except OSError:
-                    pass
-                break
-            need = _tg.squeeze_needed(_pr(state), block_name, best_measured)
-            if need is None:
-                break  # reached peak x1.1 -- done
-        try:
-            if backup.exists():
-                backup.unlink()
-        except OSError:
-            pass
-        return cur
-    except Exception as _se:  # noqa: BLE001 - squeeze is best-effort, never blocks
-        log(f"  [SQUEEZE] {block_name}: skipped ({_se})", YELLOW)
-        return sim_result
-
-
-# ---------------------------------------------------------------------------
-# Node: generate_testbench  (with simulation + local TB fix loop)
-# ---------------------------------------------------------------------------
-
 async def generate_testbench_node(state: BlockState) -> dict:
     """Generate testbench, run simulation, and fix TB locally on failure.
 
@@ -2648,16 +2519,6 @@ async def generate_testbench_node(state: BlockState) -> dict:
                     pass
                 span.set_attribute("oracle_tamper", True)
 
-        # v3 Section 4: bounded post-DV throughput SQUEEZE. Only when the block
-        # passed EVERY gate (functional + coverage + throughput + equiv + parity
-        # + oracle) but its measured cyc/op is still above the roofline PEAK x
-        # 1.1 -- ask the worker to close the gap, re-verify (DV + equiv +
-        # measurement), keep the better result. Bounded + fail-open.
-        if sim_passed and rtl_path:
-            sim_result = await _maybe_squeeze_throughput(
-                state, block, block_name, rtl_path, tb_path, attempt,
-                sim_result, block_dir, span,
-            )
 
     # Write sim error for diagnose if failed -- but ONLY when the sim loop
     # itself failed. The equiv / branch-parity / oracle gates above flip
@@ -3927,7 +3788,11 @@ def _run_gate_sim_gate(
 
     write_graph_event(_pr(state), "Gate Sim", "gate_result", {
         "block": block_name, "name": "gate_level_sim", "kind": "gate_sim",
-        "status": res.status, "passed": res.status == _gs.STATUS_PASS,
+        "status": res.status,
+        # WP-15: not_run/disabled is neither pass nor fail (38/38 leaf
+        # invocations logged passed=false while never having run).
+        "passed": (res.status == _gs.STATUS_PASS
+                   if res.status not in (_gs.STATUS_NOT_RUN, "disabled") else None),
         "cycles_compared": res.cycles_compared,
         "reason": res.reason,
     })
@@ -4353,7 +4218,10 @@ async def diagnose_node(state: BlockState) -> dict:
     # "OpenSTA timed out after 300s" inside a fail-closed PPA reason), which
     # were then misfiled as infrastructure and never diagnosed.
     _INFRA_MARKERS = ("[ClaudeLLM error:", "claude CLI timed out",
-                      "exit_code=-9", "circuit breaker open")
+                      "exit_code=-9", "circuit breaker open",
+                      # WP-15: provider quota/outage text (codex)
+                      "usage limit", "usage_limit", "rate limit",
+                      "rate_limit_exceeded", "insufficient_quota")
     if any(m in error_log for m in _INFRA_MARKERS):
         log("  [DIAGNOSE] Infrastructure failure detected, skipping debug LLM", YELLOW)
         infra_diag = {

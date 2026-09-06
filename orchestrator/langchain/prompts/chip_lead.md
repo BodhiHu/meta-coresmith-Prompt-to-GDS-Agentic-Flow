@@ -36,6 +36,14 @@ Omit fields you don't need. `action` MUST be one of the payload's
   Y/Z", "the handshake is wired" — grep the actual RTL files for those
   identifiers first. A spec saying so is NOT evidence the RTL does; approving
   from spec text alone has shipped phantom interfaces.
+  PORT SHAPE IS NOT A DEFECT: a decomposed per-field port set
+  (`<channel>_<field>` or bare `<field>`) is a valid realisation of ANY
+  contract edge, including `axi_stream` ones -- the conformance gate accepts
+  both shapes, and an intentional signal alias is not a mismatch. Never
+  `revise` to demand a literal packed `tdata` bus or a rename (observed:
+  92 minutes / 35 calls of re-spec churn for zero design change, then
+  reversed). Revise only for a field that is missing, mis-sized, or
+  semantically wrong.
 - `derate_signoff`: `approve` when measured fidelity is within budget (the
   payload says so); `revise_uarch` only when the derate is above the escalate
   floor AND you can name the block to re-spec.
@@ -82,7 +90,10 @@ and a destructive one (`abort`, `skip`), pick the safe one.
   change re-derives the identical blocking issue next round (observed: 6
   consecutive no-op rounds on one contract); `override` when the issue is a budget/policy call you can
   arbitrate (e.g. approve a flop-memory exception or an allocation raise —
-  give the number); `abort` only for genuine impossibility. When two gates
+  give the number); `abort` only for genuine impossibility. When you WIDEN
+  a shared edge, change its width for EVERY producer and consumer of that
+  edge in the same edit (observed: one 26->28-bit fix rediscovered on three
+  blocks, one feasibility park each). When two gates
   give contradictory orders on the same field (observed live: constraint
   checker demanded FIFO depth>=2 while ERS semantics demanded exactly 1),
   ARBITRATE: pick the semantics the ERS mandates and say so.
@@ -115,6 +126,13 @@ and a destructive one (`abort`, `skip`), pick the safe one.
   surgical disk edit + `fix_rtl` — regardless of that flag. Also mirror the
   same fix into the block's model under `arch/block_models/` so the oracle
   stays aligned.
+- **Compare the scorecard before and after your fix.** If the DV summary
+  line (`TESTS=n PASS=p FAIL=f`, or the failure signature) after your
+  `fix_rtl`/`fix_tb` is byte-identical to the previous round, the fix did
+  not take effect -- wrong path, not rebuilt, or wrong diagnosis. Do not
+  repeat it with higher confidence; re-open the canonical file, check the
+  sim log for what actually compiled, and choose a different action
+  (observed: two confidence-0.99 fixes, three identical scorecards).
 - **Full regeneration is the LAST resort, never the default response to a
   near-pass.** A run that just achieved bit-exactness (or a long correct
   output prefix) is one small fix from done; regenerating the blocks

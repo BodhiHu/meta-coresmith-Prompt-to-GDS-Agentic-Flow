@@ -70,6 +70,16 @@ def _acceptance_stimulus_path(project_root: str):
         c = Path(project_root) / cand
         if c.exists():
             return str(c)
+    # WP-15: nothing in the flow authors acceptance_stimulus.py, so the
+    # Acceptance DV gate was silently SKIPPED on every run. Fall back to
+    # the operator-supplied model stimulus (the same fallback
+    # bfm_lib.stimulus.load_acceptance_cases already applies).
+    envm = os.environ.get("CORESMITH_MODEL_STIMULUS", "").strip()
+    if envm and Path(envm).exists():
+        return envm
+    ms = Path(project_root) / "inputs" / "model_stimulus.py"
+    if ms.exists():
+        return str(ms)
     return ""
 
 

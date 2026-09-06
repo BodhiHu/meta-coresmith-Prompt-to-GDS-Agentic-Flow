@@ -2385,6 +2385,25 @@ bounded_waveform: $(SIM_BUILD)/Vtop
 """
 
 
+
+def _stage_project_inputs(sim_dir: Path, root: Path) -> None:
+    """Expose ``<root>/inputs`` inside the simulation directory.
+
+    WP-15: block RTL legitimately carries project-relative artifact paths
+    (``$readmemh("inputs/rom_images/<image>.memh")``, cs_rom_1r INIT_FILE);
+    the simulator resolves them against its own cwd, which is the per-scope
+    sim dir -- so every task-only run lost ~20 min at chip-level DV to "three
+    project-relative ROM images missing" before the chip lead symlinked them
+    by hand. A symlink keeps the images single-sourced.
+    """
+    try:
+        src = root / "inputs"
+        link = sim_dir / "inputs"
+        if src.is_dir() and not link.exists() and not link.is_symlink():
+            link.symlink_to(src.resolve(), target_is_directory=True)
+    except OSError:
+        pass
+
 def run_integration_simulation(
     design_name: str,
     top_rtl_path: str,
@@ -2430,6 +2449,7 @@ def run_integration_simulation(
     root = Path(project_root) if project_root else PROJECT_ROOT
     sim_dir = root / "sim_build" / sim_scope
     sim_dir.mkdir(parents=True, exist_ok=True)
+    _stage_project_inputs(sim_dir, root)
     # Distinct step-log name per scope (validation -> validation_sim_attempt<N>.log)
     # so validation_dv never overwrites integration_dv's raw sim log.
     _log_step = f"{sim_scope}_sim"
