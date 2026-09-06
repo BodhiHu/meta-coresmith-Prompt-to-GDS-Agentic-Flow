@@ -9430,7 +9430,9 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
                     "phase": "tb_generation",
                     "requirement_count": requirement_count,
                     "test_count": 0,
-                    "testbench_path": "",
+                    # WP-14b: keep the canonical TB path so a chip-lead fix_tb
+                    # re-admits the edited file instead of regenerating.
+                    "testbench_path": (str(_canon_tb) if (_canon_tb := Path(pr) / "tb" / "validation" / "test_chip_top_validation.py").exists() else ""),
                     "design_name": design_name,
                     "contract_audit": contract_audit,
                     "contract_audit_path": contract_audit.get("audit_path", ""),

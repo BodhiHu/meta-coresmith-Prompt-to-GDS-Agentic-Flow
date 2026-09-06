@@ -648,3 +648,14 @@ class TestPrdAnswersFromFeedback:
         # prompt now names the field the node reads
         prompt = open(ag.__file__.replace("langgraph/architecture_graph.py", "langchain/prompts/chip_lead.md")).read()
         assert "`answers` field" in prompt
+
+
+class TestValidationAdmissionRegex:
+    def test_multiline_assert_with_golden_operand_is_admitted(self):
+        import re
+        pat = (r"assert\b(?:[^\n]|\n(?=[ \t]))*?(golden|reference|expected_(?:output|bytes|"
+               r"bits|value|result|word|state|crc))")
+        tb = "async def test_x(dut):\n    assert (\n        out_bytes\n        == golden_bytes\n    ), 'mismatch'\n"
+        assert re.search(pat, tb, re.IGNORECASE)
+        assert re.search(pat, "    assert out == expected_result\n", re.IGNORECASE)
+        assert not re.search(pat, "    assert busy == 0\n\ngolden = 1\n", re.IGNORECASE)
