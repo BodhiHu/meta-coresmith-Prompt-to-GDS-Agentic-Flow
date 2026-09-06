@@ -564,6 +564,19 @@ endmodule
         errs = pipeline_helpers.check_rtl_contract_ports(tmp_path, "forward", str(p))
         assert any("s_residual_samples" in e and "9 bits" in e for e in errs), errs
 
+    def test_partial_pair_and_valid_style_are_tolerated(self, tmp_path):
+        # C19/C22 conventions survive: a channel with SOME flow-control signal
+        # (one side of the pair, or `_valid`) is not the Arm E2 no-handshake shape.
+        p = self._project(tmp_path, """module forward (
+    input wire clk, input wire rst_n,
+    input wire s_residual_valid,
+    input wire [8:0] s_residual_samples,
+    input wire [2:0] s_residual_block_class
+);
+endmodule
+""")
+        assert pipeline_helpers.check_rtl_contract_ports(tmp_path, "forward", str(p)) == []
+
     def test_producer_side_pair_direction_agnostic(self, tmp_path):
         (tmp_path / ".coresmith").mkdir()
         (tmp_path / ".coresmith" / "interface_contracts.json").write_text(
