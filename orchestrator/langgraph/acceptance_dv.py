@@ -97,6 +97,26 @@ def classify_contract(ports: dict[str, dict]) -> dict | None:
         return None
     rst_active_low = rst.endswith("n")
 
+    # WP-18: the published stream_core contract (config plane + start pulse +
+    # byte-per-word in/out streams with in_last/out_last). Recognised before
+    # the AXIS shape so a chip built to the task's own pin list gets the
+    # mission-scale acceptance run instead of an honest skip.
+    _sc_in = ("cfg_valid", "cfg_addr", "cfg_data", "start",
+              "in_valid", "in_data", "in_last", "out_ready")
+    _sc_out = ("in_ready", "out_valid", "out_data", "out_last")
+    if (all(n in names and ports[n]["dir"] == "input" for n in _sc_in)
+            and all(n in names and ports[n]["dir"] == "output" for n in _sc_out)):
+        return {
+            "kind": "stream_core",
+            "clk": clk,
+            "rst": rst,
+            "rst_active_low": rst_active_low,
+            "in_width": ports["in_data"]["width"],
+            "out_width": ports["out_data"]["width"],
+            "has_done": "done" in names,
+            "sidebands": {},
+        }
+
     def _group(direction: str) -> dict | None:
         # find <prefix>_tvalid with a matching _tready of the opposite driver
         for n, p in ports.items():
@@ -144,6 +164,7 @@ def classify_contract(ports: dict[str, dict]) -> dict | None:
         if p["dir"] == "input" and n not in stream_names
     }
     return {
+        "kind": "axis",
         "clk": clk,
         "rst": rst,
         "rst_active_low": rst_active_low,
@@ -162,9 +183,11 @@ def map_stimulus(stimulus: Any, contract: dict) -> dict | None:
     payload = None
     if isinstance(stimulus, dict):
         for key, val in stimulus.items():
-            if isinstance(val, (list, tuple)) or hasattr(val, "ravel"):
-                if payload is None:
+            if isinstance(val, (list, tuple, bytes, bytearray)) or hasattr(val, "ravel"):
+                if payload is None and str(key).lower() != "cfg":
                     payload = val
+                continue
+            if isinstance(val, dict):
                 continue
             if not isinstance(val, (int, float)):
                 continue
@@ -218,7 +241,61 @@ def map_stimulus(stimulus: Any, contract: dict) -> dict | None:
         except Exception:  # noqa: BLE001
             return None
     unmapped = [p for p in contract["sidebands"] if p not in sb_values]
-    return {"payload": flat, "sidebands": sb_values, "unmapped": unmapped}
+    mapped = {"payload": flat, "sidebands": sb_values, "unmapped": unmapped}
+    if contract.get("kind") == "stream_core":
+        cfg = _stream_cfg_plane(stimulus, payload)
+        if cfg is None:
+            return None
+        mapped["cfg"] = cfg
+        try:
+            mapped["cycle_cap"] = int(stimulus.get("cycle_cap") or 0) if isinstance(stimulus, dict) else 0
+        except (TypeError, ValueError):
+            mapped["cycle_cap"] = 0
+    return mapped
+
+
+def _stream_cfg_plane(stimulus: Any, payload: Any) -> list[tuple[int, int]] | None:
+    """The config writes ``[(addr, value), ...]`` for a stream_core case.
+
+    An explicit ``cfg`` (dict addr->value, or a list of pairs) wins. Otherwise
+    the plane is derived from the published convention (0 n_frames, 1 width,
+    2 height, 3 qp) when the stimulus carries ``n_frames`` and either a
+    2-D+ ``frames`` array or ``width``/``height`` keys. None when nothing
+    usable is declared -- an honest skip, never a zero-configured run.
+    """
+    if not isinstance(stimulus, dict):
+        return None
+    raw = stimulus.get("cfg")
+    if isinstance(raw, dict):
+        try:
+            return [(int(k), int(v) & 0xFFFFFFFF) for k, v in raw.items()]
+        except (TypeError, ValueError):
+            return None
+    if isinstance(raw, (list, tuple)):
+        try:
+            return [(int(a), int(v) & 0xFFFFFFFF) for a, v in raw]
+        except (TypeError, ValueError):
+            return None
+    if "n_frames" not in stimulus:
+        return None
+    plane: list[tuple[int, int]] = [(0, int(stimulus["n_frames"]))]
+    w = stimulus.get("width")
+    h = stimulus.get("height")
+    if (w is None or h is None) and "frames" in stimulus:
+        try:
+            import numpy as _np
+
+            arr = _np.asarray(stimulus["frames"])
+            if arr.ndim >= 2:
+                h, w = int(arr.shape[-2]), int(arr.shape[-1])
+        except Exception:  # noqa: BLE001
+            pass
+    if w is None or h is None:
+        return None
+    plane += [(1, int(w)), (2, int(h))]
+    if stimulus.get("qp") is not None:
+        plane.append((3, int(stimulus["qp"])))
+    return plane
 
 
 # ---------------------------------------------------------------------------
@@ -364,6 +441,8 @@ int main(int argc, char **argv) {
 
 
 def generate_harness(contract: dict, top_module: str, sb_order: list[str]) -> str:
+    if contract.get("kind") == "stream_core":
+        return generate_stream_harness(contract, top_module)
     s, m = contract["s_axis"], contract["m_axis"]
     sp, mp = s["prefix"], m["prefix"]
     sb_set = "\n".join(
@@ -418,6 +497,141 @@ def generate_harness(contract: dict, top_module: str, sb_order: list[str]) -> st
     )
 
 
+_STREAM_TEMPLATE = r"""// Auto-generated RTL Acceptance DV harness (coresmith WP-18, stream_core).
+// Mirrors the published StreamHarness cycle semantics: inputs driven before
+// the rising edge, handshakes sampled after it (post-edge ready/valid), random
+// input gaps + output backpressure, ONE payload byte per word on both streams,
+// completion on a consumed out_last beat. Cycles count from the start pulse.
+// Binary protocol (little-endian u32):
+//   input:  repeated { n_cfg, {addr, value}*n_cfg, cycle_cap, n_bytes, bytes }
+//   output: repeated { status, cycles, outlen, out bytes }  (status 0=ok 1=watchdog)
+#include "V{TOP}.h"
+#include "verilated.h"
+#include <cstdio>
+#include <cstdint>
+#include <cstdlib>
+#include <utility>
+#include <vector>
+
+using DUT = V{TOP};
+static vluint64_t g_cycle = 0;
+static void posedge(DUT *t) { t->{CLK} = 1; t->eval(); g_cycle++; }
+static void negedge(DUT *t) { t->{CLK} = 0; t->eval(); }
+static uint32_t g_rng = 0x2545F491u;
+static inline uint32_t xrng() {
+    g_rng ^= g_rng << 13; g_rng ^= g_rng >> 17; g_rng ^= g_rng << 5;
+    return g_rng;
+}
+static const int BP = {BP_ENABLED};
+
+static bool rd_u32(FILE *f, uint32_t *v) {
+    unsigned char b[4];
+    if (fread(b, 1, 4, f) != 4) return false;
+    *v = (uint32_t)b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
+    return true;
+}
+static void wr_u32(FILE *f, uint32_t v) {
+    unsigned char b[4] = {(unsigned char)(v), (unsigned char)(v >> 8),
+                          (unsigned char)(v >> 16), (unsigned char)(v >> 24)};
+    fwrite(b, 1, 4, f);
+}
+
+int main(int argc, char **argv) {
+    Verilated::commandArgs(argc, argv);
+    if (argc < 3) { fprintf(stderr, "usage: %s in.bin out.bin [max_cycles]\n", argv[0]); return 2; }
+    uint64_t max_cycles_default = (argc >= 4) ? strtoull(argv[3], nullptr, 10) : {MAX_CYCLES}ULL;
+    FILE *fin = fopen(argv[1], "rb");
+    FILE *fout = fopen(argv[2], "wb");
+    if (!fin || !fout) { fprintf(stderr, "io error\n"); return 2; }
+    DUT *top = new DUT;
+
+    uint32_t n_cfg;
+    while (rd_u32(fin, &n_cfg)) {
+        std::vector<std::pair<uint32_t, uint32_t>> cfg(n_cfg);
+        for (uint32_t i = 0; i < n_cfg; i++) {
+            if (!rd_u32(fin, &cfg[i].first) || !rd_u32(fin, &cfg[i].second)) return 2;
+        }
+        uint32_t cycle_cap, n_in;
+        if (!rd_u32(fin, &cycle_cap)) return 2;
+        if (!rd_u32(fin, &n_in)) return 2;
+        std::vector<uint8_t> in(n_in);
+        if (n_in && fread(in.data(), 1, n_in, fin) != n_in) return 2;
+        uint64_t max_cycles = cycle_cap ? (uint64_t)cycle_cap : max_cycles_default;
+
+        g_rng = 0x2545F491u ^ ((uint32_t)n_in * 2654435761u) ^ (n_cfg * 40503u);
+        top->cfg_valid = 0; top->cfg_addr = 0; top->cfg_data = 0; top->start = 0;
+        top->in_valid = 0; top->in_data = 0; top->in_last = 0; top->out_ready = 0;
+        top->{RST} = {RST_ASSERT};
+        for (int i = 0; i < 5; i++) { negedge(top); posedge(top); }
+        negedge(top);
+        top->{RST} = {RST_DEASSERT};
+        negedge(top); posedge(top); negedge(top);
+
+        // config plane: one write per cycle, then a one-cycle start pulse
+        // Inputs settle with clk low (eval) BEFORE the rising edge, exactly
+        // like a cocotb driver writing before `await RisingEdge`; a single
+        // eval() with new inputs + clk=1 lets the flops sample stale D.
+        for (auto &kv : cfg) {
+            top->cfg_valid = 1; top->cfg_addr = kv.first; top->cfg_data = kv.second;
+            top->eval(); posedge(top); negedge(top);
+            top->cfg_valid = 0; top->eval();
+        }
+        top->start = 1; top->eval(); posedge(top); negedge(top); top->start = 0; top->eval();
+
+        size_t n = in.size(), i = 0;
+        uint64_t cyc = 0;
+        bool done_beat = false, timed_out = false;
+        std::vector<uint8_t> out;
+        while (true) {
+            bool gap = (i < n) && BP && ((xrng() % 100) < 10);
+            top->in_valid = (i < n && !gap) ? 1 : 0;
+            top->in_data = (i < n) ? (uint32_t)in[i] : 0u;
+            top->in_last = (i == n - 1 && !gap) ? 1 : 0;
+            top->out_ready = (BP && ((xrng() % 100) < 15)) ? 0 : 1;
+            top->eval();
+            posedge(top); cyc++;
+            int iv = top->in_valid, ir = top->in_ready;
+            int ov = top->out_valid, orr = top->out_ready, ol = top->out_last;
+            if (i < n && iv == 1 && ir == 1) i++;
+            if (ov == 1 && orr == 1) {
+                out.push_back((uint8_t)(top->out_data & 0xffu));
+                if (ol == 1) done_beat = true;
+            }
+            negedge(top);
+            if (done_beat) break;
+            if (cyc > max_cycles) { timed_out = true; break; }
+        }
+        top->in_valid = 0; top->in_last = 0; top->out_ready = 0;
+        uint32_t status = timed_out ? 1u : 0u;
+        wr_u32(fout, status);
+        wr_u32(fout, (uint32_t)cyc);
+        wr_u32(fout, (uint32_t)out.size());
+        fwrite(out.data(), 1, out.size(), fout);
+        fflush(fout);
+    }
+    fclose(fin); fclose(fout); delete top;
+    return 0;
+}
+"""
+
+
+def generate_stream_harness(contract: dict, top_module: str) -> str:
+    """The stream_core harness source (see _STREAM_TEMPLATE)."""
+    return (
+        _STREAM_TEMPLATE
+        .replace("{TOP}", top_module)
+        .replace("{CLK}", contract["clk"])
+        .replace("{RST}", contract["rst"])
+        .replace("{RST_ASSERT}", "0" if contract["rst_active_low"] else "1")
+        .replace("{RST_DEASSERT}", "1" if contract["rst_active_low"] else "0")
+        .replace("{MAX_CYCLES}", os.environ.get(
+            "CORESMITH_ACCEPTANCE_DV_MAX_CYCLES", "50000000"))
+        .replace("{BP_ENABLED}", "0" if os.environ.get(
+            "CORESMITH_ACCEPTANCE_DV_BACKPRESSURE", "1").strip().lower()
+            in ("0", "false", "no", "off") else "1")
+    )
+
+
 # ---------------------------------------------------------------------------
 # Build + run
 # ---------------------------------------------------------------------------
@@ -451,6 +665,16 @@ def _pack_cases(cases: list[tuple[str, dict]], sb_order: list[str],
                 path: Path) -> None:
     with open(path, "wb") as f:
         for _name, mapped in cases:
+            if "cfg" in mapped:
+                cfg = mapped["cfg"]
+                f.write(struct.pack("<I", len(cfg)))
+                f.writelines(struct.pack("<II", int(a) & 0xFF, int(v) & 0xFFFFFFFF)
+                             for a, v in cfg)
+                f.write(struct.pack("<I", int(mapped.get("cycle_cap") or 0) & 0xFFFFFFFF))
+                payload = mapped["payload"]
+                f.write(struct.pack("<I", len(payload)))
+                f.write(bytes(payload))
+                continue
             sbv = mapped["sidebands"]
             f.write(struct.pack("<I", len(sb_order)))
             f.writelines(struct.pack("<I", sbv.get(p, 0) & 0xFFFFFFFF) for p in sb_order)
@@ -635,8 +859,11 @@ def run_acceptance_dv(project_root: str, top_rtl: str,
     run_to = int(float(os.environ.get(
         "CORESMITH_ACCEPTANCE_DV_RUN_TIMEOUT_S", "1800") or 1800))
     try:
+        # WP-18: run from the PROJECT ROOT so project-relative $readmemh
+        # images (inputs/rom_images/*.memh) resolve -- from any other cwd the
+        # ROMs load empty and a correct chip stalls after its first frame.
         r = subprocess.run([binp, str(inp), str(outp)], capture_output=True,
-                           text=True, timeout=run_to)
+                           text=True, timeout=run_to, cwd=str(project_root))
     except subprocess.TimeoutExpired:
         return {"passed": False, "skipped": False,
                 "reason": f"native acceptance run exceeded {run_to}s",
@@ -650,9 +877,25 @@ def run_acceptance_dv(project_root: str, top_rtl: str,
         return _skip(f"native harness exited rc={r.returncode}: "
                      f"{(r.stderr or '')[-400:]}")
     results = _read_results(outp, len(mapped_cases))
+    try:
+        _keep = Path(project_root) / ".coresmith" / "acceptance_dv"
+        _keep.mkdir(parents=True, exist_ok=True)
+        for (_n, _m), _r in zip(mapped_cases, results):
+            (_keep / f"{_n}.out.bin").write_bytes(bytes(_r["bytes"]))
+    except OSError:
+        pass
 
     use_fidelity = (fidelity_gate_enabled()
                     and resolve_fidelity_metric(project_root) is not None)
+    # WP-18: a declared accept(expected, observed) predicate (decode + PSNR
+    # for a codec, result match for an MCU) is the mission's own judge; byte
+    # equality against the golden is only the fallback for bit-exact IPs.
+    accept_fn = None
+    try:
+        from orchestrator.architecture.composition import resolve_functional_acceptance
+        accept_fn = resolve_functional_acceptance(project_root)
+    except Exception:  # noqa: BLE001
+        accept_fn = None
     rows, violations = [], []
     for (name, _mapped), res, (rname, rstim) in zip(
         mapped_cases, results, list(raw_cases)[:64]
@@ -676,6 +919,31 @@ def run_acceptance_dv(project_root: str, top_rtl: str,
                 "suggested_fix": "RTL never completed the mission-scale case "
                                  "(drain/EOF or stall class at scale).",
             })
+        elif accept_fn is not None:
+            try:
+                ok = bool(accept_fn(exp_bytes if exp_bytes is not None else expected,
+                                    bytes(res["bytes"])))
+                note = ""
+            except Exception as exc:  # noqa: BLE001
+                ok, note = False, f"acceptance predicate raised: {exc}"
+            row["ok"] = ok
+            row["criterion"] = "acceptance_predicate"
+            if note:
+                row["note"] = note
+            if not ok:
+                violations.append({
+                    "type": "acceptance_dv_failure",
+                    "criterion": "acceptance_dv_predicate",
+                    "acceptance_case": name,
+                    "gap_class": "mission",
+                    "suggested_fix": (
+                        "RTL output fails the declared acceptance predicate at "
+                        f"mission scale ({len(res['bytes'])}B streamed"
+                        + (f"; {note}" if note else "") + "). Decode/grade the "
+                        "captured stream offline (.coresmith/acceptance_dv/) and "
+                        "fix the responsible block."
+                    ),
+                })
         elif use_fidelity:
             fid = compute_fidelity_derate(project_root, expected, res["bytes"])
             row["fidelity"] = fid
