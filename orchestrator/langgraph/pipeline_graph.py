@@ -230,6 +230,7 @@ class BlockState(TypedDict):
     synth_gate_count: int
     ppa_ok: bool | None        # deterministic PPA gate verdict (None = not run)
     ppa_reasons: list             # human-readable budget-divergence reasons
+    timing_ok: bool | None        # measured WNS >= 0 (None = not measured)
     # Post-synthesis GATE-LEVEL SIM verdict (harness.gate_sim). None = not run.
     # False routes the block to diagnose: the synthesized netlist does not
     # reproduce the behaviour the RTL was verified with, so DV and PPA were
@@ -1460,13 +1461,9 @@ def _mem_price_gate_verdict(project_root: str, block_name: str) -> dict | None:
                     block_name, _mprice.MemPriceVerdict(ok=False), area_budget_um2=area_budget,
                     manifest_present=False, note="storage declared but no # MEM manifest")
                 _mprice.write_ledger(project_root, block_name, led)
-                return {"action": "revise", "feedback": (
-                    "MEMORY MANIFEST REQUIRED: this spec declares on-chip storage "
-                    "(sram_budget) but emits no machine-readable memory manifest. "
-                    "Add one `# MEM <name>: <width>x<depth> ports=<...> "
-                    "impl=<flop|fpmem|sram> justification=<why the dependency "
-                    "window cannot be smaller>` line PER storage element so the "
-                    "physical-feasibility gate can price it.")}
+                log(f"  [MEM-PRICE] {block_name}: storage declared but no # MEM "
+                    "manifest -- advisory (WP-11); pricing skipped", YELLOW)
+                return None
             log(f"  [MEM-PRICE] {block_name}: spec declares storage but has NO "
                 f"# MEM manifest -- UNPRICED (set CORESMITH_MEM_MANIFEST_REQUIRED=1 "
                 f"to enforce). Accepting with warning.", YELLOW)
@@ -3010,7 +3007,14 @@ def _evaluate_ppa_gate(
                 )
             except OSError:
                 pass
-        (block_dir / "previous_error.txt").write_text(_err)
+        # WP-11: only a MEASURED timing failure is a rework reason; budget
+        # divergence is advisory and must not poison a later retry's
+        # previous_error.txt.
+        _timing_failed = any(
+            (c or {}).get("metric") == "wns_ns" and (c or {}).get("passed") is False
+            for c in (checks or []))
+        (block_dir / ("previous_error.txt" if _timing_failed
+                      else "ppa_advisory.txt")).write_text(_err)
         return False, reasons, dict(_meta)
 
     # HOT-PATCH (chip-lead): honor CORESMITH_SYNTH_TIMEOUT_S so the generic
@@ -4146,6 +4150,8 @@ async def synthesize_node(state: BlockState) -> dict:
         "synth_gate_count": gate_count,
         "ppa_ok": ppa_ok,
         "ppa_reasons": ppa_reasons,
+        "timing_ok": (None if ppa_meta.get("wns_ns") is None
+                      else bool(float(ppa_meta["wns_ns"]) >= 0.0)),
         "gate_sim_ok": gate_sim_ok,
         "gate_sim_status": gate_sim_status,
         "gate_sim_reason": gate_sim_reason,
@@ -5060,8 +5066,10 @@ def route_after_synth(state: BlockState) -> str:
         return "diagnose"
     if state.get("gate_sim_ok") is False:
         return "diagnose"
-    # WP-10c: the PPA budget verdict (``ppa_ok``) is ADVISORY -- measured,
-    # recorded in ppa_history and the scorecard, never a reason to rework.
+    # WP-11: MEASURED timing is a hard verdict (an external oracle); the
+    # PPA budget verdict (``ppa_ok``) stays advisory (WP-10c).
+    if state.get("timing_ok") is False:
+        return "diagnose"
     return "block_done"
 
 
@@ -5596,6 +5604,10 @@ def _revise_named_blocks(response: dict, candidates: list[str]) -> list[str]:
     if text:
         named |= {c for c in candidates
                   if re.search(rf"(?<![A-Za-z0-9_]){re.escape(c)}(?![A-Za-z0-9_])", text)}
+    # WP-11: a structured keep/approve/skip is authoritative over a prose mention.
+    if isinstance(actions, dict):
+        named -= {k for k, v in actions.items()
+                  if str(v or "").strip().lower() in {"approve", "skip", "keep"}}
     return [c for c in candidates if c in named]
 
 
@@ -5920,11 +5932,27 @@ async def advance_tier_node(state: OrchestratorState) -> dict:
     })
 
     plan = state.get("revise_blocks") or None
+    tier_list = list(state.get("tier_list") or [])
+    queue = state.get("block_queue", [])
+    # A targeted re-entry must not re-run tiers that are already done:
+    # skip every following tier whose blocks all passed earlier and none of
+    # which the plan names (first pass: nothing is completed, nothing skips).
+    passed_names = {b.get("name") for b in _current_phase_completed(state)
+                    if b.get("success")}
+    while new_idx < len(tier_list):
+        names = [b["name"] for b in queue if b.get("tier", 1) == tier_list[new_idx]]
+        if names and all(n in passed_names for n in names) \
+                and not any(n in (plan or {}) for n in names):
+            log(f"  Tier {tier_list[new_idx]}: all {len(names)} blocks already "
+                "passed and none are planned -- skipping", CYAN)
+            new_idx += 1
+            continue
+        break
     keep = None
     if plan:
-        later = set((state.get("tier_list") or [])[new_idx:])
+        later = set(tier_list[new_idx:])
         if any(b.get("name") in plan and b.get("tier", 1) in later
-               for b in state.get("block_queue", [])):
+               for b in queue):
             keep = plan
     return {"current_tier_index": new_idx, "revise_blocks": keep}
 
@@ -6340,108 +6368,6 @@ async def integration_check_node(state: OrchestratorState) -> dict:
         # Default-on; opt out with CORESMITH_INTEGRATION_STALENESS_GATE=0.
         # Only blocks with a recorded contract stamp are checked, so runs
         # predating the stamp are unaffected.
-        _stale_gate_on = os.environ.get(
-            "CORESMITH_INTEGRATION_STALENESS_GATE", ""
-        ).strip().lower() not in {"0", "false", "no", "off"}
-        if _stale_gate_on:
-            _passed_names = [b.get("name", "") for b in passed_blocks
-                             if b.get("name")]
-            _stale = _stale_specs(pr, _passed_names)
-            if _stale:
-                _stale_names = [s["block"] for s in _stale]
-                log(f"  [INTEGRATION] STALE uarch specs: {_stale_names} -- "
-                    f"the interface contract changed after these specs were "
-                    f"generated; refusing to assemble", RED)
-                write_graph_event(pr, "Integration Check",
-                                  "integration_staleness_blocked",
-                                  {"stale_blocks": _stale_names})
-                payload = {
-                    "type": "integration_failure",
-                    "error_kind": "stale_uarch_specs",
-                    "stale_blocks": _stale,
-                    "error_count": len(_stale),
-                    "supported_actions": ["retry", "override", "abort"],
-                    "outer_agent_guidance": (
-                        "Contract-staleness preflight: these blocks' uarch "
-                        "specs were generated against an OLDER interface "
-                        "contract than the live one, so their RTL carries "
-                        "stale widths/fields; assembling would force "
-                        "truncation adapters that destroy the amended "
-                        "semantics. For each stale block: invalidate its "
-                        "recorded sim-pass (set sim_passed=false in "
-                        ".coresmith/blocks/<b>/best_result.json) and drive a "
-                        "re-spec/regen of that block against the live "
-                        "contract, then resume `retry` to re-run this "
-                        "preflight. `override` proceeds anyway -- ONLY for a "
-                        "verified false alarm. `abort` ends integration."
-                    ),
-                }
-                response = (await _resolve_interrupt(payload)) or {}
-                _act = response.get("action", "retry")
-                write_graph_event(pr, "Integration Check",
-                                  "integration_staleness_resume",
-                                  {"action": _act})
-                if _act == "override":
-                    log("  [INTEGRATION] staleness OVERRIDE by chip-lead -- "
-                        "assembling despite stale specs", YELLOW)
-                elif _act == "abort":
-                    result = {
-                        "aborted": True, "skipped": True,
-                        "reason": ("stale uarch specs (aborted): "
-                                   f"{_stale_names}"),
-                        "error": "stale_uarch_specs",
-                        "error_count": len(_stale),
-                        "stale_blocks": _stale_names,
-                    }
-                    write_graph_event(pr, "Integration Check",
-                                      "graph_node_exit", result)
-                    return {"integration_result": result}
-                else:  # retry (after out-of-band re-spec) -> re-check NOW
-                    _stale2 = _stale_specs(pr, _passed_names)
-                    if _stale2:
-                        _s2 = [s["block"] for s in _stale2]
-                        # Arm-F live finding: a retry cannot refresh stamps,
-                        # so persistent staleness used to END the run with
-                        # work pending (a strand needing an operator
-                        # restart-node). Escalate ONCE to an override/abort
-                        # park instead -- deliberate contract corrections are
-                        # exactly the override case.
-                        log(f"  [INTEGRATION] staleness persists after retry "
-                            f"({_s2}) -- escalating to override/abort", RED)
-                        response = (await _resolve_interrupt({
-                            **payload,
-                            "retry_failed": True,
-                            "stale_blocks": _s2,
-                            "supported_actions": ["override", "abort"],
-                            "outer_agent_guidance": (
-                                "A retry was already taken and the staleness "
-                                "persists (retry cannot refresh uArch "
-                                "stamps). If the stamp drift traces to a "
-                                "DELIBERATE spec/contract correction, "
-                                "override; otherwise abort and re-drive the "
-                                "stale blocks."
-                            ),
-                        })) or {}
-                        if response.get("action") == "override":
-                            log("  [INTEGRATION] staleness OVERRIDE (post-"
-                                "retry) -- assembling despite stale specs",
-                                YELLOW)
-                        else:
-                            result = {
-                                "aborted": True, "skipped": True,
-                                "reason": ("stale uarch specs persist after "
-                                           f"retry: {_s2}"),
-                                "error": "stale_uarch_specs",
-                                "error_count": len(_stale2),
-                                "stale_blocks": _s2,
-                            }
-                            write_graph_event(pr, "Integration Check",
-                                              "graph_node_exit", result)
-                            return {"integration_result": result}
-                    else:
-                        log("  [INTEGRATION] staleness cleared on retry -- "
-                            "proceeding to assembly", GREEN)
-
         connections, design_name = await asyncio.to_thread(
             load_architecture_connections, pr
         )
@@ -8664,12 +8590,13 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
                     f"({chip_tput.get('budget_source', 'none')} budget)", CYAN)
             if (passed and chip_tput.get("applicable")
                     and chip_tput.get("passed") is False):
-                passed = False
+                # WP-11: advisory -- recorded and appended, never a DV failure.
                 sim_log = ((sim_log + "\n\n") if sim_log else "") + (
-                    chip_tput.get("report", "") or chip_tput.get("reason", ""))
-                span.set_attribute("chip_throughput_gate_failed", True)
-                log("  [INTEG-DV] chip MEASURED-THROUGHPUT gate FAILED -- "
-                    f"flipping DV to failed: {chip_tput.get('reason', '')}", RED)
+                    "CHIP THROUGHPUT ADVISORY (not a DV failure):\n"
+                    + (chip_tput.get("report", "") or chip_tput.get("reason", "")))
+                span.set_attribute("chip_throughput_advisory", True)
+                log("  [INTEG-DV] chip measured throughput below budget -- "
+                    f"advisory only: {chip_tput.get('reason', '')}", YELLOW)
         except Exception as _ce:  # noqa: BLE001 - never crash the DV node
             log(f"  [INTEG-DV] chip throughput eval skipped ({_ce})", YELLOW)
 

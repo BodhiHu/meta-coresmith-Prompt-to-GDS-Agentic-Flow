@@ -27,7 +27,7 @@ def coverage_enabled() -> bool:
 
 
 def line_cov_gate_enabled() -> bool:
-    """Line-coverage floor gate on block DV (default ON).
+    """Line-coverage floor gate on block DV (default OFF since WP-11).
 
     A REJECT-only gate: a block-DV pass whose testbench exercises less than
     ``line_cov_floor()`` percent of the block's coverage points is demoted to
@@ -36,9 +36,11 @@ def line_cov_gate_enabled() -> bool:
     observation -- see the DV-closure masking-band analysis) and is never
     treated as evidence of correctness. ``CORESMITH_LINE_COV_GATE=0`` disables.
     """
+    # WP-11: advisory by default -- a line floor measures execution, not
+    # assertion strength (Arm E: 93% aggregate coverage, 0/19 on the sampler).
     return os.environ.get(
-        "CORESMITH_LINE_COV_GATE", "1"
-    ).strip().lower() not in {"0", "false", "no", "off"}
+        "CORESMITH_LINE_COV_GATE", "0"
+    ).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def line_cov_floor() -> float:

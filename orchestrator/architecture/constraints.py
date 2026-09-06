@@ -565,6 +565,28 @@ def _check_interface_family_coherence(
 CROSS_ARTIFACT_CHECK_ID = "cross_artifact_consistency"
 
 
+_CROSS_ARTIFACT_SIDE_RE = re.compile(
+    r"\b([AB])\s*:\s*(.*?)\s*[\u2014\-:]\s*[\"\u201c](.*?)[\"\u201d]",
+    re.DOTALL,
+)
+
+
+def _parse_candidate_locations(evidence: str) -> list[dict]:
+    """Pull the two cited sides out of a subagent's ``evidence`` string.
+
+    Best-effort: an unparseable evidence string yields an empty list and the
+    finding still surfaces with its raw evidence.
+    """
+    sides: list[dict] = []
+    for m in _CROSS_ARTIFACT_SIDE_RE.finditer(evidence or ""):
+        sides.append({
+            "side": m.group(1),
+            "artifact": m.group(2).strip()[:200],
+            "quote": m.group(3).strip()[:400],
+        })
+    return sides[:4]
+
+
 def _annotate_cross_artifact_candidates(violations: list[dict]) -> None:
     """Mark LLM cross-artifact findings as CANDIDATES and split their sides.
 

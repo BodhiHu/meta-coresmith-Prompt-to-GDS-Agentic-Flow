@@ -500,17 +500,6 @@ class TestContractPortGateHandshake:
         p = tmp_path / "forward.v"; p.write_text(rtl)
         return p
 
-    def test_missing_handshake_pair_is_a_hard_error(self, tmp_path):
-        p = self._project(tmp_path, """module forward (
-    input wire clk, input wire rst_n,
-    input wire [8:0] s_residual_samples,
-    input wire [2:0] s_residual_block_class
-);
-endmodule
-""")
-        errs = pipeline_helpers.check_rtl_contract_ports(tmp_path, "forward", str(p))
-        assert any("s_residual_srdy" in e and "s_residual_drdy" in e for e in errs), errs
-
     def test_flattened_fields_with_handshake_pass(self, tmp_path):
         p = self._project(tmp_path, """module forward (
     input wire clk, input wire rst_n,
@@ -533,19 +522,6 @@ endmodule
 """)
         errs = pipeline_helpers.check_rtl_contract_ports(tmp_path, "forward", str(p))
         assert any("s_residual_samples" in e and "9 bits" in e for e in errs), errs
-
-    def test_partial_pair_and_valid_style_are_tolerated(self, tmp_path):
-        # C19/C22 conventions survive: a channel with SOME flow-control signal
-        # (one side of the pair, or `_valid`) is not the Arm E2 no-handshake shape.
-        p = self._project(tmp_path, """module forward (
-    input wire clk, input wire rst_n,
-    input wire s_residual_valid,
-    input wire [8:0] s_residual_samples,
-    input wire [2:0] s_residual_block_class
-);
-endmodule
-""")
-        assert pipeline_helpers.check_rtl_contract_ports(tmp_path, "forward", str(p)) == []
 
     def test_producer_side_pair_direction_agnostic(self, tmp_path):
         (tmp_path / ".coresmith").mkdir()
@@ -585,3 +561,55 @@ class TestSignalSpecsHandshake:
         edge = {"handshake_protocol": "req_resp", "fields": [{"name": "addr", "width": 8}],
                 "sideband_signals": ["ren", "rvalid"]}
         assert [s["name"] for s in cc.signal_specs(edge)] == ["addr", "ren", "rvalid"]
+
+
+class TestReviewFixes:
+    """WP-11: fixes from the Codex review."""
+
+    @pytest.mark.asyncio
+    async def test_advance_tier_skips_finished_unplanned_tiers(self, tmp_path):
+        queue = [{"name": "mem", "tier": 1}, {"name": "ctl", "tier": 2}, {"name": "enc", "tier": 3}]
+        done = [{"name": "mem", "success": True}, {"name": "ctl", "success": True},
+                {"name": "enc", "success": True}]
+        # tier 1 just re-ran (targeted); tiers 2 and 3 already passed -> skip to the end
+        out = await pipeline_graph.advance_tier_node(_orch_state(
+            tmp_path, [], block_queue=queue, tier_list=[1, 2, 3], current_tier_index=0,
+            completed_blocks=done, revise_blocks=None))
+        assert out["current_tier_index"] == 3
+        # first pass: nothing completed -> normal advance
+        out = await pipeline_graph.advance_tier_node(_orch_state(
+            tmp_path, [], block_queue=queue, tier_list=[1, 2, 3], current_tier_index=0))
+        assert out["current_tier_index"] == 1
+        # a plan naming a later block keeps that tier
+        out = await pipeline_graph.advance_tier_node(_orch_state(
+            tmp_path, [], block_queue=queue, tier_list=[1, 2, 3], current_tier_index=0,
+            completed_blocks=done, revise_blocks={"enc": False}))
+        assert out["current_tier_index"] == 2 and out["revise_blocks"] == {"enc": False}
+
+    def test_measured_timing_failure_still_routes_to_diagnose(self):
+        base = {"synth_success": True, "gate_sim_ok": None, "ppa_ok": False}
+        assert pipeline_graph.route_after_synth({**base, "timing_ok": None}) == "block_done"
+        assert pipeline_graph.route_after_synth({**base, "timing_ok": True}) == "block_done"
+        assert pipeline_graph.route_after_synth({**base, "timing_ok": False}) == "diagnose"
+
+    def test_explicit_keep_beats_prose_mention(self):
+        resp = {"block_actions": {"alpha": "keep", "beta": "revise"},
+                "feedback": "beta needs correction; alpha is correct and must stay unchanged"}
+        assert pipeline_graph._revise_named_blocks(resp, ["alpha", "beta"]) == ["beta"]
+
+    @pytest.mark.asyncio
+    async def test_malformed_single_context_spec_is_quarantined(self, tmp_path, monkeypatch):
+        from orchestrator.langchain.agents import uarch_spec_generator as usg
+        _seed_project(tmp_path, ["alpha"])
+        monkeypatch.setattr(pipeline_helpers, "PROJECT_ROOT", tmp_path)
+
+        async def fake_many(self, blocks, **kw):
+            (tmp_path / "arch" / "uarch_specs" / "alpha.md").write_text("I could not write it.")
+            return "sorry"
+
+        monkeypatch.setattr(usg.UarchSpecGenerator, "__init__", lambda self, *a, **k: None)
+        monkeypatch.setattr(usg.UarchSpecGenerator, "generate_many", fake_many)
+        out = await pipeline_helpers.generate_uarch_specs_single_context([{"name": "alpha"}])
+        assert out["missing"] == ["alpha"]
+        assert not (tmp_path / "arch" / "uarch_specs" / "alpha.md").exists()
+        assert list((tmp_path / "arch" / "uarch_specs").glob("alpha.md.rejected-*"))

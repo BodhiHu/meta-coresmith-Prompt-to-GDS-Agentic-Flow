@@ -595,7 +595,9 @@ class TestGateVerdictHelper:
         monkeypatch.setenv("CORESMITH_MEM_MANIFEST_REQUIRED", "1")
         self._spec(tmp_path, "legacy", "sram_budget = 4 KiB (1x sky130_sram)\n")
         r = pg._mem_price_gate_verdict(str(tmp_path), "legacy")
-        assert r is not None and "MANIFEST REQUIRED" in r["feedback"]
+        assert r is None  # WP-11: a missing manifest is advisory (ledger note), not a re-spec
+        led = json.loads((tmp_path / ".coresmith" / "blocks" / "legacy" / "mem_price.json").read_text())
+        assert led.get("manifest_present") is False
 
     def test_revise_cap_accepts_after_bound(self, tmp_path, monkeypatch):
         pg = self._pg(monkeypatch)

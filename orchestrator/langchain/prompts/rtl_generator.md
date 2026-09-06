@@ -243,7 +243,10 @@ When converting Python to {rtl_language}:
   chip top) must follow that contract on those ports.
 
 PUBLISHED STREAM SAMPLER CONTRACT (chip-boundary stream ports ONLY):
-The grader drives the chip's top-level stream ports (in_valid/in_ready/in_data/
+The task's shipped sampler/testbench is the contract for these ports; the
+ERS transcribes its acceptance semantics and that transcription wins over
+anything below. For the ppabench `stream_tb.py` family the semantics are:
+the grader drives the chip's top-level stream ports (in_valid/in_ready/in_data/
 in_last, out_valid/out_ready/out_data/out_last) before each rising edge and
 samples them in the read-only phase AFTER the edge. It counts:
   input word accepted on edge N  <=> in_valid (driven before N) && in_ready as it
@@ -253,14 +256,19 @@ samples them in the read-only phase AFTER the edge. It counts:
 Rules that follow. Violating either desyncs the grader; the failure is
 seed-dependent under backpressure and is NOT caught by a testbench that samples
 ready before the edge (arms A, B and E of the h264 experiment all shipped it):
-  - in_ready: hold it high through the whole input phase and drop it only on the
-    final word, OR pause with refuse-and-drop: on the edge where the ready
-    register goes low do NOT latch the offered word (accept = in_valid &&
-    in_ready_next, never in_valid && in_ready_q alone), and when ready goes high
-    with in_valid already high the word on that edge IS accepted -- latch it and
-    count it. Never drop in_ready on an edge that accepts a word (for example the
-    last byte of a frame): the grader re-offers that word and every later byte
-    is shifted by one.
+  - in_ready: the grader re-offers a word whenever in_ready reads 0 after the
+    edge, and counts it accepted on the first edge after which in_ready reads 1.
+    Two self-consistent ways to honour that; pick ONE and keep it everywhere:
+      (a) pre-edge latching (accept = in_valid && in_ready_q): in_ready may only
+          FALL on an edge that accepts a word (the re-offered duplicate is then
+          absorbed by the edge on which in_ready rises, where in_ready_q is
+          still 0 so nothing is latched twice); never fall on a non-accepting
+          edge, or the re-offered word is lost when ready rises.
+      (b) post-edge latching (accept = in_valid && in_ready_next): drop ready
+          only on an edge that does NOT latch (refuse-and-drop), and latch on
+          the edge ready rises if in_valid is high.
+    Mixing the two (e.g. pre-edge latching plus refuse-and-drop) desyncs the
+    grader.
   - out side: the beat visible after edge N is consumed by the out_ready driven
     for cycle N. Register it (`out_ready_q <= out_ready`), keep out_valid/out_data
     on registered state, hold the beat until `out_valid_q && out_ready_q`, and

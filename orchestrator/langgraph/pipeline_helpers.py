@@ -974,11 +974,10 @@ def check_rtl_contract_ports(project_root, block_name: str,
             return []
         by_name = {p.name: p for p in mod.ports}
 
-        # WP-9: the contract spells a channel as
-        # "<channel>_srdy/<channel>_data" (srdy_drdy) or as the endpoint
-        # name (axi_stream). Derive the channel and REQUIRE its handshake
-        # pair: a channel without flow control is unwireable, and two
-        # Arm E2 revise rounds were spent on exactly that omission.
+        # WP-9/WP-11: derive the channel from the contract's slash spelling
+        # and check each flattened field port's width. Handshake-pair
+        # PRESENCE is the conformance gate's job (contract_conformance
+        # .signal_specs lists the pair since WP-9c); one authority only.
         def _channel_of(port_ref: str) -> str:
             first = str(port_ref or "").split("/")[0].strip()
             for suf in ("_srdy", "_drdy", "_data", "_tdata",
@@ -998,32 +997,6 @@ def check_rtl_contract_ports(project_root, block_name: str,
             if not chan or chan in _hs_seen:
                 continue
             _hs_seen.add(chan)
-            pair = ((f"{chan}_srdy", f"{chan}_drdy") if proto == "srdy_drdy"
-                    else (f"{chan}_tvalid", f"{chan}_tready"))
-            # Hard-fail ONLY the Arm E2 shape: the channel's PAYLOAD is exposed
-            # (a flattened `<channel>_<field>` port, or `<channel>_data` /
-            # `_tdata`) while NO flow-control signal of any recognised spelling
-            # exists for the channel. Bare native bundles, `_valid`-style
-            # wrappers and partial pairs stay advisory (C19/C22 sweeps showed
-            # name-matching over-flags lint-clean blocks).
-            field_names = [str((f or {}).get("name") or "").strip()
-                           for f in (e.get("fields") or [])]
-            payload_ports = [n for n in
-                             [f"{chan}_{fn}" for fn in field_names if fn]
-                             + [f"{chan}_data", f"{chan}_tdata"]
-                             if n in by_name]
-            hs_suffixes = ("_srdy", "_drdy", "_tvalid", "_tready", "_valid",
-                           "_ready", "_ren", "_rvalid", "_we", "_req", "_ack")
-            has_flow_control = any(
-                n.startswith(chan + "_") and n.endswith(hs_suffixes)
-                for n in by_name)
-            if payload_ports and not has_flow_control:
-                errors.append(
-                    f"channel '{chan}' ({proto}) exposes its payload "
-                    f"({', '.join(payload_ports[:3])}) but no handshake port: "
-                    f"the frozen contract's flow control must be exposed as "
-                    f"{pair[0]}/{pair[1]} (edge {e.get('edge_id', '?')}); see "
-                    f"the port_naming skill")
             # Flattened payload fields: each `<channel>_<field>` present under
             # its name must carry the contract's width (a missing field port
             # stays advisory: packed `<channel>_data` is checked below).
@@ -1183,6 +1156,13 @@ async def generate_uarch_specs_single_context(
             if recovered:
                 text = recovered
                 p.write_text(text)
+        if text and not _looks_like_uarch_markdown(text) and p.exists():
+            # WP-11: never leave a malformed file where the reuse branch
+            # would adopt it -- quarantine it so the per-block author runs.
+            try:
+                p.rename(p.with_name(f"{name}.md.rejected-{int(call_start)}"))
+            except OSError:
+                pass
         if text and _looks_like_uarch_markdown(text):
             written.append(name)
             try:

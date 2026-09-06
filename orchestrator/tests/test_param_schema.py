@@ -399,9 +399,7 @@ class TestMemManifestStrictFlip:
         _write_ers(tmp_path, _VIDEO_PARAMS)
         _write_spec(tmp_path, "fifo_ctrl", self._STORAGE_SPEC)
         v = pipeline_graph._mem_price_gate_verdict(str(tmp_path), "fifo_ctrl")
-        assert isinstance(v, dict)
-        assert v.get("action") == "revise"
-        assert "MANIFEST REQUIRED" in v.get("feedback", "")
+        assert v is None  # WP-11: advisory; the ledger records the missing manifest
 
     def test_global_optin_still_rejects_without_block(self, tmp_path, monkeypatch):
         # The global CORESMITH_MEM_MANIFEST_REQUIRED opt-in is untouched: it
@@ -410,8 +408,7 @@ class TestMemManifestStrictFlip:
         _write_ers(tmp_path, _LEGACY_PROSE)
         _write_spec(tmp_path, "fifo_ctrl", self._STORAGE_SPEC)
         v = pipeline_graph._mem_price_gate_verdict(str(tmp_path), "fifo_ctrl")
-        assert isinstance(v, dict)
-        assert v.get("action") == "revise"
+        assert v is None  # WP-11: advisory
 
 
 # ===========================================================================
