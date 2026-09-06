@@ -512,3 +512,68 @@ class TestWavekitVeto:
         assert b({"ok": False, "error": "WaveKit VCD audit timed out"}) is False
         assert b(None) is False
         assert b({"ok": False, "error": "clock never toggled"}) is True
+
+
+class TestContractPortGateHandshake:
+    EDGE = {
+        "edge_id": "intra__m_residual__to__forward__s_residual",
+        "producer_block": "intra16", "producer_port": "m_residual_srdy/m_residual_data",
+        "consumer_block": "forward", "consumer_port": "s_residual_drdy/s_residual_data",
+        "handshake_protocol": "srdy_drdy", "data_width_bits": 12,
+        "fields": [{"name": "samples", "width": 9}, {"name": "block_class", "width": 3}],
+    }
+
+    def _project(self, tmp_path, rtl: str):
+        (tmp_path / ".coresmith").mkdir()
+        (tmp_path / ".coresmith" / "interface_contracts.json").write_text(
+            json.dumps({"contracts": [self.EDGE]}))
+        p = tmp_path / "forward.v"; p.write_text(rtl)
+        return p
+
+    def test_missing_handshake_pair_is_a_hard_error(self, tmp_path):
+        p = self._project(tmp_path, """module forward (
+    input wire clk, input wire rst_n,
+    input wire [8:0] s_residual_samples,
+    input wire [2:0] s_residual_block_class
+);
+endmodule
+""")
+        errs = pipeline_helpers.check_rtl_contract_ports(tmp_path, "forward", str(p))
+        assert any("s_residual_srdy" in e and "s_residual_drdy" in e for e in errs), errs
+
+    def test_flattened_fields_with_handshake_pass(self, tmp_path):
+        p = self._project(tmp_path, """module forward (
+    input wire clk, input wire rst_n,
+    input wire s_residual_srdy, output wire s_residual_drdy,
+    input wire [8:0] s_residual_samples,
+    input wire [2:0] s_residual_block_class
+);
+endmodule
+""")
+        assert pipeline_helpers.check_rtl_contract_ports(tmp_path, "forward", str(p)) == []
+
+    def test_wrong_field_width_is_reported(self, tmp_path):
+        p = self._project(tmp_path, """module forward (
+    input wire clk, input wire rst_n,
+    input wire s_residual_srdy, output wire s_residual_drdy,
+    input wire [7:0] s_residual_samples,
+    input wire [2:0] s_residual_block_class
+);
+endmodule
+""")
+        errs = pipeline_helpers.check_rtl_contract_ports(tmp_path, "forward", str(p))
+        assert any("s_residual_samples" in e and "9 bits" in e for e in errs), errs
+
+    def test_producer_side_pair_direction_agnostic(self, tmp_path):
+        (tmp_path / ".coresmith").mkdir()
+        (tmp_path / ".coresmith" / "interface_contracts.json").write_text(
+            json.dumps({"contracts": [self.EDGE]}))
+        p = tmp_path / "intra.v"
+        p.write_text("""module intra16 (
+    input wire clk, input wire rst_n,
+    output wire m_residual_srdy, input wire m_residual_drdy,
+    output wire [8:0] m_residual_samples, output wire [2:0] m_residual_block_class
+);
+endmodule
+""")
+        assert pipeline_helpers.check_rtl_contract_ports(tmp_path, "intra16", str(p)) == []

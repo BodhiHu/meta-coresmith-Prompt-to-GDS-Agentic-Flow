@@ -973,6 +973,55 @@ def check_rtl_contract_ports(project_root, block_name: str,
         if not mod.name or not mod.ports:
             return []
         by_name = {p.name: p for p in mod.ports}
+
+        # WP-9: the contract spells a channel as
+        # "<channel>_srdy/<channel>_data" (srdy_drdy) or as the endpoint
+        # name (axi_stream). Derive the channel and REQUIRE its handshake
+        # pair: a channel without flow control is unwireable, and two
+        # Arm E2 revise rounds were spent on exactly that omission.
+        def _channel_of(port_ref: str) -> str:
+            first = str(port_ref or "").split("/")[0].strip()
+            for suf in ("_srdy", "_drdy", "_data", "_tdata",
+                        "_tvalid", "_tready"):
+                if first.endswith(suf):
+                    return first[: -len(suf)]
+            return first
+
+        _hs_seen: set = set()
+        for e in edges:
+            proto = str(e.get("handshake_protocol") or "").strip()
+            if proto not in ("srdy_drdy", "axi_stream"):
+                continue
+            ref = (e.get("producer_port") if e.get("role") == "producer"
+                   else e.get("consumer_port")) or ""
+            chan = _channel_of(ref)
+            if not chan or chan in _hs_seen:
+                continue
+            _hs_seen.add(chan)
+            pair = ((f"{chan}_srdy", f"{chan}_drdy") if proto == "srdy_drdy"
+                    else (f"{chan}_tvalid", f"{chan}_tready"))
+            missing = [n for n in pair if n not in by_name]
+            if missing:
+                errors.append(
+                    f"channel '{chan}' ({proto}) has no handshake port(s) "
+                    f"{', '.join(missing)} -- the frozen contract's flow "
+                    f"control must be exposed exactly under these names "
+                    f"(edge {e.get('edge_id', '?')}); see the port_naming skill")
+            # Flattened payload fields: each `<channel>_<field>` present under
+            # its name must carry the contract's width (a missing field port
+            # stays advisory: packed `<channel>_data` is checked below).
+            for f in (e.get("fields") or []):
+                fname = str((f or {}).get("name") or "").strip()
+                fw = (f or {}).get("width")
+                if not fname or not isinstance(fw, int) or fw <= 0:
+                    continue
+                fp = by_name.get(f"{chan}_{fname}")
+                if fp is not None and fp.width != fw:
+                    errors.append(
+                        f"port '{chan}_{fname}' is {fp.width} bits but the "
+                        f"frozen contract field is {fw} bits "
+                        f"(edge {e.get('edge_id', '?')})")
+
         # A shared consumer service may have several producer edges with legacy
         # payload widths and one widened canonical request port.  The integration
         # fabric owns the lossless zero-fill adapters on the narrower edges; the

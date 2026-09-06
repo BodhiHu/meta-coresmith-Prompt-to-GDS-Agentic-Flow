@@ -5960,7 +5960,8 @@ async def init_tier_node(state: OrchestratorState) -> dict:
             pr, block_queue, tier_blocks, revise)
 
     write_graph_event(pr, "Init Tier", "graph_node_exit", {
-        "tier": tier, "revise_blocks": revise,
+        "tier": tier,
+        "revise_blocks": revise_update if revise_update is not None else revise,
     })
 
     out = {"tier_list": tier_list}
