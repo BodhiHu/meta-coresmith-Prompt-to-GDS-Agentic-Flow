@@ -172,21 +172,6 @@ def _fuzzy_replace(
     return spec, ""
 
 
-def _file_is_fresh(path: Path, state: dict) -> bool:
-    """Check if *path* was written during the current pipeline run.
-
-    Fix #11: prevents reuse of stale RTL/TB files from previous runs.
-    Returns True if the file's mtime is newer than the pipeline start time.
-    """
-    try:
-        run_start = state.get("pipeline_run_start", 0.0)
-        if not run_start:
-            return True  # no start time recorded -> assume fresh (backwards compat)
-        return path.stat().st_mtime >= run_start
-    except OSError:
-        return False
-
-
 def _last(a, b):
     """Reducer that keeps the latest value.
 
@@ -978,28 +963,6 @@ async def _resolve_interrupt(payload: dict) -> dict:
     return decision
 
 
-def _artifact_up_to_date(path: Path, state: dict, block_name: str,
-                         also_newer_than: list | None = None) -> bool:
-    """Attempt-1 reuse guard (h264 A/B stale-reuse defect): a generated
-    artifact is reusable only when at least as new as the block's uArch spec
-    AND every path in ``also_newer_than``. ``_file_is_fresh`` alone compares
-    against the FIRST run start, so forced restarts reused RTL whose spec
-    had been corrected hours earlier."""
-    try:
-        m = path.stat().st_mtime
-    except OSError:
-        return False
-    others = [Path(_pr(state)) / "arch" / "uarch_specs" / f"{block_name}.md"]
-    others += list(also_newer_than or [])
-    for other in others:
-        try:
-            if other.exists() and m < other.stat().st_mtime:
-                return False
-        except OSError:
-            continue
-    return True
-
-
 def _is_content_free_revise(response: dict) -> bool:
     """True when a revise carries no substance (no block_actions, feedback,
     or reasoning) -- the reviewer-churn class that is safe to downgrade to
@@ -1012,8 +975,8 @@ def _is_content_free_revise(response: dict) -> bool:
 def _apply_revise_uarch(pr: str, response: dict, contract_audit: dict,
                         stage: str) -> list[str]:
     """Automate the operator playbook for a chip-level ``revise``: append the
-    revision feedback to each affected block's uArch spec (mtime bump forces
-    regeneration via _artifact_up_to_date) and drop best_result."""
+    revision feedback to each affected block's uArch spec and drop
+    best_result (the block re-enters through the targeted plan)."""
     feedback = (response.get("feedback")
                 or contract_audit.get("suggested_fix") or "").strip()
     blocks = (response.get("affected_blocks")
@@ -1915,22 +1878,6 @@ async def review_uarch_spec_node(state: BlockState) -> dict:
 # Node: generate_rtl  (with lint built-in)
 # ---------------------------------------------------------------------------
 
-# Deterministic-gate rejection markers a reused sim-passing RTL re-fails forever
-# (Finding 1: the skip_regen livelock). The stage / storage / ifdef lints write
-# these strings into <block>/previous_error.txt; they survive verbatim in the
-# diagnosis raw-log tail when diagnose reroutes the error, so matching the file
-# catches the re-entry regardless of who last wrote it.
-_DETERMINISTIC_GATE_MARKERS = (
-    "WIDE FLAT PACKED STORAGE WITH DYNAMIC PART-SELECT",   # storage lint report
-    "pre-synth storage lint",                              # storage synth wrapper
-    "SPLIT-BRAIN CONDITIONAL-COMPILATION",                 # ifdef lint report
-    "deterministic stage-realization",                     # stage lint subtitle
-    "UNSYNTHESIZABLE COMBINATIONAL CLOUD",                 # stage lint header
-    "MEMORY BELONGS IN AN SRAM MACRO",                     # memory-tier report
-    "pre-synth memory-tier lint",                          # memory-tier wrapper
-)
-
-
 def _rtl_sha1(rtl_path) -> str:
     """sha1 of the RTL file bytes ('' on any error) -- sim-pass provenance.
 
@@ -1965,143 +1912,6 @@ def _pass_provenance(project_root, block_name: str, rtl_path, tb_path) -> dict:
     return {k: v for k, v in prov.items() if v}
 
 
-def _deterministic_gate_retry(block_dir: Path) -> bool:
-    """True when this regen re-entry was routed from a DETERMINISTIC gate
-    rejection (stage / storage / ifdef lint).
-
-    Such gates fail the SAME RTL every time, so the ``best_result.sim_passed``
-    reuse short-circuit livelocks: it re-submits the identical rejected RTL,
-    which re-fails the identical gate forever (observed twice live in Phase B).
-    Mirrors the ``ppa_ok is False`` bypass, which breaks the same deadlock class
-    for the PPA budget gate. Detected from the on-disk ``previous_error.txt``
-    (the gate reports write their marker there).
-    """
-    try:
-        txt = (block_dir / "previous_error.txt").read_text()
-    except OSError:
-        return False
-    return any(m in txt for m in _DETERMINISTIC_GATE_MARKERS)
-
-
-def _gate_retry_bypass(
-    state: BlockState, block_name: str, rtl_path_obj: Path, attempt: int,
-    *, kind: str = "ppa",
-) -> None:
-    """Break a deadlock where a sim-passing RTL is routed BACK to
-    ``generate_rtl_node`` by a deterministic gate that reuse would re-fail
-    forever.
-
-    ``kind='ppa'`` -- the block PASSED sim but FAILED the deterministic PPA
-    budget gate (``ppa_ok is False``); ``kind='lint'`` -- it was REJECTED by a
-    deterministic stage/storage/ifdef lint (Finding 1). In both cases the
-    regression guard's ``sim_passed`` short-circuit would reuse the SAME rejected
-    RTL and re-fail the SAME gate every attempt. Before regenerating:
-      1. Back up the passing RTL (a later NON-gated re-entry can still reuse a
-         known-good functional version) and annotate ``best_result.json``.
-      2. Invalidate the block's sim caches so the regenerated RTL re-sims fresh.
-    ``best_result.json`` keeps ``sim_passed=True``; the bypass is keyed SOLELY on
-    the LIVE gate verdict, so a later non-gated re-entry still reuses the RTL.
-    """
-    pr = _pr(state)
-    block_dir = Path(pr) / ".coresmith" / "blocks" / block_name
-    block_dir.mkdir(parents=True, exist_ok=True)
-    backup = block_dir / f"rtl_backup_attempt{attempt}.v"
-    try:
-        backup.write_text(rtl_path_obj.read_text())
-    except OSError:
-        backup = None
-    try:
-        _upd = {f"{kind}_retry_attempt": attempt}
-        if backup is not None:
-            _upd[f"{kind}_bypass_backup"] = str(backup)
-        _db(pr).update_result(block_name, "best", **_upd)
-    except Exception:  # noqa: BLE001
-        pass
-    # Invalidate sim caches (no netlist cache exists -- synth runs fresh).
-    import shutil as _sh
-    import tempfile as _tf
-    sim_root = Path(pr) / "sim_build"
-    stale = [sim_root / block_name]
-    stale += list(sim_root.glob(f"rme_{block_name}*"))
-    # The equivalence harness builds under /tmp/rme_<block>_* -- clean those too.
-    stale += list(Path(_tf.gettempdir()).glob(f"rme_{block_name}_*"))
-    for d in stale:
-        try:
-            if d.exists():
-                _sh.rmtree(d, ignore_errors=True)
-        except OSError:
-            pass
-    _why = ("passed sim but FAILED the PPA budget gate" if kind == "ppa" else
-            "passed sim but was REJECTED by a deterministic lint gate "
-            "(stage/storage/ifdef) that reusing the same RTL re-fails forever")
-    log(f"  [RTL] {kind}-retry bypass: {block_name} {_why} -- regenerating "
-        f"(backed up passing RTL to {backup}, invalidated sim caches)", YELLOW)
-    write_graph_event(pr, "Generate RTL", f"{kind}_retry_bypass", {
-        "block": block_name, "attempt": attempt,
-        "backup": str(backup) if backup else "",
-    })
-
-
-def _ppa_retry_bypass(
-    state: BlockState, block_name: str, rtl_path_obj: Path, attempt: int
-) -> None:
-    """A-Fix 4: break the PPA-retry deadlock (see :func:`_gate_retry_bypass`)."""
-    _gate_retry_bypass(state, block_name, rtl_path_obj, attempt, kind="ppa")
-
-
-def _snapshot_passing_block(
-    pr: str, block_name: str, block: dict, rtl_path_obj: Path, attempt: int,
-    reason: str,
-) -> None:
-    """PR#12 finding #4 (data-loss guard): before the regression guard
-    invalidates a block's sim-pass and REGENERATES it (contract/tb/rtl-hash
-    staleness), snapshot the CURRENT passing RTL **and** testbench to a
-    recoverable location and record it in ``best_result.json``.
-
-    The fft sweep casualty: a chip-lead contract edit (an authorized cs_sram
-    ERS amendment) bumped user_project_wrapper's ``contract_sha1``; the guard
-    invalidated its sim-pass and regenerated it into a WRONG boundary, and the
-    correct passing RTL+TB were gone forever (checkpoint references RTL by
-    path; the on-disk file was overwritten). A regeneration that produces a
-    WORSE result must never be irrecoverable. Snapshots let a later re-entry
-    (or an operator) restore the last-known-good artifact. Best-effort; never
-    raises. Disable with ``CORESMITH_SNAPSHOT_BEFORE_REGEN=0``.
-    """
-    if os.environ.get("CORESMITH_SNAPSHOT_BEFORE_REGEN", "1").strip().lower() \
-            in {"0", "false", "no", "off"}:
-        return
-    try:
-        block_dir = Path(pr) / ".coresmith" / "blocks" / block_name
-        snap = block_dir / f"passing_snapshot_attempt{attempt}"
-        snap.mkdir(parents=True, exist_ok=True)
-        saved = {}
-        if rtl_path_obj.exists():
-            dst = snap / rtl_path_obj.name
-            dst.write_text(rtl_path_obj.read_text())
-            saved["rtl"] = str(dst)
-        tb_rel = block.get("testbench", "")
-        if tb_rel:
-            tb_obj = Path(pr) / tb_rel
-            if tb_obj.exists():
-                dst = snap / tb_obj.name
-                dst.write_text(tb_obj.read_text())
-                saved["tb"] = str(dst)
-        best = _db(pr).result(block_name, "best")
-        if best and saved:
-            hist = list(best.get("passing_snapshots", []))
-            hist.append({"attempt": attempt, "reason": reason, **saved})
-            _db(pr).update_result(block_name, "best", passing_snapshots=hist)
-        log(f"  [RTL] snapshot before regen: {block_name} passing artifacts "
-            f"saved to {snap} ({reason}) -- recoverable if the regen is worse",
-            YELLOW)
-        write_graph_event(pr, "Generate RTL", "passing_snapshot", {
-            "block": block_name, "attempt": attempt, "reason": reason,
-            "dir": str(snap),
-        })
-    except (OSError, json.JSONDecodeError):
-        pass
-
-
 async def generate_rtl_node(state: BlockState) -> dict:
     """Generate RTL, then run lint with local LLM fix loop.
 
@@ -2110,9 +1920,9 @@ async def generate_rtl_node(state: BlockState) -> dict:
     to disk.  After generation, runs Verilator lint and attempts local
     LLM fixes before escalating to the diagnose lead.
 
-    Regression guard: if a previous attempt passed simulation, skip RTL
-    regeneration AND reuse the passing testbench (re-validate only). Set
-    CORESMITH_FORCE_TB_REGEN=1 to restore the old force-TB-regen behavior.
+    A block that reaches this node regenerates its RTL (WP-10b removed the
+    sha1 regression guard and the skip-regen fast path: re-entry is targeted
+    by the revise plan, so nothing reaches here that should be reused).
     """
     block = state["current_block"]
     block_name = block["name"]
@@ -2123,141 +1933,32 @@ async def generate_rtl_node(state: BlockState) -> dict:
         "block": block_name, "attempt": attempt,
     })
 
-    _best_prev = _db(_pr(state)).result(block_name, "best") or {}
-
     with _tracer.start_as_current_span(
         f"Generate RTL [{block_name}] attempt {attempt}"
     ) as span:
         span.set_attribute("block_name", block_name)
         span.set_attribute("attempt", attempt)
 
-        # --- Regression guard ---
-        # A-Fix 4: a block whose LIVE PPA verdict is False (passed sim but blew
-        # its PPA budget) must REGENERATE -- reusing the passing RTL would re-fail
-        # PPA forever (deadlock). Keyed on live state.ppa_ok (not best_result), so
-        # a non-PPA re-entry (ppa_ok None/True) still reuses the passing RTL.
-        ppa_retry = state.get("ppa_ok") is False
-        if attempt > 1 and rtl_path_obj.exists() and _best_prev:
-            try:
-                best = dict(_best_prev)
-                # dv-hardening-10: a sim-pass is provenance for the RTL it
-                # passed WITH. If the on-disk RTL hash differs from the
-                # recorded one, the pass is stale -- do not reuse it (the
-                # armC livelock: reuse decisions honored a sim_passed that
-                # belonged to different RTL bytes).
-                _rec_sha = best.get("rtl_sha1")
-                if best.get("sim_passed") and _rec_sha:
-                    _cur_sha = _rtl_sha1(str(rtl_path_obj))
-                    if _cur_sha and _cur_sha != _rec_sha:
-                        log(f"  [RTL] best_result sim-pass is for DIFFERENT "
-                            f"RTL (hash mismatch) -- ignoring stale pass, "
-                            f"re-validating {block_name}", YELLOW)
-                        best["sim_passed"] = False
-                # C5: the pass is ALSO provenance for the TB and the block's
-                # frozen interface contract. fragment_metadata_memory livelock:
-                # the recorded pass had a MATCHING rtl_sha1 (the obsolete
-                # 48-bit RTL still on disk) but the TB/contract had moved to
-                # 56 bits -- skip-regen reused the stale RTL forever. Absent
-                # recorded hashes (older runs) skip these axes unchanged.
-                _rec_tb = best.get("tb_sha1")
-                if best.get("sim_passed") and _rec_tb:
-                    _tb_obj = Path(_pr(state)) / block.get("testbench", "")
-                    _cur_tb = (_rtl_sha1(str(_tb_obj))
-                               if block.get("testbench") and _tb_obj.exists()
-                               else "")
-                    if _cur_tb and _cur_tb != _rec_tb:
-                        log(f"  [RTL] best_result sim-pass was earned with a "
-                            f"DIFFERENT testbench (hash mismatch) -- ignoring "
-                            f"stale pass, regenerating {block_name}", YELLOW)
-                        _snapshot_passing_block(
-                            _pr(state), block_name, block, rtl_path_obj,
-                            attempt, "tb_sha1_stale")
-                        best["sim_passed"] = False
-                _rec_ct = best.get("contract_version")
-                if best.get("sim_passed") and _rec_ct:
-                    _cur_ct = _db(_pr(state)).block_contract_version(block_name)
-                    if _cur_ct and _cur_ct != int(_rec_ct):
-                        log(f"  [RTL] best_result sim-pass predates a revision "
-                            f"of this block's interface contract -- ignoring "
-                            f"stale pass, regenerating {block_name}", YELLOW)
-                        _snapshot_passing_block(
-                            _pr(state), block_name, block, rtl_path_obj,
-                            attempt, "contract_sha1_stale")
-                        best["sim_passed"] = False
-                # Finding 1: was this retry routed from a DETERMINISTIC gate
-                # rejection (stage/storage/ifdef lint)? Reusing the same
-                # sim-passing RTL re-fails that gate forever -- the skip_regen
-                # livelock. Detected from the block's previous_error.txt.
-                det_gate_retry = _deterministic_gate_retry(
-                    Path(_pr(state)) / ".coresmith" / "blocks" / block_name)
-                if best.get("sim_passed") and ppa_retry:
-                    # PPA-retry deadlock bypass: back up the passing RTL +
-                    # invalidate sim caches, then fall through to REGENERATE.
-                    _ppa_retry_bypass(state, block_name, rtl_path_obj, attempt)
-                elif best.get("sim_passed") and det_gate_retry:
-                    # Deterministic-lint-retry deadlock bypass (same mechanism as
-                    # the PPA bypass): back up + invalidate caches + regenerate.
-                    _gate_retry_bypass(
-                        state, block_name, rtl_path_obj, attempt, kind="lint",
-                    )
-                elif best.get("sim_passed"):
-                    # A block that already passed sim is functionally done. On
-                    # re-entry (e.g. an integration-review restart) REUSE the
-                    # passing RTL+TB and just re-validate -- do NOT regenerate
-                    # the testbench. Force-regenerating a passing block's TB
-                    # produced a worse TB that re-failed, and since best_result
-                    # stays sim_passed=True it re-triggered every restart -> an
-                    # infinite regen/fail loop (observed wedging whole runs).
-                    # The old force-regen behavior is recoverable, opt-in.
-                    import os as _os_regen
-                    force_tb = _os_regen.environ.get(
-                        "CORESMITH_FORCE_TB_REGEN", ""
-                    ).strip().lower() in {"1", "true", "yes", "on"}
-                    log(f"  [RTL] SKIP regeneration -- attempt {best.get('attempt')} "
-                        f"passed sim ({best.get('tests_passed')}/{best.get('tests_total')} tests). "
-                        f"{'Forcing TB regen (opt-in)' if force_tb else 'Reusing passing TB'}.",
-                        YELLOW)
-                    span.set_attribute("skipped_regen", True)
-                    span.set_attribute("force_regen_tb", force_tb)
-                    write_graph_event(_pr(state), "Generate RTL", "graph_node_exit", {
-                        "block": block_name, "attempt": attempt,
-                        "action": "skip_regen (previous sim passed)"
-                        + ("; force TB regen" if force_tb else "; reuse TB"),
-                    })
-                    return {
-                        "rtl_path": str(rtl_path_obj),
-                        "phase": "rtl",
-                        "lint_clean": True,
-                        "force_regen_tb": force_tb,
-                    }
-            except Exception:  # noqa: BLE001
-                pass
+        log(f"  [RTL] Generating Verilog for {block_name}...", YELLOW)
+        rtl_result = await generate_rtl(
+            block, attempt,
+            callbacks=_callbacks(state),
+        )
+        if "error" in rtl_result:
+            log(f"  [RTL] FAILED: {rtl_result['error']}", RED)
+            span.set_attribute("error", rtl_result["error"])
 
-        if (attempt == 1 and rtl_path_obj.exists()
-                and _file_is_fresh(rtl_path_obj, state)
-                and _artifact_up_to_date(rtl_path_obj, state, block_name)):
-            log(f"  [RTL] Using existing (fresh): {block['rtl_target']}", GREEN)
-        else:
-            log(f"  [RTL] Generating Verilog for {block_name}...", YELLOW)
-            rtl_result = await generate_rtl(
-                block, attempt,
-                callbacks=_callbacks(state),
+            write_graph_event(_pr(state), "Generate RTL", "graph_node_exit", {
+                "block": block_name, "attempt": attempt, "error": rtl_result["error"],
+            })
+            block_dir = Path(_pr(state)) / ".coresmith" / "blocks" / block_name
+            block_dir.mkdir(parents=True, exist_ok=True)
+            (block_dir / "previous_error.txt").write_text(
+                f"RTL generation failed: {rtl_result['error']}"
             )
-            if "error" in rtl_result:
-                log(f"  [RTL] FAILED: {rtl_result['error']}", RED)
-                span.set_attribute("error", rtl_result["error"])
-
-                write_graph_event(_pr(state), "Generate RTL", "graph_node_exit", {
-                    "block": block_name, "attempt": attempt, "error": rtl_result["error"],
-                })
-                block_dir = Path(_pr(state)) / ".coresmith" / "blocks" / block_name
-                block_dir.mkdir(parents=True, exist_ok=True)
-                (block_dir / "previous_error.txt").write_text(
-                    f"RTL generation failed: {rtl_result['error']}"
-                )
-                return {"rtl_path": str(rtl_path_obj), "phase": "lint", "lint_clean": False}
-            else:
-                log(f"  [RTL] Generated to {block['rtl_target']}", GREEN)
+            return {"rtl_path": str(rtl_path_obj), "phase": "lint", "lint_clean": False}
+        else:
+            log(f"  [RTL] Generated to {block['rtl_target']}", GREEN)
 
     # --- Lint with local fix loop ---
     rtl_path = str(rtl_path_obj)
@@ -2759,15 +2460,10 @@ async def generate_testbench_node(state: BlockState) -> dict:
         # stale by construction, so it also forces regeneration (the reuse
         # branches below key on freshness, which a rename does not change).
         force_regen = state.get("force_regen_tb", False) or _conform_force_tb
-        if not force_regen and (
-            (state.get("preserve_testbench") and tb_path_obj.exists()) or
-            (attempt == 1 and tb_path_obj.exists()
-             and _file_is_fresh(tb_path_obj, state)
-             and _artifact_up_to_date(tb_path_obj, state, block_name,
-                                      also_newer_than=[Path(rtl_path)]
-                                      if rtl_path else None))
-        ):
-            log(f"  [TB] Using existing (fresh): {block['testbench']}", GREEN)
+        if (not force_regen and state.get("preserve_testbench")
+                and tb_path_obj.exists()):
+            log(f"  [TB] Keeping the testbench (diagnosis: RTL-side fix): "
+                f"{block['testbench']}", GREEN)
         else:
             log("  [TB] Generating cocotb testbench...", YELLOW)
             try:
@@ -6416,12 +6112,18 @@ async def pipeline_complete_node(state: OrchestratorState) -> dict:
                 write_graph_event(pr, "Pipeline Incomplete", "uarch_patch_on_retry", {
                     "blocks": _patched, "pass": rv_attempts + 1,
                 })
+            # WP-10b: re-enter ONLY the failed/missing blocks through the
+            # targeted plan (spec reused unless a uarch_patch re-specced it);
+            # init_tier skips tiers with nothing to redo.
+            _plan = {n: (n not in _patched)
+                     for n in list(failed_names) + list(missing_blocks)}
             return {
                 "pipeline_done": False,
                 "pipeline_aborted": False,
                 "revalidate_pending": True,
                 "revalidate_attempts": rv_attempts + 1,
                 "current_tier_index": 0,
+                "revise_blocks": _plan or None,
             }
 
         if action == "retry":
@@ -7941,8 +7643,8 @@ def _pipeline_complete_route(state: OrchestratorState) -> str:
     it is unit-testable; the graph maps ``"end"`` -> ``END``):
       - ``pipeline_aborted`` -> ``"end"``
       - ``revalidate_pending`` (a bounded incomplete-gate retry) -> ``"init_tier"``
-        (re-run the rtl-phase tiers; failed blocks re-validate their fixed RTL,
-        passers reuse via skip-regen) then back to ``pipeline_complete`` to recount
+        (only the failed/missing blocks re-enter, through the targeted plan)
+        then back to ``pipeline_complete`` to recount
       - otherwise (clean) -> ``"integration_check"``.
     """
     if state.get("pipeline_aborted"):

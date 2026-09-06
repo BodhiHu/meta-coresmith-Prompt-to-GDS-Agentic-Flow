@@ -2753,18 +2753,6 @@ async def test_gate_sim_skipped_when_synthesis_failed(tmp_path, monkeypatch):
     assert pipeline_graph.route_after_synth(out) == "diagnose"
 
 
-class TestDeterministicGateMarkers:
-    def test_memory_tier_gate_is_a_deterministic_gate(self, tmp_path):
-        # The pre-synth memory-tier gate fails the SAME sim-passing RTL every
-        # time, so it must be recognized as deterministic or skip_regen
-        # livelocks on it.
-        (tmp_path / "previous_error.txt").write_text(
-            "UNSYNTHESIZABLE -- pre-synth memory-tier lint (yosys NOT run):\n\n"
-            "MEMORY BELONGS IN AN SRAM MACRO (register-tier storage over the "
-            "SRAM threshold)")
-        assert pipeline_graph._deterministic_gate_retry(tmp_path) is True
-
-
 class TestContainerSubsumeGroups:
     def _item(self, name, area):
         from orchestrator.langgraph.mem_price import RollupItem
