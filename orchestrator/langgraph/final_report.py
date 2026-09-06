@@ -91,6 +91,30 @@ def _read_json(path: Path) -> dict | None:
     return None
 
 
+def _blocks_without_golden(project_root: str, blocks_out: list) -> list:
+    """Names of blocks whose block-diagram entry has neither a python_source
+    golden slice nor an explicit golden exemption (WP-12 hard gate)."""
+    try:
+        bd = json.loads((Path(project_root) / ".coresmith" / "block_diagram.json")
+                        .read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    entries = {str(b.get("name")): b for b in (bd.get("blocks") or [])
+               if isinstance(b, dict) and b.get("name")}
+    missing: list = []
+    for row in blocks_out:
+        name = str(row.get("name") or "")
+        e = entries.get(name)
+        if e is None:
+            continue
+        has_golden = bool(str(e.get("python_source") or "").strip())
+        exempt = bool(e.get("golden_exempt")) and bool(
+            str(e.get("no_golden_reason") or "").strip())
+        if not has_golden and not exempt:
+            missing.append(name)
+    return missing
+
+
 def _carried_forward_defects(project_root: str) -> list:
     """Read the carried-forward-defects ledger (advisory-bypass observations)."""
     try:
@@ -417,6 +441,12 @@ def build_final_report(state: dict, project_root: str, *,
     blocks_total = len(blocks_out)
     blocks_passed = sum(1 for b in blocks_out if b["dv"]["passed"] is True)
 
+    # WP-12 (owner decision): no block signs off without a reference golden.
+    # A block diagram entry must carry a python_source golden slice, or an
+    # explicit exemption (`golden_exempt: true` with `no_golden_reason`) for a
+    # pure storage/IO block whose behaviour the contract fixes completely.
+    blocks_without_golden = _blocks_without_golden(project_root, blocks_out)
+
     # ---- chip level ----------------------------------------------------
     integ = state.get("integration_dv_result") or {}
     valid = state.get("validation_dv_result") or {}
@@ -482,14 +512,20 @@ def build_final_report(state: dict, project_root: str, *,
         or integ_ok is False or valid_ok is False
         or chip_synth_ok is False or die_ok is False
         or bool(state.get("pipeline_aborted"))
+        or bool(blocks_without_golden)
     )
     if (blocks_all_pass and integ_ok is True and valid_ok is True
-            and pipeline_done):
+            and pipeline_done and not blocks_without_golden):
         status = "PASS"
         status_reason = ""
     elif explicit_fail:
         status = "FAIL"
-        if blocks_total > 0 and blocks_passed < blocks_total:
+        if blocks_without_golden:
+            status_reason = (
+                f"{len(blocks_without_golden)} block(s) have no reference "
+                f"golden and no golden exemption: "
+                f"{', '.join(blocks_without_golden)}")
+        elif blocks_total > 0 and blocks_passed < blocks_total:
             status_reason = (f"{blocks_total - blocks_passed} of "
                              f"{blocks_total} blocks did not pass")
         elif integ_ok is False:
@@ -561,6 +597,7 @@ def build_final_report(state: dict, project_root: str, *,
             "integration_dv": _verdict_word(integ_ok, integ_stage["ran"]),
             "validation_dv": _verdict_word(valid_ok, valid_stage["ran"]),
             "carried_forward_defect_count": len(carried_defects),
+            "blocks_without_golden": blocks_without_golden,
             "retired_block_count": len(retired_blocks),
             "throughput_blocks_gated": len(tput_gated),
             "throughput_blocks_failed": tput_failed,

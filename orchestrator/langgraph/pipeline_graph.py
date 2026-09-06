@@ -2375,39 +2375,17 @@ async def generate_testbench_node(state: BlockState) -> dict:
                 YELLOW)
             _conform = {}
     if _conform.get("ran"):
-        _renames = _conform.get("renames") or {}
-        _chans = _conform.get("rename_channels") or {}
-        for _old, _new in _renames.items():
-            log(f"  [CONFORM] renamed {_old} -> {_new} "
-                f"(contract: channel {_chans.get(_old) or '?'})", YELLOW)
-        _tbrep = _conform.get("tb") or {}
-        if _tbrep.get("changed"):
-            log(f"  [CONFORM] {block_name}: rewrote "
-                f"{sum((_tbrep.get('applied') or {}).values())} testbench DUT "
-                f"reference(s) to match "
-                f"(backup at {Path(tb_path_obj).name}.pre_portrepair)", YELLOW)
-        if _renames and _tbrep.get("needs_regen"):
-            _conform_force_tb = True
-            log(f"  [CONFORM] {block_name}: the testbench still mentions "
-                f"{', '.join(_tbrep['residual'])} in a form this stage will "
-                f"NOT rewrite blind (a generated TB drives getattr(dut, "
-                f"<name-string>) and keys its model stimulus with the same "
-                f"strings) -- REGENERATING the testbench against the repaired "
-                f"RTL", YELLOW)
+        _renames: dict = {}
         _record_block_conformance(_pr(state), block_name, _conform)
-        if _renames:
-            log(f"  [CONFORM] {block_name}: repaired {len(_renames)} "
-                f"contract deviation(s) in the generated RTL", YELLOW)
         if _conform.get("ok"):
-            if not _renames:
-                log(f"  [CONFORM] {block_name}: ports match the contract "
-                    f"({_conform.get('checked_edges')} edge(s))", GREEN)
+            log(f"  [CONFORM] {block_name}: ports match the contract "
+                f"({_conform.get('checked_edges')} edge(s))", GREEN)
         else:
             _cf_n = _bump_conformance_failures(_pr(state), block_name)
             for _d in (_conform.get("deviations") or [])[:8]:
                 log(f"  [CONFORM] {block_name}: {_d}", RED)
             log(f"  [CONFORM] {block_name}: RTL does NOT conform to the "
-                f"interface contract after repair "
+                f"interface contract "
                 f"({_conform.get('after_missing')} missing, failure "
                 f"{_cf_n}/{_CONFORMANCE_MAX_FAILURES}) -- FAILING before "
                 f"TB/sim; a deviating block must not reach integration", RED)
@@ -2417,8 +2395,7 @@ async def generate_testbench_node(state: BlockState) -> dict:
                 (_bd / "previous_error.txt").write_text(
                     "DETERMINISTIC CONTRACT-CONFORMANCE FAILURE (no sim was "
                     "run). The RTL does not expose the ports the FROZEN "
-                    "interface contract declares, and the deviation is not one "
-                    "the engine can rename unambiguously. Regenerate the RTL "
+                    "interface contract declares. Regenerate the RTL "
                     "with these EXACT port names:\n\n"
                     + _conform.get("feedback", ""), encoding="utf-8")
             except OSError:

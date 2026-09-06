@@ -613,3 +613,25 @@ class TestReviewFixes:
         assert out["missing"] == ["alpha"]
         assert not (tmp_path / "arch" / "uarch_specs" / "alpha.md").exists()
         assert list((tmp_path / "arch" / "uarch_specs").glob("alpha.md.rejected-*"))
+
+
+class TestGoldenRequiredSignoff:
+    def _bd(self, tmp_path, blocks):
+        (tmp_path / ".coresmith").mkdir(exist_ok=True)
+        (tmp_path / ".coresmith" / "block_diagram.json").write_text(json.dumps({"blocks": blocks}))
+
+    def test_missing_golden_without_exemption_is_listed(self, tmp_path):
+        from orchestrator.langgraph import final_report as fr
+        self._bd(tmp_path, [
+            {"name": "core", "python_source": "inputs/g.py:f"},
+            {"name": "fifo", "python_source": ""},
+            {"name": "rom", "python_source": "", "golden_exempt": True,
+             "no_golden_reason": "contract fixes the ROM contents and latency"},
+            {"name": "bad", "golden_exempt": True},  # exemption without a reason does not count
+        ])
+        rows = [{"name": n} for n in ("core", "fifo", "rom", "bad")]
+        assert fr._blocks_without_golden(str(tmp_path), rows) == ["fifo", "bad"]
+
+    def test_no_diagram_means_no_verdict(self, tmp_path):
+        from orchestrator.langgraph import final_report as fr
+        assert fr._blocks_without_golden(str(tmp_path), [{"name": "x"}]) == []

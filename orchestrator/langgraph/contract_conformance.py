@@ -637,113 +637,6 @@ def check_block(project_root, block_name: str, rtl_path,
     return res
 
 
-def _rename_in_module(text: str, module: str, renames: dict) -> str:
-    """Apply identifier renames inside one module body only."""
-    m = re.search(r"\bmodule\s+" + re.escape(module) + r"\b", text)
-    if not m:
-        return text
-    end = text.find("endmodule", m.start())
-    end = end + len("endmodule") if end != -1 else len(text)
-    body = text[m.start():end]
-    for old, new in renames.items():
-        body = re.sub(r"\b" + re.escape(old) + r"\b", new, body)
-    return text[:m.start()] + body + text[end:]
-
-
-def plan_port_repairs(result: "ConformanceResult") -> dict:
-    """Map each undeclared port to the declared port it is a near-miss for.
-
-    Only unambiguous pairs are returned. A declared name and an existing port
-    match when they agree on the trailing signal name, which covers both
-    observed shapes -- a collapsed duplicate token and a wrong channel prefix --
-    without needing to know which one it is.
-
-    Ambiguity means no repair. Renaming the wrong wire cross-wires a channel,
-    and a silent cross-wire is worse than a loud deviation.
-    """
-    # Tier 3 needs no undeclared ports, so only `missing` gates the pass. The
-    # earlier guard also required undeclared to be non-empty, which meant a
-    # block whose prefix-collapsed ports had already been repaired could never
-    # reach tier 3.
-    if not result.missing:
-        return {}
-
-    pairs: dict = {}
-    for chan, want in result.missing:
-        # Only ports already wearing this channel's prefix are candidates. The
-        # channel is what makes the match unambiguous: `host_read_enable` can
-        # only be repairing a `host_read` signal, even though it shares
-        # `read_enable` with framebuffer_read's.
-        cands = [h for h in result.undeclared if h.startswith(chan + "_")]
-        if len(cands) == 1:
-            pairs.setdefault(cands[0], []).append(want)
-            continue
-        if cands:
-            continue        # ambiguous within the channel -- leave it alone
-        # Tier 3: a port spelling this channel with a DIFFERENT prefix. Match on
-        # the trailing signal name, but only among ports not already bound to
-        # some declared signal -- without that exclusion, three ports on the
-        # real block end in `_req_addr` and the match is a coin flip.
-        sig = want[len(chan) + 1:] if want.startswith(chan + "_") else want
-        if not sig:
-            continue
-        free = [q for q in result.ports
-                if q not in result.accounted and q.endswith("_" + sig)]
-        if len(free) == 1:
-            pairs.setdefault(free[0], []).append(want)
-
-    # A source port wanted by two declared names is ambiguous -- drop it.
-    plan = {have: wants[0] for have, wants in pairs.items() if len(wants) == 1}
-
-    # Last line of defence before RTL is rewritten: never rename a port to
-    # something that is not an identifier. `check_block` already refuses to
-    # derive one, so reaching here means a new derivation path was added --
-    # and a rename is the step that turns a bad name into corrupted source.
-    safe = {}
-    for have, want in plan.items():
-        if is_legal_identifier(want) and is_legal_identifier(have):
-            safe[have] = want
-        else:
-            _logger.error(
-                "REFUSING port repair %r -> %r: not a legal Verilog "
-                "identifier. The RTL is left untouched.", have, want)
-            print(f"[contract-conformance] REFUSING port repair {have!r} -> "
-                  f"{want!r}: not a legal Verilog identifier", file=sys.stderr)
-    return safe
-
-
-def repair_block_ports(project_root, block_name: str, rtl_path,
-                       siblings=(), apply: bool = False) -> dict:
-    """Compute (and optionally apply) port-name repairs for one block.
-
-    Returns ``{"renames": {...}, "before": n, "after": n, "conforms": bool}``.
-    The result is RE-CHECKED after applying, so a repair can never be reported
-    as success unless the checker agrees.
-    """
-    before = check_block(project_root, block_name, rtl_path, siblings=siblings)
-    renames = plan_port_repairs(before)
-    out = {"renames": renames, "before": len(before.missing),
-           "after": len(before.missing), "conforms": before.ok}
-    if not renames or not apply:
-        return out
-
-    text = Path(rtl_path).read_text(errors="ignore")
-    mod = block_name
-    if not re.search(r"\bmodule\s+" + re.escape(block_name) + r"\b", text):
-        mod = Path(rtl_path).stem
-    Path(str(rtl_path) + ".pre_portrepair").write_text(text)
-    Path(rtl_path).write_text(_rename_in_module(text, mod, renames))
-
-    after = check_block(project_root, block_name, rtl_path, siblings=siblings)
-    out["after"] = len(after.missing)
-    out["conforms"] = after.ok
-    return out
-
-
-# ---------------------------------------------------------------------------
-# Production stage: check -> repair -> re-check, wired into the block RTL flow
-# ---------------------------------------------------------------------------
-
 def conformance_gate_enabled() -> bool:
     """Contract-conformance stage in the per-block RTL flow (default ON).
 
@@ -759,65 +652,9 @@ def conformance_gate_enabled() -> bool:
 #: local variable that happens to share a generic signal name (`read_enable` is
 #: not distinctive), and corrupting a testbench to fix a port name trades a
 #: loud failure for a silent one.
-def _tb_ref_patterns(old: str) -> list[tuple[str, str]]:
-    o = re.escape(old)
-    return [
-        (rf"(?<![\w.])dut\.{o}\b", "dut.{new}"),
-        (rf"(?<![\w.])dut\._id\(\s*(['\"]){o}\1", 'dut._id("{new}"'),
-        (rf"getattr\(\s*dut\s*,\s*(['\"]){o}\1", 'getattr(dut, "{new}"'),
-    ]
-
-
-def repair_testbench_refs(tb_path, renames: dict) -> dict:
-    """Rewrite a testbench's DUT port references after a port rename.
-
-    Returns ``{"applied": {old: n_sites}, "residual": [old, ...],
-    "changed": bool, "needs_regen": bool}``. ``residual`` lists renamed ports
-    whose OLD name still appears as a bare word in the testbench after the
-    narrow rewrite -- either a harmless local, or a port reference in a form
-    this function deliberately does not touch (a generated testbench really does
-    drive ``getattr(dut, field)`` over a tuple of port-name STRINGS, and the
-    same strings key its stimulus dict, which is also how it feeds the Amaranth
-    block model; blanket-renaming quoted strings would corrupt the model side).
-
-    So residual references are not guessed at -- they set ``needs_regen``, and
-    the caller regenerates the testbench against the repaired RTL. That is one
-    cheap testbench call instead of a sim failure that costs an RTL attempt,
-    and it never invents a mapping the checker cannot prove.
-    """
-    out: dict = {"applied": {}, "residual": [], "changed": False,
-                 "needs_regen": False}
-    p = Path(tb_path)
-    if not renames or not tb_path or not p.exists():
-        return out
-    try:
-        text = original = p.read_text(errors="ignore")
-    except OSError:
-        return out
-    for old, new in renames.items():
-        n = 0
-        for pat, repl in _tb_ref_patterns(old):
-            text, k = re.subn(pat, repl.format(new=new), text)
-            n += k
-        if n:
-            out["applied"][old] = n
-        if re.search(r"\b" + re.escape(old) + r"\b", text):
-            out["residual"].append(old)
-    out["needs_regen"] = bool(out["residual"])
-    if text != original:
-        try:
-            Path(str(tb_path) + ".pre_portrepair").write_text(original)
-            p.write_text(text)
-            out["changed"] = True
-        except OSError:
-            return {"applied": {}, "residual": sorted(renames),
-                    "changed": False, "needs_regen": True}
-    return out
-
-
 def run_conformance_stage(project_root, block_name: str, rtl_path,
                           siblings=(), tb_path: str = "") -> dict:
-    """Check one block against its contract, repair what is unambiguous, re-check.
+    """Check one block against its contract (report-only since WP-12).
 
     This is what the per-block flow calls. It NEVER decides the block's fate --
     it returns the record and the caller (``generate_testbench_node``) logs it,
@@ -859,24 +696,12 @@ def run_conformance_stage(project_root, block_name: str, rtl_path,
 
     # Repair only the unambiguous renames, then let the checker -- not the
     # repairer -- say whether the block conforms.
-    want_channel = {port: chan for chan, port in before.missing}
-    rep = repair_block_ports(project_root, block_name, rtl_path,
-                             siblings=siblings, apply=True)
-    renames = rep.get("renames") or {}
-    out["renames"] = dict(renames)
-    out["rename_channels"] = {
-        old: want_channel.get(new, "") for old, new in renames.items()
-    }
-
-    after = check_block(project_root, block_name, rtl_path, siblings=siblings)
-    out["after_missing"] = len(after.missing)
-    out["ok"] = after.ok
-    if not after.ok:
-        out["deviations"] = _deviation_lines(after)
-        out["feedback"] = after.as_feedback()
-
-    if renames:
-        out["tb"] = repair_testbench_refs(tb_path, renames)
+    # WP-12: report-only. The engine no longer rewrites RTL or testbench
+    # names on a heuristic; the block fails before simulation with the exact
+    # contract names and the policy fixes the design.
+    out["ok"] = False
+    out["after_missing"] = len(before.missing)
+    out["feedback"] = before.as_feedback()
     return out
 
 

@@ -252,132 +252,24 @@ class TestALeafMustNotAssembleTheDesign:
         assert not r.instantiates
 
 
-class TestDeterministicPortRepair:
-    """The generator will not fix these, measured rather than assumed.
-
-    All four deviating blocks were regenerated with fresh uarch specs and fresh
-    RTL, handed the exact required port name and the explicit "do not shorten a
-    repeated word" rule -- which `contract_lookup` already carried -- and all
-    four came back with the SAME deviations. So the repair belongs in a pass over
-    the emitted RTL, which is safe here only because the checker re-verifies the
-    result afterwards.
-    """
-
-    def test_collapsed_token_is_repaired(self, tmp_path):
-        from orchestrator.langgraph.contract_conformance import repair_block_ports
-        root = _project(tmp_path, [
-            _edge("ap", "store", "host_write",
-                  fields=["wdata"], sideband=["write_enable"])])
-        f = _rtl(tmp_path, "ap", ["host_write_wdata", "host_write_enable"])
-        out = repair_block_ports(root, "ap", f, apply=True)
-        assert out["renames"] == {"host_write_enable": "host_write_write_enable"}
-        assert out["conforms"] is True
-        assert "host_write_write_enable" in f.read_text()
-
-    def test_the_channel_disambiguates_a_shared_signal_name(self, tmp_path):
-        """`host_read_enable` and `framebuffer_read_enable` both end in
-        `read_enable`. Matching on trailing tokens ties and repairs neither;
-        matching within the channel resolves both."""
-        from orchestrator.langgraph.contract_conformance import plan_port_repairs
-        root = _project(tmp_path, [
-            _edge("ap", "s", "host_read", sideband=["read_enable"]),
-            _edge("ap", "f", "framebuffer_read", sideband=["read_enable"]),
-        ])
-        f = _rtl(tmp_path, "ap", ["host_read_enable", "framebuffer_read_enable"])
-        plan = plan_port_repairs(check_block(root, "ap", f))
-        assert plan == {
-            "host_read_enable": "host_read_read_enable",
-            "framebuffer_read_enable": "framebuffer_read_read_enable",
-        }
-
-    def test_a_different_vocabulary_is_repaired_when_unambiguous(self, tmp_path):
-        """`qspi_req_addr` for contract channel `qspi_aperture`'s `req_addr`.
-        It wears no channel prefix, so tiers 1 and 2 cannot see it -- but with
-        exactly one unaccounted candidate the answer is not a guess."""
-        from orchestrator.langgraph.contract_conformance import plan_port_repairs
-        root = _project(tmp_path, [
-            _edge("eng", "ap", "qspi_aperture", sideband=["req_addr"])])
-        f = _rtl(tmp_path, "ap", ["qspi_req_addr"])
-        assert plan_port_repairs(check_block(root, "ap", f)) == {
-            "qspi_req_addr": "qspi_aperture_req_addr"}
-
-    def test_ports_bound_to_another_channel_are_excluded(self, tmp_path):
-        """THE case that makes tier 3 safe, taken from the real block.
-
-        control_status_aperture declares three ports ending in `_req_addr`:
-        framebuffer_read_req_addr, host_read_req_addr and qspi_req_addr. Two are
-        already the accepted implementation of their own channel's req_addr, so
-        only one is a candidate. Without that exclusion this is a coin flip
-        between three channels."""
-        from orchestrator.langgraph.contract_conformance import plan_port_repairs
-        root = _project(tmp_path, [
-            _edge("a", "ap", "framebuffer_read", sideband=["req_addr"]),
-            _edge("b", "ap", "host_read", sideband=["req_addr"]),
-            _edge("c", "ap", "qspi_aperture", sideband=["req_addr"]),
-        ])
-        f = _rtl(tmp_path, "ap", ["framebuffer_read_req_addr",
-                                  "host_read_req_addr", "qspi_req_addr"])
-        assert plan_port_repairs(check_block(root, "ap", f)) == {
-            "qspi_req_addr": "qspi_aperture_req_addr"}
-
-    def test_two_unaccounted_candidates_are_refused(self, tmp_path):
-        """No unique answer means no repair. Renaming the wrong wire
-        cross-wires a channel, which RTL cannot show you."""
-        from orchestrator.langgraph.contract_conformance import plan_port_repairs
-        root = _project(tmp_path, [
-            _edge("eng", "ap", "ch", sideband=["req_addr"])])
-        f = _rtl(tmp_path, "ap", ["alpha_req_addr", "beta_req_addr"])
-        assert plan_port_repairs(check_block(root, "ap", f)) == {}
-
-    def test_nothing_is_applied_without_apply(self, tmp_path):
-        from orchestrator.langgraph.contract_conformance import repair_block_ports
-        root = _project(tmp_path, [
-            _edge("ap", "s", "host_write", sideband=["write_enable"])])
-        f = _rtl(tmp_path, "ap", ["host_write_enable"])
-        before = f.read_text()
-        out = repair_block_ports(root, "ap", f)
-        assert out["renames"] and f.read_text() == before
-
-    def test_a_backup_is_left_behind(self, tmp_path):
-        from orchestrator.langgraph.contract_conformance import repair_block_ports
-        root = _project(tmp_path, [
-            _edge("ap", "s", "host_write", sideband=["write_enable"])])
-        f = _rtl(tmp_path, "ap", ["host_write_enable"])
-        repair_block_ports(root, "ap", f, apply=True)
-        assert Path(str(f) + ".pre_portrepair").exists()
-
-    def test_the_result_is_re_checked_not_assumed(self, tmp_path):
-        """conforms must come from a fresh check after the edit, so a repair
-        that does not actually fix the block cannot report success."""
-        from orchestrator.langgraph.contract_conformance import repair_block_ports
-        root = _project(tmp_path, [
-            _edge("ap", "s", "ch", fields=["data"], sideband=["valid"])])
-        f = _rtl(tmp_path, "ap", ["ch_dat"])          # nothing repairable
-        out = repair_block_ports(root, "ap", f, apply=True)
-        assert out["conforms"] is False
-
-
-# ---------------------------------------------------------------------------
-# The stage, and its wiring into the per-block RTL flow
-# ---------------------------------------------------------------------------
-
 class TestTheStage:
     """``run_conformance_stage`` is what the block flow calls: check, repair
     what is provable, re-check, and carry the testbench along."""
 
-    def test_a_deviation_is_repaired_and_the_channel_reported(self, tmp_path):
+    def test_a_deviation_is_reported_not_repaired(self, tmp_path):
+        # WP-12: report-only -- the RTL is left untouched and the exact
+        # contract name is in the feedback.
         from orchestrator.langgraph.contract_conformance import (
             run_conformance_stage,
         )
-        root = _project(tmp_path, [
-            _edge("ap", "s", "host_write", sideband=["write_enable"])])
-        f = _rtl(tmp_path, "ap", ["host_write_enable"])
+        root = _project(tmp_path, [_edge("ap", "peer", "host_write", fields=["write_enable"])])
+        f = _rtl(tmp_path, "ap", ["clk", "host_write_enable"])
+        before = f.read_text()
         rec = run_conformance_stage(root, "ap", f)
-        assert rec["ran"] and rec["ok"]
-        assert rec["renames"] == {"host_write_enable": "host_write_write_enable"}
-        assert rec["rename_channels"]["host_write_enable"] == "host_write"
-        assert rec["before_missing"] == 1 and rec["after_missing"] == 0
-        assert "host_write_write_enable" in f.read_text()
+        assert rec["ran"] and rec["ok"] is False
+        assert rec["renames"] == {}
+        assert "host_write_write_enable" in rec["feedback"]
+        assert f.read_text() == before
 
     def test_no_contract_edge_means_not_run_not_pass(self, tmp_path):
         """A block no edge names has no evidence either way. The stage must
@@ -401,42 +293,7 @@ class TestTheStage:
         assert "ch_data" in rec["feedback"] and "ch_valid" in rec["feedback"]
         assert rec["deviations"]
 
-    def test_testbench_dut_references_follow_the_rename(self, tmp_path):
-        from orchestrator.langgraph.contract_conformance import (
-            run_conformance_stage,
-        )
-        root = _project(tmp_path, [
-            _edge("ap", "s", "host_write", sideband=["write_enable"])])
-        f = _rtl(tmp_path, "ap", ["host_write_enable"])
-        tb = tmp_path / "test_ap.py"
-        tb.write_text("async def t(dut):\n"
-                      "    dut.host_write_enable.value = 1\n"
-                      "    return int(dut.host_write_enable.value)\n")
-        rec = run_conformance_stage(root, "ap", f, tb_path=str(tb))
-        assert "dut.host_write_write_enable" in tb.read_text()
-        assert "dut.host_write_enable" not in tb.read_text()
-        assert rec["tb"]["changed"] and not rec["tb"]["needs_regen"]
-        assert Path(str(tb) + ".pre_portrepair").exists()
 
-    def test_a_name_string_reference_asks_for_regeneration(self, tmp_path):
-        """Generated testbenches really do drive ``getattr(dut, field)`` over a
-        tuple of port-name strings -- and key their MODEL stimulus with the same
-        strings. Rewriting those blind would corrupt the model side, so the
-        stage asks for a regeneration instead of guessing."""
-        from orchestrator.langgraph.contract_conformance import (
-            run_conformance_stage,
-        )
-        root = _project(tmp_path, [
-            _edge("ap", "s", "host_write", sideband=["write_enable"])])
-        f = _rtl(tmp_path, "ap", ["host_write_enable"])
-        tb = tmp_path / "test_ap.py"
-        tb.write_text('FIELDS = ("host_write_enable",)\n'
-                      'def t(dut):\n'
-                      '    for k in FIELDS:\n'
-                      '        getattr(dut, k).value = 0\n')
-        rec = run_conformance_stage(root, "ap", f, tb_path=str(tb))
-        assert rec["tb"]["needs_regen"] is True
-        assert rec["tb"]["residual"] == ["host_write_enable"]
 
     def test_an_unreadable_rtl_is_not_a_verdict(self, tmp_path):
         from orchestrator.langgraph.contract_conformance import (
@@ -746,12 +603,3 @@ class TestAnUnreducibleNameIsDroppedLoudly:
         assert ports == {"s_ch_data"}
         assert "addr[3:0]" in caplog.text
 
-    def test_a_repair_to_an_illegal_name_is_refused(self):
-        from orchestrator.langgraph.contract_conformance import (
-            ConformanceResult,
-            plan_port_repairs,
-        )
-        res = ConformanceResult(block="b")
-        res.missing = [("s_ch", "s_ch_req/addr")]
-        res.undeclared = ["s_ch_reqaddr"]
-        assert plan_port_repairs(res) == {}
