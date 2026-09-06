@@ -2866,7 +2866,8 @@ class TestFeasibilityOverrideScope:
             str(tmp_path), "blk", "area") is False
 
     # -- the bleed itself --------------------------------------------------
-    def test_interface_only_override_does_not_defer_mem_price(self, tmp_path):
+    def test_interface_only_override_does_not_defer_mem_price(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CORESMITH_MEM_PRICE_MAX_REVISE", "3")
         bdir = self._block(tmp_path)
         self._marker(bdir, gate="uarch_feasibility", categories=["interface"])
         assert pipeline_graph._feas_override_covers(
@@ -2890,7 +2891,8 @@ class TestFeasibilityOverrideScope:
         assert self._deferred(tmp_path) is True
 
     # -- expiry ------------------------------------------------------------
-    def test_contract_sha1_mismatch_expires_the_override(self, tmp_path):
+    def test_contract_sha1_mismatch_expires_the_override(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CORESMITH_MEM_PRICE_MAX_REVISE", "3")
         bdir = self._block(tmp_path)
         self._write_contract(tmp_path)
         self._marker(bdir, gate="uarch_feasibility", categories=["area"],

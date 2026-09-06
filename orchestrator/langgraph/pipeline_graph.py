@@ -1279,11 +1279,14 @@ async def generate_uarch_spec_node(state: BlockState) -> dict:
 # ---------------------------------------------------------------------------
 
 def _mem_price_max_revise() -> int:
-    """CORESMITH_MEM_PRICE_MAX_REVISE (default 3): bound the spec re-spec loop."""
+    """CORESMITH_MEM_PRICE_MAX_REVISE (default 0 since WP-10c): the mem-price
+    verdict is advisory -- priced, recorded and carried to the integration review
+    summary, but it no longer re-specs a block on its own. Set >0 to restore
+    the bounded auto re-spec loop."""
     try:
-        return max(0, int(os.environ.get("CORESMITH_MEM_PRICE_MAX_REVISE", "3") or "3"))
+        return max(0, int(os.environ.get("CORESMITH_MEM_PRICE_MAX_REVISE", "0") or "0"))
     except ValueError:
-        return 3
+        return 0
 
 
 def _ers_parameters_block_present(project_root: str) -> bool:
@@ -5042,12 +5045,9 @@ route_after_tb.__edge_labels__ = {
 def route_after_synth(state: BlockState) -> str:
     """Route after synthesis: SUCCESS -> block_done, FAIL -> diagnose.
 
-    When the PPA gate is enabled (``CORESMITH_PPA_GATE=1``), a block that
-    *compiled* but failed the deterministic PPA budget check
-    (``ppa_ok is False``) is also routed to diagnose, so the synth_fixer can
-    restructure it (e.g. a memory that should be an SRAM macro synthesized
-    to flops). Default-off preserves the legacy "compiles == done" behavior.
-    ``ppa_ok`` of None (not computed) never blocks.
+    The PPA budget verdict (``ppa_ok``) is advisory since WP-10c: it is
+    measured and reported but never routes a compiled, DV-passing block back
+    to rework.
 
     The post-synthesis GATE-LEVEL SIM gate (``CORESMITH_GATE_SIM``, default ON)
     routes ``gate_sim_ok is False`` to diagnose: the netlist that carries the
@@ -5060,9 +5060,8 @@ def route_after_synth(state: BlockState) -> str:
         return "diagnose"
     if state.get("gate_sim_ok") is False:
         return "diagnose"
-    from orchestrator.langgraph.ppa_check import ppa_gate_enabled
-    if ppa_gate_enabled() and state.get("ppa_ok") is False:
-        return "diagnose"
+    # WP-10c: the PPA budget verdict (``ppa_ok``) is ADVISORY -- measured,
+    # recorded in ppa_history and the scorecard, never a reason to rework.
     return "block_done"
 
 

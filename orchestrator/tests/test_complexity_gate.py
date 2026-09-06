@@ -104,13 +104,13 @@ class TestComplexityGateNotBypassedByQuestions:
 
     def test_clean_diagram_routes_to_complexity_gate(self, monkeypatch):
         from orchestrator.langgraph import architecture_graph as ag
-        monkeypatch.delenv("CORESMITH_COMPLEXITY_GATE", raising=False)
+        monkeypatch.setenv("CORESMITH_COMPLEXITY_GATE", "1")
         state = {"block_diagram": {"blocks": [{"name": "a"}], "questions": []}}
         assert ag.review_diagram(state) == "Complexity Review"
 
     def test_questioned_then_continue_STILL_runs_gate(self, monkeypatch):
         from orchestrator.langgraph import architecture_graph as ag
-        monkeypatch.delenv("CORESMITH_COMPLEXITY_GATE", raising=False)
+        monkeypatch.setenv("CORESMITH_COMPLEXITY_GATE", "1")
         # the C17 regression: 'continue' after a diagram question must NOT skip
         # straight to Interface Definition.
         for action in ("continue", "accept", "ok"):

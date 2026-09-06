@@ -305,9 +305,9 @@ class TestReviewDiagram:
         assert review_diagram(state) == "Interface Definition"
 
     def test_clean_default_goes_to_complexity_review(self, monkeypatch):
-        # Default (both gates ON): the complexity gate runs first on a clean
-        # diagram (A-Fix 3b).
-        monkeypatch.delenv("CORESMITH_COMPLEXITY_GATE", raising=False)
+        # With the complexity gate opted in (WP-10c: default OFF), it runs first
+        # on a clean diagram (A-Fix 3b).
+        monkeypatch.setenv("CORESMITH_COMPLEXITY_GATE", "1")
         state = {"block_diagram": {"blocks": [{"name": "a"}], "questions": []}}
         assert review_diagram(state) == "Complexity Review"
 
@@ -328,7 +328,7 @@ class TestRouteAfterDiagramEscalation:
         # gate runs first. Hard-wiring 'Interface Definition' here used to let
         # any design whose diagram asked a question skip the
         # complexity/decomposition gate entirely.
-        monkeypatch.delenv("CORESMITH_COMPLEXITY_GATE", raising=False)
+        monkeypatch.setenv("CORESMITH_COMPLEXITY_GATE", "1")
         state = {"human_response": {"action": "continue"}}
         assert route_after_diagram_escalation(state) == "Complexity Review"
 

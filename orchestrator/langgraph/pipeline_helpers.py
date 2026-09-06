@@ -2110,16 +2110,15 @@ EXTRA_ARGS += --build-jobs {_build_jobs}
                     "applicable": False, "passed": None,
                     "reason": "throughput gate plumbing error",
                 }
+            # WP-10c: the measured-throughput verdict is ADVISORY. It is
+            # recorded (``throughput``) and its report is appended to the log,
+            # but a functional DV pass is never demoted for cycles/op.
             if (passed and isinstance(throughput_record, dict)
                     and throughput_record.get("applicable")
                     and throughput_record.get("passed") is False):
-                passed = False
-                throughput_gate_failed = True
-                throughput_needs_tb = bool(
-                    throughput_record.get("artifact_missing")
-                )
                 _trep = throughput_record.get("report", "") or ""
-                output = _trep + "\n\n" + output
+                output = ("THROUGHPUT ADVISORY (not a DV failure):\n"
+                          + _trep + "\n\n" + output)
                 try:
                     if log_path:
                         with open(log_path, "a", encoding="utf-8") as _lf:

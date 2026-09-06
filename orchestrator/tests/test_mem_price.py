@@ -562,6 +562,7 @@ class TestGateVerdictHelper:
 
     def test_oversized_store_revises_with_physics(self, tmp_path, monkeypatch):
         pg = self._pg(monkeypatch)
+        monkeypatch.setenv("CORESMITH_MEM_PRICE_MAX_REVISE", "3")
         self._spec(tmp_path, "recon",
                    "area_budget_um2 = 250000\nsram_budget = 1.9 Mbit\n"
                    "# MEM recon_luma: 8x235520 ports=1rw1r impl=sram "
@@ -675,6 +676,7 @@ class TestReviseLoopConvergence:
 
     def test_revise_feedback_is_directive_rich(self, tmp_path, monkeypatch):
         pg = self._pg(monkeypatch)
+        monkeypatch.setenv("CORESMITH_MEM_PRICE_MAX_REVISE", "3")
         self._spec(tmp_path, "recon",
                    "area_budget_um2 = 250000\n"
                    "# MEM r: 8x235520 ports=1rw1r impl=sram justification=x\n")
@@ -689,6 +691,7 @@ class TestReviseLoopConvergence:
 
     def test_trajectory_worse_across_rounds(self, tmp_path, monkeypatch):
         pg = self._pg(monkeypatch)
+        monkeypatch.setenv("CORESMITH_MEM_PRICE_MAX_REVISE", "3")
         # round 1: 1 store, over budget
         self._spec(tmp_path, "irdc",
                    "area_budget_um2 = 250000\n"

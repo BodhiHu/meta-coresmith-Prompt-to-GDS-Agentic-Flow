@@ -2765,11 +2765,12 @@ route_after_output_contract_review.__edge_labels__ = {
 # ---------------------------------------------------------------------------
 
 def _complexity_gate_enabled() -> bool:
-    """Opt-in (default ON) gate for the per-block complexity/tractability
-    review. Set CORESMITH_COMPLEXITY_GATE=0 to disable (restores the direct
-    clean-diagram route to the output-contract / interface stages)."""
+    """Opt-in (default OFF since WP-10c) gate for the per-block
+    complexity/tractability review; the score stays available as advice via
+    `coresmith complexity`. Set CORESMITH_COMPLEXITY_GATE=1 to route a
+    clean diagram through the re-decomposition loop."""
     import os as _os
-    return (_os.environ.get("CORESMITH_COMPLEXITY_GATE", "1") or "1") != "0"
+    return (_os.environ.get("CORESMITH_COMPLEXITY_GATE", "0") or "0") == "1"
 
 
 def _complexity_max_redecompose() -> int:

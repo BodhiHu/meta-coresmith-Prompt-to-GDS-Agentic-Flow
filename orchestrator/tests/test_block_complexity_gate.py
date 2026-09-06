@@ -116,8 +116,11 @@ def _state(project_root, blocks, **kw):
 # Env gate helpers
 # ---------------------------------------------------------------------------
 
-def test_gate_default_on(monkeypatch):
+def test_gate_default_off(monkeypatch):
+    # WP-10c: advisory by default; CORESMITH_COMPLEXITY_GATE=1 opts in.
     monkeypatch.delenv("CORESMITH_COMPLEXITY_GATE", raising=False)
+    assert ag._complexity_gate_enabled() is False
+    monkeypatch.setenv("CORESMITH_COMPLEXITY_GATE", "1")
     assert ag._complexity_gate_enabled() is True
 
 
@@ -140,7 +143,7 @@ def test_max_redecompose_default_and_override(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_clean_routes_to_complexity_review(monkeypatch):
-    monkeypatch.delenv("CORESMITH_COMPLEXITY_GATE", raising=False)
+    monkeypatch.setenv("CORESMITH_COMPLEXITY_GATE", "1")
     clean = {"block_diagram": {"questions": [], "blocks": [{"name": "a"}]}}
     assert ag.review_diagram(clean) == "Complexity Review"
 
