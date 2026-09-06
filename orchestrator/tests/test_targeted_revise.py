@@ -635,3 +635,16 @@ class TestGoldenRequiredSignoff:
     def test_no_diagram_means_no_verdict(self, tmp_path):
         from orchestrator.langgraph import final_report as fr
         assert fr._blocks_without_golden(str(tmp_path), [{"name": "x"}]) == []
+
+
+class TestPrdAnswersFromFeedback:
+    def test_feedback_json_counts_as_answers(self):
+        # WP-14: the chip lead used to be told to answer in `feedback`; the PRD
+        # node only read `answers`, so every answer was dropped (F-2 looped 8x).
+        import json as _json
+        from orchestrator.langgraph import architecture_graph as ag
+        src = open(ag.__file__).read()
+        assert 'human_response.get("feedback")' in src and "_parsed" in src
+        # prompt now names the field the node reads
+        prompt = open(ag.__file__.replace("langgraph/architecture_graph.py", "langchain/prompts/chip_lead.md")).read()
+        assert "`answers` field" in prompt

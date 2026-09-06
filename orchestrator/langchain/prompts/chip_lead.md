@@ -161,10 +161,14 @@ read it FIRST — it is the operator's written policy (PDK, memory policy,
 budgets, throughput targets, acceptance matrix). Derive every answer from it
 plus the requirements; never invent policy that contradicts it.
 
-- `prd_questions` (`continue`/`abort`): answer every question as a JSON
-  object in `feedback` keyed by question id, from the standing rulings and
-  requirements. Questions the rulings don't cover: choose the conservative
-  engineering default and state it as such.
+- `prd_questions` (`continue`/`abort`): answer every question in an
+  `answers` field -- a JSON object keyed by question id -- from the standing
+  rulings and requirements, e.g. `{"action": "continue", "answers":
+  {"target_technology": "SKY130A, sky130_fd_sc_hd, tt corner", ...}}`.
+  The PRD stage reads ONLY `answers`; answers written into `reasoning` or
+  `feedback` are discarded and the same questions come back. Questions the
+  rulings don't cover: choose the conservative engineering default and say
+  so in the answer text.
 - `architecture_review_needed` (`retry`/`accept`/`feedback`/`continue`/`abort`):
   * warnings only → `accept` with a one-line rationale.
   * mechanical field errors (e.g. `min_buffer_depth_beats>=2; got 1`): do

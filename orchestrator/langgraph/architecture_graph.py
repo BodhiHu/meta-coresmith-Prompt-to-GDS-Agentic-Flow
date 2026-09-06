@@ -694,6 +694,20 @@ async def gather_requirements_node(state: ArchGraphState) -> dict:
         previous_questions = state.get("prd_questions")
         if has_hr:
             user_answers = human_response.get("answers")
+            # WP-14: an outer agent that put its per-question answers in
+            # `feedback` (as a JSON object, or a JSON string) is answering,
+            # not commenting -- accept it instead of regenerating questions.
+            if not user_answers:
+                _fb = human_response.get("feedback")
+                if isinstance(_fb, dict) and _fb:
+                    user_answers = dict(_fb)
+                elif isinstance(_fb, str) and _fb.strip().startswith("{"):
+                    try:
+                        _parsed = json.loads(_fb)
+                        if isinstance(_parsed, dict) and _parsed:
+                            user_answers = _parsed
+                    except ValueError:
+                        pass
             if (
                 not user_answers
                 and human_response.get("action") == "feedback"
