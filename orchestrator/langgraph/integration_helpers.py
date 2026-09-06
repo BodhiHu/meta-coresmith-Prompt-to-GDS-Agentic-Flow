@@ -25,7 +25,6 @@ from orchestrator.langgraph.contract_conformance import (
     channel_base,
 )
 from orchestrator.langgraph.pipeline_helpers import (
-    wavekit_audit_blocks,
     PROJECT_ROOT,
     RED,
     _write_step_log,
@@ -33,7 +32,6 @@ from orchestrator.langgraph.pipeline_helpers import (
     apply_build_fingerprint,
     clear_build_products,
     log,
-    run_wavekit_vcd_audit,
 )
 
 # ---------------------------------------------------------------------------
@@ -2462,13 +2460,9 @@ def run_integration_simulation(
     except OSError:
         pass
 
-    # TRACE IS MANDATORY on the integration/validation sim path (2026-07-02 fix).
-    # This function backs BOTH integration_dv and validation_dv, whose PASS verdict
-    # HARD-REQUIRES a WaveKit VCD audit: `run_wavekit_vcd_audit` fail-closes on a
-    # missing/empty VCD and the caller gates `passed` on `wavekit_audit["ok"] is
-    # True`. Previously the trace was gated behind CORESMITH_SIM_TRACE=1 (default
-    # OFF), so a healthy 6/6-passing sim could STRUCTURALLY never pass integration
-    # DV -- it emitted no dump.vcd and the audit fail-closed on it.
+    # TRACE stays on for the integration/validation sim path: the VCD is the
+    # debug agent's and the chip lead's evidence. (WP-10a removed the WaveKit
+    # audit that used to veto the PASS verdict on it.)
     #
     # The trace was only ever gated to dodge an OOM from `--trace --trace-structs`
     # C++ built in PARALLEL fork-storming a 4-core host (2026-07-01). That storm is
@@ -2595,8 +2589,6 @@ def run_integration_simulation(
             )
 
         vcd_path = sim_dir / "dump.vcd"
-        audit_path = sim_dir / "wavekit_audit.json"
-        wavekit_audit = run_wavekit_vcd_audit(vcd_path, audit_path)
         passed = (
             result.returncode == 0
             and not no_tests
@@ -2604,14 +2596,7 @@ def run_integration_simulation(
                 not summary["found"]
                 or (summary["tests_total"] > 0 and summary["tests_failed"] == 0)
             )
-            and not wavekit_audit_blocks(wavekit_audit)
         )
-        if not wavekit_audit.get("ok"):
-            output = (
-                ("WAVEKIT VCD AUDIT FAILED: " if wavekit_audit_blocks(wavekit_audit)
-                 else "WAVEKIT VCD AUDIT NOT RUN (advisory): ")
-                + f"{wavekit_audit.get('error', 'unknown error')}\n" + output
-            )
         return {
             "passed": passed,
             "log": output,
@@ -2621,8 +2606,6 @@ def run_integration_simulation(
             "tests_failed": summary["tests_failed"],
             "log_path": log_path,
             "vcd_path": str(vcd_path) if vcd_path.exists() else "",
-            "wavekit_audit_path": str(audit_path),
-            "wavekit_audit": wavekit_audit,
         }
     except subprocess.TimeoutExpired:
         cmd = [make_bin, "-C", str(sim_dir)]

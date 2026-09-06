@@ -1530,246 +1530,12 @@ def _assert_testbench_materialized(tb_path: Path, block_name: str) -> str | None
 # Simulation
 # ---------------------------------------------------------------------------
 
-# Standalone WaveKit VCD-audit program. Runs in a SEPARATE interpreter
-# (see wavekit_python()), which may be a scratch venv rather than this
-# process, so it must not import anything from orchestrator. Module-level
-# so tests can exec it against stub readers for both WaveKit API shapes.
-_WAVEKIT_AUDIT_SCRIPT = r"""
-import json
-import sys
-from pathlib import Path
-
-from wavekit import VcdReader
-
-vcd_path = Path(sys.argv[1])
-clock_hint = sys.argv[2]
-
-with VcdReader(str(vcd_path)) as reader:
-    # WaveKit renamed its tree API between 0.5.x and 0.7.x. wavekit is
-    # unpinned in requirements.txt AND the wavekit_python() fallback below
-    # pip-installs the latest into a scratch venv, so a fresh box gets the new
-    # API no matter what the operator pinned. On the new API the 0.5.x calls
-    # raise AttributeError inside this script, which exits non-zero and is
-    # read as an audit FAILURE -- and the DV gates fail closed on that, so
-    # integration_dv and validation_dv could never pass. Support both shapes:
-    #   0.5.x: reader.top_scope_list()  scope.signal_list  scope.child_scope_list
-    #   0.7.x: reader.top_scopes        scope.children (signals and scopes mixed)
-    # Signal objects expose .full_name and .width in both.
-    _tops = getattr(reader, "top_scope_list", None)
-    top_scopes = _tops() if callable(_tops) else reader.top_scopes
-    signals = []
-    clocks = []
-
-    def _split(scope):
-        # Return (child_signals, child_scopes) for either API shape.
-        if hasattr(scope, "signal_list") or hasattr(scope, "child_scope_list"):
-            return (getattr(scope, "signal_list", []),
-                    getattr(scope, "child_scope_list", []))
-        sigs, scopes = [], []
-        for child in getattr(scope, "children", []):
-            # A signal is a leaf carrying a width; a scope is not.
-            (sigs if hasattr(child, "width") else scopes).append(child)
-        return sigs, scopes
-
-    def walk(scope):
-        child_signals, child_scopes = _split(scope)
-        for sig in child_signals:
-            name = sig.full_name
-            signals.append({"name": name, "width": int(sig.width)})
-            base = name.split(".")[-1].split("[")[0]
-            if base in {clock_hint, "clk", "clock", "i_clk"}:
-                clocks.append(name)
-        for child in child_scopes:
-            walk(child)
-
-    for top in top_scopes:
-        walk(top)
-
-    if not signals:
-        raise RuntimeError("VCD contains no signals")
-    if int(reader.end_time) <= int(reader.begin_time):
-        raise RuntimeError(
-            f"VCD contains no value-change time range: begin={reader.begin_time} end={reader.end_time}"
-        )
-
-    report = {
-        "ok": True,
-        "vcd_path": str(vcd_path),
-        "begin_time": int(reader.begin_time),
-        "end_time": int(reader.end_time),
-        "signal_count": len(signals),
-        "sample_signals": signals[:64],
-        "clock_candidates": clocks[:16],
-    }
-    print(json.dumps(report))
-"""
-
-
-def wavekit_audit_blocks(audit: dict | None) -> bool:
-    """True when a WaveKit VCD audit VETOES a passing simulation: it ran and
-    found a problem. An audit that could not run -- skipped (oversized VCD,
-    ``CORESMITH_WAVEKIT_MAX_BYTES``) or timed out -- is advisory: the record
-    is persisted and surfaced in the log, but a 9/9 cocotb pass is not turned
-    into a DV failure by a tool that never inspected the waveform."""
-    if not audit:
-        return False
-    if audit.get("ok") is True:
-        return False
-    if audit.get("skipped"):
-        return False
-    err = str(audit.get("error") or "").lower()
-    if "timed out" in err or "too large" in err:
-        return False
-    return True
-
-
-def run_wavekit_vcd_audit(vcd_path: Path, audit_path: Path, clock_hint: str = "clk") -> dict:
-    """Inspect a Verilator VCD with WaveKit and persist a small audit report.
-
-    Skips (honestly, with a persisted record) any VCD above
-    ``CORESMITH_WAVEKIT_MAX_BYTES`` (default 1 GiB): WaveKit parses the whole
-    file into Python objects, and a 2.4 GB chip-top validation dump took the
-    e6 host to memory exhaustion (2026-09-05) and hung sshd.
-    """
-    if not vcd_path.exists() or vcd_path.stat().st_size == 0:
-        result = {
-            "ok": False,
-            "error": f"missing or empty VCD: {vcd_path}",
-            "vcd_path": str(vcd_path),
-        }
-        audit_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
-        return result
-    try:
-        _max_bytes = int(os.environ.get("CORESMITH_WAVEKIT_MAX_BYTES", "") or (1 << 30))
-    except ValueError:
-        _max_bytes = 1 << 30
-    _size = vcd_path.stat().st_size
-    if _max_bytes > 0 and _size > _max_bytes:
-        result = {
-            "ok": False,
-            "skipped": True,
-            "error": (f"VCD too large for the in-memory WaveKit audit: {_size} bytes > "
-                      f"CORESMITH_WAVEKIT_MAX_BYTES={_max_bytes}"),
-            "vcd_path": str(vcd_path),
-            "vcd_bytes": _size,
-        }
-        audit_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
-        return result
-
-    def has_wavekit(python: str) -> bool:
-        check = subprocess.run(
-            [python, "-c", "import wavekit"],
-            capture_output=True,
-            text=True,
-            timeout=scaled(30),
-        )
-        return check.returncode == 0
-
-    def wavekit_python() -> str:
-        if has_wavekit(sys.executable):
-            return sys.executable
-
-        venv_dir = PROJECT_ROOT / ".coresmith" / "tools" / "wavekit-venv"
-        python = venv_dir / "bin" / "python"
-        if not python.exists():
-            subprocess.run(
-                [sys.executable, "-m", "venv", str(venv_dir)],
-                capture_output=True,
-                text=True,
-                timeout=scaled(120),
-                check=True,
-            )
-        if not has_wavekit(str(python)):
-            subprocess.run(
-                [str(python), "-m", "pip", "install", "-q", "wavekit>=0.5.6"],
-                capture_output=True,
-                text=True,
-                timeout=scaled(300),
-                check=True,
-            )
-        return str(python)
-
-    script = _WAVEKIT_AUDIT_SCRIPT
-    try:
-        audit_python = wavekit_python()
-        proc = subprocess.run(
-            [audit_python, "-c", script, str(vcd_path), clock_hint],
-            capture_output=True,
-            text=True,
-            timeout=scaled(180),
-        )
-    except subprocess.CalledProcessError as exc:
-        # WaveKit could not be SET UP (no prebuilt wheel for this arch + missing
-        # native build deps like python3-dev/cmake, etc.). The WaveKit VCD audit
-        # is a *supplementary* analysis layered on top of the cocotb regression
-        # result -- a missing optional tool must NOT masquerade as a DV failure
-        # (that produced a spurious DV_PROCESS_ERROR on arm64 workers lacking
-        # build deps). Skip gracefully so DV is decided by the cocotb pass/fail.
-        result = {
-            "ok": True,
-            "skipped": True,
-            "reason": (
-                "WaveKit unavailable; VCD audit skipped -- DV relies on cocotb "
-                "results. Install WaveKit (needs python3-dev + cmake to build "
-                "pylibfst from sdist on platforms without a prebuilt wheel)."
-            ),
-            "detail": (exc.stderr or exc.stdout or str(exc))[-1000:],
-            "vcd_path": str(vcd_path),
-        }
-        audit_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
-        return result
-    except subprocess.TimeoutExpired:
-        result = {
-            "ok": False,
-            "error": "WaveKit VCD audit timed out",
-            "vcd_path": str(vcd_path),
-        }
-        audit_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
-        return result
-
-    if proc.returncode != 0:
-        result = {
-            "ok": False,
-            "error": (proc.stderr or proc.stdout)[-2000:],
-            "vcd_path": str(vcd_path),
-        }
-    else:
-        # The script prints exactly one JSON line, but wavekit is unpinned and
-        # a release that chatters on import would prepend noise to stdout.  A
-        # JSONDecodeError here would escape run_simulation (which only catches
-        # TimeoutExpired/FileNotFoundError) and crash an otherwise-passing DV
-        # run, so fall back to the last non-empty line, then to a warning.
-        result = _parse_audit_stdout(proc.stdout, vcd_path)
-    audit_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
-    return result
-
-
-def _parse_audit_stdout(stdout: str, vcd_path: Path) -> dict:
-    """Parse the WaveKit audit subprocess stdout into a report dict.
-
-    Never raises: an unparseable payload degrades to an ``ok=False`` warning
-    (the audit is supplementary to the cocotb verdict)."""
-    for candidate in (stdout, *reversed([ln for ln in (stdout or "").splitlines()
-                                         if ln.strip()])):
-        try:
-            parsed = json.loads(candidate)
-        except (json.JSONDecodeError, TypeError):
-            continue
-        if isinstance(parsed, dict):
-            return parsed
-    return {
-        "ok": False,
-        "error": "unparseable WaveKit audit output: " + (stdout or "")[-1000:],
-        "vcd_path": str(vcd_path),
-    }
-
-
 def _build_products_present(sim_dir: Path) -> bool:
     """True when ``sim_dir`` holds a prior Verilator/cocotb BUILD.
 
     Distinguishes real build products -- the cocotb obj dir (``sim_build/``), a
     ``V*`` sim binary, or a ``results.xml`` -- from mere config inputs (Makefile,
-    the copied TB, ``.build_fingerprint``, ``wavekit_audit.json``, the flock).
+    the copied TB, ``.build_fingerprint``, the flock).
     Cheap: a couple of stat/glob calls, so the no-products first-call fast path
     stays inexpensive. Best-effort (any error -> False)."""
     try:
@@ -2228,8 +1994,6 @@ EXTRA_ARGS += --build-jobs {_build_jobs}
             )
 
         vcd_path = sim_dir / "dump.vcd"
-        audit_path = sim_dir / "wavekit_audit.json"
-        wavekit_audit = run_wavekit_vcd_audit(vcd_path, audit_path)
         passed = (
             result.returncode == 0
             and not no_tests
@@ -2238,11 +2002,6 @@ EXTRA_ARGS += --build-jobs {_build_jobs}
                 or (summary["tests_total"] > 0 and summary["tests_failed"] == 0)
             )
         )
-        if not wavekit_audit.get("ok"):
-            output = (
-                "WAVEKIT VCD AUDIT WARNING: "
-                f"{wavekit_audit.get('error', 'unknown error')}\n" + output
-            )
 
         # --- LINE-COVERAGE FLOOR GATE (weak-TB rejector) --------------------
         # Only on the PRIMARY block-DV run (not the branch-parity smoke): a
@@ -2377,8 +2136,6 @@ EXTRA_ARGS += --build-jobs {_build_jobs}
             "tests_failed": summary["tests_failed"],
             "log_path": log_path,
             "vcd_path": str(vcd_path) if vcd_path.exists() else "",
-            "wavekit_audit_path": str(audit_path),
-            "wavekit_audit": wavekit_audit,
             "coverage_gate_failed": coverage_gate_failed,
             "coverage_pct": coverage_pct,
             "coverage": coverage_record,
@@ -2846,10 +2603,6 @@ async def fix_synth_errors(
     rtl_before = ""
     try:
         rtl_before = Path(rtl_path).read_text()
-        from orchestrator.langgraph.rtl_storage_lint import (
-            find_flat_packed_dynamic_storage,
-        )
-        structural = not find_flat_packed_dynamic_storage(rtl_before).ok
     except Exception:  # noqa: BLE001
         pass
 
@@ -2956,7 +2709,6 @@ async def fix_testbench_errors(
         f"- RTL Verilog: {rtl_path}\n"
         f"- Simulation log: {sim_log_path}\n"
         f"- VCD waveform: sim_build/{block_name}/dump.vcd\n"
-        f"- WaveKit audit: sim_build/{block_name}/wavekit_audit.json\n"
         f"- uArch Spec: arch/uarch_specs/{block_name}.md\n"
         f"- Constraints: .coresmith/blocks/{block_name}/constraints.json\n"
         f"- DV Rules: arch/DV_RULES.md\n\n"

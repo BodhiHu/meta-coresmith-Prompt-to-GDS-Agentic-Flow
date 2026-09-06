@@ -167,12 +167,12 @@ NOT at the maximum itself.
 - If the design declares NO dimensional maxima, no max-geometry case or marker
   is needed.
 
-VCD/WAVEKIT AUDIT -- MANDATORY:
+VCD WAVEFORM -- MANDATORY:
 - The integration DV node runs Verilator with tracing enabled, expects
-  `sim_build/integration/dump.vcd`, and audits it with WaveKit before the
+  `sim_build/integration/dump.vcd`, which the debug agent and chip lead read before the
   node can pass.
 - The testbench must drive enough reset, input, backpressure, block-boundary,
-  and output activity for WaveKit to inspect real transitions. A test that
+  and output activity so the waveform shows real transitions. A test that
   passes without meaningful time advancement or datapath movement is invalid.
 - For semantic contracts, ensure VCD-visible activity exists at the relevant
   boundary. Examples: selected mode changes, packet/frame indices, predictor or

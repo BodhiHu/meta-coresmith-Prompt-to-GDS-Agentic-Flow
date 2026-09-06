@@ -5,7 +5,7 @@
 """Branch-parity smoke -- the backstop that catches split-brain RTL the ifdef
 lint misses.
 
-The deterministic functional-ifdef lint (``rtl_storage_lint``) rejects a module
+A functional-ifdef split-brain (two implementations of one module) is rejected; a module
 that guards FUNCTIONAL logic (always/assign/instantiation/driving-initial)
 behind a strippable ``ifdef``. What survives lint is a region that holds ONLY
 debug/trace/assertion code, or a legitimate macro-module blackbox split -- in

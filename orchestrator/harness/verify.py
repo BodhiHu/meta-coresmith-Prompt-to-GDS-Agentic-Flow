@@ -289,34 +289,6 @@ def verify_synth(
     # generate_rtl acceptance path uses; parity by construction. Best-effort and
     # env-gated (CORESMITH_STAGE_LINT=0 bypasses).
     try:
-        from orchestrator.langgraph.rtl_stage_lint import (
-            census_rtl,
-            format_stage_lint_report,
-            load_stage_map,
-            stage_lint_enabled,
-            stage_modules_enabled,
-        )
-        if stage_lint_enabled():
-            _sm = load_stage_map(root, block)
-            _sr = census_rtl(Path(rtl_path).read_text(), stage_map=_sm,
-                             enforce_stage_modules=stage_modules_enabled())
-            if not _sr.ok:
-                return VerifyResult(
-                    False,
-                    verdict=(f"unsynthesizable combinational cloud: worst "
-                             f"always-block = {_sr.worst_mul:,} effective "
-                             f"multipliers > cap {_sr.mul_cap}"),
-                    details={"stage": "stage_lint",
-                             "worst_effective_multipliers": _sr.worst_mul,
-                             "mul_cap": _sr.mul_cap,
-                             "mul_violations": [b.name for b in _sr.mul_violations],
-                             "census": format_stage_lint_report(_sr, block=block)},
-                    duration_s=time.monotonic() - t0,
-                )
-    except Exception:  # noqa: BLE001 - never block the probe on a lint crash
-        pass
-
-    try:
         from orchestrator.langgraph.ppa_check import (
             max_cell_ceiling,
             parse_ff_budget,

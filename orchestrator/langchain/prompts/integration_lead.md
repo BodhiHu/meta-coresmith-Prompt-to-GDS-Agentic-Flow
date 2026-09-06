@@ -123,7 +123,7 @@ synchronizer or controller sub-blocks. It is YOUR job to insert:
 - Preserve auditable internal wire names for every block boundary. Do not
   collapse important handshakes, sideband metadata, or adapter state into
   unnamed expressions; the integration DV node dumps a VCD and audits these
-  signals with WaveKit.
+  signals in the VCD.
 
 ### Top-level I/O
 - Expose all unconnected block ports at the top level
@@ -137,7 +137,7 @@ synchronizer or controller sub-blocks. It is YOUR job to insert:
 - Use Verilog-2005 (no SystemVerilog)
 - Include a header comment with design name, block count, generation note
 - Keep reset, valid/ready, state, adapter, metadata, and error signals named
-  clearly enough for WaveKit waveform inspection.
+  clearly enough for waveform inspection.
 
 ## ERS/PRD COMPLIANCE CHECK
 

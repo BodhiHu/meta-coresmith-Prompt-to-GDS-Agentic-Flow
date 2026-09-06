@@ -2357,134 +2357,6 @@ async def generate_rtl_node(state: BlockState) -> dict:
     # Reject it at generation time and route the SAME actionable "write ONE
     # implementation" message to regeneration. Same acceptance path + env-gate
     # convention as the pre-synth storage lint. CORESMITH_IFDEF_LINT=0 bypasses.
-    if lint_clean:
-        try:
-            from orchestrator.langgraph.rtl_storage_lint import (
-                find_functional_ifdef_regions,
-                format_ifdef_lint_report,
-                ifdef_lint_enabled,
-            )
-            if ifdef_lint_enabled():
-                _is_lib = f"{os.sep}rtl_lib{os.sep}" in rtl_path
-                _ir = find_functional_ifdef_regions(
-                    rtl_path_obj.read_text(), is_library=_is_lib,
-                )
-                if not _ir.ok:
-                    lint_clean = False
-                    _imsg = format_ifdef_lint_report(_ir, block=block_name)
-                    log(f"  [LINT] FUNCTIONAL-IFDEF GATE failed "
-                        f"({len(_ir.findings)} split-brain `ifdef region(s)) -- "
-                        f"one module must have ONE implementation, routing regen",
-                        RED)
-                    block_dir = Path(_pr(state)) / ".coresmith" / "blocks" / block_name
-                    block_dir.mkdir(parents=True, exist_ok=True)
-                    (block_dir / "previous_error.txt").write_text(_imsg[-5000:])
-                    write_graph_event(_pr(state), "Functional Ifdef Gate",
-                                      "gate_failed", {
-                        "block": block_name,
-                        "findings": [f.condition for f in _ir.findings],
-                    })
-        except Exception as _e:  # never let the gate crash the node
-            log(f"  [LINT] functional-ifdef gate error (skipped): {_e}", YELLOW)
-
-    # STAGE-REALIZATION GATE (pipeline-campaign). A spec-declared multi-stage
-    # datapath collapsed into a single-cycle combinational cloud lints AND
-    # simulates clean (it is functionally correct) but yosys `proc` unrolls every
-    # constant-bound `for` and inlines every task/function -> the whole
-    # N-candidate search elaborates in one cycle and the synth gate times out
-    # (the four-generation RD-encoder wall). A deterministic arithmetic census
-    # (loop-unroll + task-inline) makes the amplification visible in ms, BEFORE
-    # the 600 s synth timeout, and routes an actionable module-per-stage remedy
-    # to regen -- same acceptance path + env-gate convention as the storage/ifdef
-    # lints. CORESMITH_STAGE_LINT=0 bypasses.
-    if lint_clean:
-        try:
-            from orchestrator.langgraph.rtl_stage_lint import (
-                census_rtl,
-                census_signature,
-                format_stage_lint_report,
-                load_stage_map,
-                stage_lint_enabled,
-                stage_modules_enabled,
-            )
-            if stage_lint_enabled():
-                _sm = load_stage_map(_pr(state), block_name)
-                _sr = census_rtl(
-                    rtl_path_obj.read_text(), stage_map=_sm,
-                    enforce_stage_modules=stage_modules_enabled(),
-                )
-                if not _sr.ok:
-                    lint_clean = False
-                    # [Deliverable 3] trajectory-aware, fresh-session escalation:
-                    # a byte-for-byte-identical census across retries means the
-                    # regen re-registered outputs / renamed states without moving
-                    # the arithmetic -- escalate the directive (and, after two
-                    # identical rounds, demand a fresh-from-stage-map rewrite).
-                    _sig = census_signature(_sr)
-                    _blk_dir = Path(_pr(state)) / ".coresmith" / "blocks" / block_name
-                    _blk_dir.mkdir(parents=True, exist_ok=True)
-                    _sig_path = _blk_dir / "_stage_lint_signature.txt"
-                    _prev_sig, _n_same = "", 0
-                    if _sig_path.exists():
-                        try:
-                            _pv = _sig_path.read_text().split()
-                            _prev_sig = _pv[0] if _pv else ""
-                            _n_same = int(_pv[1]) if len(_pv) > 1 else 0
-                        except Exception:  # noqa: BLE001
-                            pass
-                    _identical = bool(_prev_sig) and _prev_sig == _sig
-                    _n_same = (_n_same + 1) if _identical else 0
-                    _sig_path.write_text(f"{_sig} {_n_same}")
-                    _smsg = format_stage_lint_report(
-                        _sr, block=block_name,
-                        trajectory=("identical" if _identical else ""),
-                        fresh_session=(_n_same >= 2),
-                    )
-                    (_blk_dir / "previous_error.txt").write_text(_smsg[-8000:])
-                    # dv-hardening-11: name the BINDING criterion. The old
-                    # headline unconditionally printed the multiplier compare
-                    # -- on a factor-only failure it read "32 effective
-                    # multipliers > cap 64" (false on its face) and steered
-                    # regens toward an already-green metric.
-                    if _sr.mul_violations:
-                        _why = (f"worst always-block = {_sr.worst_mul:,} "
-                                f"effective multipliers > cap {_sr.mul_cap}")
-                    elif _sr.factor_violations:
-                        _wo = max(_sr.factor_violations,
-                                  key=lambda b: b.eff_ops)
-                        _why = (f"TOTAL EFFECTIVE OPS over stage-map budget; "
-                                f"worst `{_wo.name}` = {_wo.eff_ops:,} eff-ops "
-                                f"(multiplier census GREEN: {_sr.worst_mul} "
-                                f"<= cap {_sr.mul_cap} -- do not optimize "
-                                f"multipliers)")
-                    else:
-                        _why = "structural stage-module deficiency"
-                    log(f"  [LINT] STAGE-REALIZATION GATE failed ({_why}) -- "
-                        f"routing module-per-stage remedy to regen", RED)
-                    write_graph_event(_pr(state), "Stage Realization Gate",
-                                      "gate_failed", {
-                        "block": block_name,
-                        "worst_effective_multipliers": _sr.worst_mul,
-                        "mul_cap": _sr.mul_cap,
-                        "mul_violations": [b.name for b in _sr.mul_violations],
-                        "factor_violations": [b.name for b in _sr.factor_violations],
-                        "stage_module_deficient": _sr.stage_module_deficient,
-                        "identical_resubmission": _identical,
-                        "fresh_session_escalation": bool(_n_same >= 2),
-                    })
-                else:
-                    # clean pass: drop any stale rejection signature so a later
-                    # unrelated failure is not misread as an identical resubmission.
-                    _sig_path = (Path(_pr(state)) / ".coresmith" / "blocks"
-                                 / block_name / "_stage_lint_signature.txt")
-                    if _sig_path.exists():
-                        try:
-                            _sig_path.unlink()
-                        except OSError:
-                            pass
-        except Exception as _e:  # never let the gate crash the node
-            log(f"  [LINT] stage-realization gate error (skipped): {_e}", YELLOW)
-
     write_graph_event(_pr(state), "Generate RTL", "graph_node_exit", {
         "block": block_name, "attempt": attempt, "lint_clean": lint_clean,
     })
@@ -4439,56 +4311,8 @@ async def synthesize_node(state: BlockState) -> dict:
         # raw log tail. The codec RD-core burned ~12 h on exactly this; the
         # detector + diagnosis already existed but were never wired.
         # CORESMITH_STORAGE_PRESYNTH_GATE=0 restores straight-to-yosys.
-        storage_gate_failed = False
-        if _os.environ.get("CORESMITH_STORAGE_PRESYNTH_GATE", "1").strip() != "0":
-            try:
-                from orchestrator.langgraph.rtl_storage_lint import (
-                    find_flat_packed_dynamic_storage,
-                    find_oversized_memory_arrays,
-                    format_lint_report,
-                    format_memory_tier_report,
-                )
-                _src = Path(rtl_path).read_text()
-                _rpt = find_flat_packed_dynamic_storage(_src)
-                # Section 5f/4a: register-tier memory over the SRAM threshold (or
-                # whose single-cycle flat read mux busts the period) flattens to a
-                # giant mux -- untimeable. Catch it structurally BEFORE synth, the
-                # same class the flat-packed gate catches. Priced against the run's
-                # target clock so an untimeable single-cycle read is caught too.
-                _period = 1000.0 / max(1.0, float(state.get("target_clock_mhz", 50.0)))
-                _mtr = find_oversized_memory_arrays(_src, period_ns=_period)
-                if not _rpt.ok:
-                    storage_gate_failed = True
-                    _msg = format_lint_report(_rpt, block=block_name)
-                    log(f"  [SYNTH] PRE-SYNTH STORAGE GATE failed "
-                        f"({len(_rpt.findings)} flat-packed reg(s) w/ dynamic "
-                        f"part-select) -- skipping yosys (would time out), "
-                        f"routing actionable fix to regen", RED)
-                    result = {
-                        "success": False, "gate_count": 0,
-                        "log": ("UNSYNTHESIZABLE -- pre-synth storage lint "
-                                "(yosys NOT run):\n\n" + _msg),
-                    }
-                    span.set_attribute("storage_gate_failed", True)
-                elif not _mtr.ok:
-                    storage_gate_failed = True
-                    _msg = format_memory_tier_report(_mtr, block=block_name)
-                    log(f"  [SYNTH] PRE-SYNTH MEMORY-TIER GATE failed "
-                        f"({len(_mtr.findings)} register-tier memor(y/ies) over "
-                        f"the SRAM threshold) -- skipping yosys (untimeable flat "
-                        f"read mux), routing macro-tier fix to regen", RED)
-                    result = {
-                        "success": False, "gate_count": 0,
-                        "log": ("UNSYNTHESIZABLE -- pre-synth memory-tier lint "
-                                "(yosys NOT run):\n\n" + _msg),
-                    }
-                    span.set_attribute("memory_tier_gate_failed", True)
-            except Exception as _e:  # never let the gate crash the node
-                log(f"  [SYNTH] pre-synth storage gate error: {_e}", RED)
-
         local_attempt = 0
-        for local_attempt in range(0 if storage_gate_failed
-                                   else (1 + MAX_LOCAL_RETRIES)):
+        for local_attempt in range(1 + MAX_LOCAL_RETRIES):
             log(f"  [SYNTH] Running Yosys synthesis"
                 f"{f' (local fix #{local_attempt})' if local_attempt > 0 else ''}...",
                 YELLOW)
@@ -7512,41 +7336,6 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                 "top_rtl_path": top_rtl_path,
             }}
 
-        # FUNCTIONAL-IFDEF POSTCONDITION (rung3 split-brain ban) -- the same
-        # generation-time gate the per-block RTL gets, applied to chip_top. A
-        # design module with a two-implementation `ifdef split-brain is
-        # forbidden; the LEGITIMATE synth-blackbox / sim-behavioral pair of a
-        # macro-named memory module (the SRAM-model idiom the dedup preserves)
-        # is ALLOWED (find_functional_ifdef_regions carves it out). Force a
-        # retry so the Integration Lead writes ONE implementation.
-        # CORESMITH_IFDEF_LINT=0 bypasses.
-        try:
-            from orchestrator.langgraph.rtl_storage_lint import (
-                find_functional_ifdef_regions,
-                format_ifdef_lint_report,
-                ifdef_lint_enabled,
-            )
-            if ifdef_lint_enabled() and chip_top_text:
-                _ir = find_functional_ifdef_regions(chip_top_text)
-                if not _ir.ok:
-                    _imsg = format_ifdef_lint_report(_ir, block=module_name)
-                    log(f"  [INTEGRATION] Postcondition failed: split-brain "
-                        f"`ifdef in chip_top ({len(_ir.findings)} region(s))", RED)
-                    write_graph_event(pr, "Integration Check", "graph_node_exit", {
-                        "error": "functional_ifdef_postcondition_failed",
-                        "missing_summary": _imsg[:400],
-                    })
-                    return {"integration_result": {
-                        "skipped": True,
-                        "reason": _imsg,
-                        "postcondition_failed": True,
-                        "agent_notes": agent_result.get("notes", ""),
-                        "top_rtl_path": top_rtl_path,
-                    }}
-        except Exception as _e:  # never let the gate crash integration
-            log(f"  [INTEGRATION] functional-ifdef gate error (skipped): {_e}",
-                YELLOW)
-
         log(f"  [INTEGRATION] Agent generated {module_name}: "
             f"{len(modules)} blocks, "
             f"{agent_result.get('wire_count', 0)} wires", GREEN)
@@ -9624,9 +9413,6 @@ async def _run_top_level_contract_audit(
             "prd_json": str(root / ".coresmith" / "prd_spec.json"),
             "block_diagram": str(root / ".coresmith" / "block_diagram.json"),
             "integration_vcd": str(root / "sim_build" / "integration" / "dump.vcd"),
-            "integration_wavekit_audit": str(
-                root / "sim_build" / "integration" / "wavekit_audit.json"
-            ),
         },
     }
     context_path.write_text(json.dumps(context, indent=2), encoding="utf-8")

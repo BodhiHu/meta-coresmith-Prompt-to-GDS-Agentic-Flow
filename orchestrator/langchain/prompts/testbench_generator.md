@@ -287,9 +287,9 @@ RULES:
     block model`` at the top so the divergence risk is visible. Do NOT
     reimplement the reference merely because it seems easier than calling the
     model; a TB-local copy is the staleness vector this prompt forbids.
-15. VCD/WAVEKIT AUDIT -- MANDATORY:
+15. VCD WAVEFORM -- MANDATORY:
     The pipeline runs cocotb under Verilator with tracing enabled, expects
-    `sim_build/<block>/dump.vcd`, and inspects that VCD with WaveKit. Your
+    `sim_build/<block>/dump.vcd`, which the debug agent reads. Your
     tests must exercise reset, primary handshakes, representative datapath
     activity, sideband metadata, and terminal outputs so the waveform audit
     has meaningful transitions. Do not disable tracing, skip clocks, or

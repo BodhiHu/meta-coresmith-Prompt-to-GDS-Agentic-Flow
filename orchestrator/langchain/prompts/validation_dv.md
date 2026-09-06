@@ -96,7 +96,7 @@ COCOTB RULES:
 - Do not convert or compare multi-kilobit internal `tdata` signals through
   cocotb/VPI every cycle. Verilator/cocotb can truncate very wide string
   values. For wide internal streams, monitor `tvalid`, `tready`, `tlast`, and
-  narrow semantic/debug fields only; use VCD/WaveKit post-processing or RTL
+  narrow semantic/debug fields only; use VCD post-processing or RTL
   debug hashes/assertions for payload stability if full-width evidence is
   required. Top-level byte streams and narrow trace/status streams may be read
   directly.
@@ -237,9 +237,9 @@ the wrap happens at a 2^n boundary BELOW the maximum, not at the maximum.
 - If the ERS declares NO dimensional maxima, no max-geometry case or marker is
   needed.
 
-VCD/WAVEKIT AUDIT -- MANDATORY:
+VCD WAVEFORM -- MANDATORY:
 - The validation DV node runs Verilator with tracing enabled, expects
-  `sim_build/integration/dump.vcd`, and audits it with WaveKit before the
+  `sim_build/integration/dump.vcd`, which the debug agent and chip lead read before the
   node can pass.
 - For each RTL/application ERS requirement, drive enough realistic stimulus
   that the relevant requirement evidence is visible in the VCD: reset,
@@ -255,7 +255,7 @@ VCD/WAVEKIT AUDIT -- MANDATORY:
   symbols, reconstructed block quality, and feedback/context update evidence
   when those signals are available.
 - Log the ERS requirement IDs next to the transactions that exercise them so
-  WaveKit waveform inspection can tie each requirement to observed signals.
+  waveform inspection can tie each requirement to observed signals.
 
 OUTPUT FORMAT GUARD:
 Your response MUST be a single, complete Python file containing valid cocotb
