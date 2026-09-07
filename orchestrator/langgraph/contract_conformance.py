@@ -252,6 +252,7 @@ class ConformanceResult:
     checked_edges: int = 0
     missing: list = field(default_factory=list)     # [(channel, expected_port)]
     undeclared: list = field(default_factory=list)  # [port] -- <channel>_* not in the contract
+    handshake_extra: list = field(default_factory=list)  # WP-21: <channel>_<flow-control>, reported only
     ambiguous: list = field(default_factory=list)   # [(channel, explanation)]
     instantiates: list = field(default_factory=list)  # sibling blocks wired in
     accounted: set = field(default_factory=set)     # ports bound to a declared signal
@@ -364,8 +365,12 @@ def signal_specs(edge: dict) -> list[dict]:
     # the gate then rejects the very ports the contract-port check demands
     # (Arm E2, 2026-09-06: three blocks parked on "undeclared port *_srdy").
     proto = str(edge.get("handshake_protocol") or "").strip().lower()
+    # WP-21: valid_only edges are payload + a single `valid` strobe (the
+    # interface-definition prompt says so); contracts list it inconsistently
+    # (F-1: 15/15 edges, AX25: 0/10), and the gate parked a correct block.
     hs = {"srdy_drdy": ("srdy", "drdy"),
-          "axi_stream": ("tvalid", "tready")}.get(proto, ())
+          "axi_stream": ("tvalid", "tready"),
+          "valid_only": ("valid",)}.get(proto, ())
     present = {str(o["name"]).split("/", 1)[0] for o in out}
     for name in hs:
         if name in present:
@@ -522,6 +527,15 @@ def declared_ports(rtl_text: str, module: str | None = None) -> set[str]:
     return ports
 
 
+#: Flow-control / qualifier suffixes a channel may legitimately carry beyond
+#: its enumerated payload (WP-21). A `<channel>_<suffix>` RTL port with one of
+#: these is the channel's handshake, not an undeclared deviation.
+_FLOW_CONTROL_SUFFIXES = frozenset({
+    "valid", "ready", "req", "ack", "resp_valid", "rvalid", "rready", "wvalid",
+    "wready", "strobe", "stb", "srdy", "drdy", "tvalid", "tready", "tlast", "last",
+})
+
+
 def check_block(project_root, block_name: str, rtl_path,
                 siblings=()) -> ConformanceResult:
     """Verify one block's ports against every contract edge that touches it."""
@@ -620,6 +634,7 @@ def check_block(project_root, block_name: str, rtl_path,
     # either a misspelling of one of the above or an invented signal; both break
     # name-based edge resolution.
     channels = set()
+    declared_by_chan: dict = {}
     for edge in _load_contracts(project_root):
         for role, key in (("producer_block", "producer_port"),
                           ("consumer_block", "consumer_port")):
@@ -627,12 +642,24 @@ def check_block(project_root, block_name: str, rtl_path,
                 base = channel_base(edge[key])
                 if base:
                     channels.add(base)
+                    declared_by_chan.setdefault(base, set()).update(
+                        str(sp["name"]).split("/", 1)[0] for sp in signal_specs(edge))
     for port in sorted(ports):
         if port in accepted or port in _LOCKED_BOUNDARY_PORTS:
             continue
         for chan in channels:
             if port.startswith(chan + "_"):
-                res.undeclared.append(port)
+                # WP-21: a channel's flow-control signal is part of the
+                # channel even when the contract forgot to enumerate it;
+                # report it, never fail the block over it.
+                _suffix = port[len(chan) + 1:]
+                _declared = declared_by_chan.get(chan, set())
+                _collapsed = any(n == _suffix or n.endswith("_" + _suffix)
+                                 for n in _declared)
+                if _suffix in _FLOW_CONTROL_SUFFIXES and not _collapsed:
+                    res.handshake_extra.append(port)
+                else:
+                    res.undeclared.append(port)
                 break
     return res
 
