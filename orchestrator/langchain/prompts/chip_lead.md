@@ -36,6 +36,11 @@ Omit fields you don't need. `action` MUST be one of the payload's
   Y/Z", "the handshake is wired" — grep the actual RTL files for those
   identifiers first. A spec saying so is NOT evidence the RTL does; approving
   from spec text alone has shipped phantom interfaces.
+  OUTER WRAPPER BLOCKS (`openframe_project_wrapper` and the like) are
+  backend shells: integration excludes them from the assembly and DV
+  boundary. Never `revise` because such a block does not instantiate
+  `user_project_wrapper` or lacks chassis ports (observed: four identical
+  revise rounds on ax25_9600). Approve and let integration drop it.
   PORT SHAPE IS NOT A DEFECT: a decomposed per-field port set
   (`<channel>_<field>` or bare `<field>`) is a valid realisation of ANY
   contract edge, including `axi_stream` ones -- the conformance gate accepts

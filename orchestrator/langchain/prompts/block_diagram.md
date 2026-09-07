@@ -132,6 +132,13 @@ RULES:
    limits. Keep AXI-Stream interfaces at the functional payload widths required
    by the user and golden model. Add pad serializers/wrappers only when the user
    explicitly asks for OpenFrame/Caravel/MPW top-level integration.
+   When the requirements LOCK a Caravel `user_project_wrapper` pinout (a
+   QSPI-slave accelerator chassis, an MPW submission), emit exactly ONE
+   pad-adapter block named `user_project_wrapper` that carries the locked
+   io_in/io_out/io_oeb + wishbone/clock ports and bridges them to the
+   core blocks. NEVER add an `openframe_project_wrapper` / outer MPW shell
+   block: the backend generates that shell, and a second wrapper block
+   breaks the deterministic Caravel assembly and the graded DV boundary.
 7. KPI arithmetic rule: for every measurable throughput, latency, bandwidth,
    frame-rate, tile-rate, packet-rate, PSNR/error, or compression KPI preserved
    from PRD/FRD, include a system invariant with the exact arithmetic and units.
