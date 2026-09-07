@@ -47,6 +47,12 @@ class QSPIMasterBFM:
         # idle: csn high, sck low, io lanes 0
         self._in = 1 << contract.csn_bit
         self.dut.io_in.value = self._in
+        # WP-28: every read data nibble must be DRIVEN by the DUT (io_oeb lanes
+        # low). A released lane reads as 0 on a real host and is a protocol
+        # violation regardless of the value (aes_qspi: STATUS low nibble
+        # released -> DONE invisible to the grader's host, last nibble of every
+        # read dropped; the engine's polls happened to escape it).
+        self.drive_violations: list = []
 
     # -- low-level GPIO ----------------------------------------------------
     def _drive(self):
@@ -82,6 +88,24 @@ class QSPIMasterBFM:
         await self._tick()
 
     # -- one quad-nibble in (DUT drives), host samples on rising SCK -------
+    def _note_drive(self, oeb_value, when: str = "") -> bool:
+        """Record a violation when any io lane is released during a read nibble.
+
+        ``oeb_value`` is the integer io_oeb vector (1 = input/released). Returns
+        True when all four lanes are driven. Pure; unit-testable.
+        """
+        try:
+            lanes = (int(oeb_value) >> self.c.io0_bit) & 0xF
+        except (TypeError, ValueError):
+            lanes = 0xF          # X/Z on oeb is not "driven" either
+        if lanes:
+            self.drive_violations.append(
+                f"{when}io lanes released during a read data nibble "
+                f"(io_oeb[{self.c.io0_bit + 3}:{self.c.io0_bit}]=0b{lanes:04b}; "
+                f"a real host samples 0 there)")
+            return False
+        return True
+
     async def _shift_in(self) -> int:
         self._set(self.c.sck_bit, 0)
         self._drive()          # DUT sets read data while SCK low
@@ -89,6 +113,12 @@ class QSPIMasterBFM:
         self._set(self.c.sck_bit, 1)
         self._drive()
         await self._tick()
+        try:
+            _oeb = getattr(self.dut, "io_oeb", None)
+            if _oeb is not None:
+                self._note_drive(_oeb.value)
+        except Exception:  # noqa: BLE001 - the check never breaks a read
+            pass
         return self._read_io()
 
     async def _byte_out(self, b):

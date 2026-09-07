@@ -350,6 +350,12 @@ async def qspi_slave_protocol_conformance(dut):
             "[qspi-conformance] ADVISORY: bad opcode 0xAB did not raise "
             "STATUS.ERROR (status=0x%02x). The chassis protocol flags unknown "
             "opcodes via STATUS.ERROR (bit %d).", _st_bad, c.status_error_bit)
+    # WP-28: read-phase bus drive (the aes_qspi class: STATUS low nibble released)
+    assert not bfm.drive_violations, (
+        "QSPI-slave conformance: the DUT released io lanes during a read data "
+        "nibble (" + str(len(bfm.drive_violations)) + " nibble(s)); first: "
+        + bfm.drive_violations[0]
+    )
 {op_probe}{maxgeo_block}'''
 
 
@@ -754,6 +760,13 @@ async def deterministic_qspi_dv(dut):
     assert out == EXPECTED, (
         "QSPI-slave contract violation: OUT != golden reference. "
         f"exp={{EXPECTED.hex()}} got={{out.hex()}}"
+    )
+    # WP-28: every read data nibble must be driven; a released lane reads as 0
+    # on the grader's host even when this sim happened to sample a value.
+    assert not bfm.drive_violations, (
+        "QSPI-slave contract violation: the DUT released io lanes during a "
+        "read data nibble (" + str(len(bfm.drive_violations)) + " nibble(s)); "
+        "first: " + bfm.drive_violations[0]
     )
 '''
     if maxgeo_case is not None and not maxgeo_case.is_primary:
