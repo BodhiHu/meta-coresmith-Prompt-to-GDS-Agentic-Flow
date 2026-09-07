@@ -253,6 +253,7 @@ class ConformanceResult:
     missing: list = field(default_factory=list)     # [(channel, expected_port)]
     undeclared: list = field(default_factory=list)  # [port] -- <channel>_* not in the contract
     handshake_extra: list = field(default_factory=list)  # WP-21: <channel>_<flow-control>, reported only
+    handshake_missing: list = field(default_factory=list)  # WP-21b: [(channel, port)] synthesized valid_only strobe absent, reported only
     ambiguous: list = field(default_factory=list)   # [(channel, explanation)]
     instantiates: list = field(default_factory=list)  # sibling blocks wired in
     accounted: set = field(default_factory=set)     # ports bound to a declared signal
@@ -624,6 +625,15 @@ def check_block(project_root, block_name: str, rtl_path,
                                    f"'{chan}'; prefix it"))
                     bare_owner[bare] = chan
                     accepted.add(bare)
+                elif (row.get("kind") == "handshake"
+                      and str(edge.get("handshake_protocol") or "").strip().lower()
+                      == "valid_only"):
+                    # WP-21b: the strobe was synthesized by signal_specs, not
+                    # enumerated by the contract; a valid_only consumer may
+                    # legitimately key off a pulse-encoded payload field.
+                    # Report it, never fail the block over it (blocks generated
+                    # before the derivation carried `valid` lacked it: AX25).
+                    res.handshake_missing.append((chan, prefixed))
                 else:
                     res.missing.append((chan, prefixed))
 

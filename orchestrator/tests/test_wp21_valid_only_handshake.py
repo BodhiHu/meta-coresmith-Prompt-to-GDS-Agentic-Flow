@@ -50,3 +50,16 @@ def test_flow_control_extra_is_reported_not_undeclared(tmp_path):
     r = check_block(root, "b", _rtl(tmp_path, "b", ["req_ch_addr", "req_ch_req", "req_ch_ack", "req_ch_bogus"]))
     assert r.handshake_extra == ["req_ch_ack", "req_ch_req"]
     assert r.undeclared == ["req_ch_bogus"]
+
+
+def test_missing_synthesized_valid_only_strobe_is_reported_not_missing(tmp_path):
+    root = _project(tmp_path, [_edge("ctl", "shaper", "soft_reset", ["pulse"])])
+    r = check_block(root, "shaper", _rtl(tmp_path, "shaper", ["soft_reset_pulse"]))
+    assert r.missing == [] and r.ok, (r.missing, r.undeclared)
+    assert r.handshake_missing == [("soft_reset", "soft_reset_valid")]
+
+
+def test_contract_enumerated_valid_is_still_required(tmp_path):
+    root = _project(tmp_path, [_edge("ctl", "shaper", "go", ["valid", "mode"])])
+    r = check_block(root, "shaper", _rtl(tmp_path, "shaper", ["go_mode"]))
+    assert ("go", "go_valid") in r.missing
