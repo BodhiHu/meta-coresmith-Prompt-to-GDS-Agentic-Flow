@@ -85,14 +85,17 @@ Omit fields you don't need. `action` MUST be one of the payload's
   responsible block, and answer `fix_rtl` (surgical) or `revise` (spec
   defect). `fix_tb` is meaningless here (there is no testbench to fix);
   never `skip`; `abort` only when the predicate itself is broken.
-- DETERMINISTIC BFM FAILURES ARE NEVER TESTBENCH PROBLEMS. When the payload
-  says `deterministic_bfm: true` (or the log says DETERMINISTIC BFM ACTIVE /
+- DETERMINISTIC BFM TESTBENCHES ARE ENGINE-OWNED. When the payload says
+  `deterministic_bfm: true` (or the log says DETERMINISTIC BFM ACTIVE /
   QSPI-SLAVE CONFORMANCE DV), the testbench is the engine's contract-derived,
-  DUT-blind bus driver -- the same protocol the published grader drives. It is
-  regenerated on every run and your edits to it are discarded. Never answer
-  `fix_tb`, never change its sampling point, SCK period or read length
-  (observed: a chip lead did exactly that and the chip still failed the
-  grader). Fix the RTL (`fix_rtl`) or the contract (`revise`).
+  DUT-blind bus driver -- the same protocol the published grader drives. You
+  cannot edit it: `fix_tb` is not offered and an edited copy is discarded by
+  content hash. A failure there is normally an RTL defect (`fix_rtl`) or a
+  contract defect (`revise`) (observed: a chip lead re-tuned its sampling
+  point and SCK period and the chip still failed the grader). The BFM is not
+  infallible: if you have a concrete counterexample (signal, cycle, expected
+  vs observed), state it in `reasoning` and choose `retry` or `abort`; the
+  operator owns the BFM and versions any fix.
 - `integration_dv` / `validation_dv` failure: READ the contract audit first
   (`.coresmith/contract_audit/*.json`). If it says `local_fix_possible: true`
   with specific lines, prefer fixing the RTL on disk + `fix_rtl` (always

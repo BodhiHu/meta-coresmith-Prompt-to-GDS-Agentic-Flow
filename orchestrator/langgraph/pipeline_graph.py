@@ -7948,6 +7948,15 @@ def _maxgeo_conformance_scope_enabled() -> bool:
     ) != "0"
 
 
+def _file_sha256(path: str) -> str:
+    """sha256 of a file's bytes, or "" when it cannot be read (WP-40)."""
+    import hashlib as _hashlib
+    try:
+        return _hashlib.sha256(Path(path).read_bytes()).hexdigest() if path else ""
+    except OSError:
+        return ""
+
+
 def _tb_writer_flags(tb_result: dict | None) -> dict:
     """The engine-writer flags a reused testbench must carry forward.
 
@@ -7957,9 +7966,18 @@ def _tb_writer_flags(tb_result: dict | None) -> dict:
     has to restore them, or the identical TB that earned an advisory verdict
     one cycle earlier hard-fails the scope gate."""
     tbr = tb_result or {}
-    return {k: tbr[k] for k in ("deterministic_bfm", "conformance_only",
-                                "contract")
-            if tbr.get(k) is not None}
+    flags = {k: tbr[k] for k in ("deterministic_bfm", "conformance_only",
+                                 "contract")
+             if tbr.get(k) is not None}
+    # WP-40: the deterministic TB's content identity, taken when the engine
+    # wrote it. A later cycle reuses the file only while it still hashes to
+    # this; an edited copy is regenerated from the contract.
+    if flags.get("deterministic_bfm"):
+        sha = tbr.get("tb_sha256") or _file_sha256(
+            tbr.get("testbench_path") or tbr.get("tb_path") or "")
+        if sha:
+            flags["tb_sha256"] = sha
+    return flags
 
 
 def _maxgeo_conformance_scope(
@@ -8281,18 +8299,31 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
             and previous_tb_path
             and Path(previous_tb_path).exists()
         )
-        # WP-29: the engine's deterministic BFM testbench is derived from the
-        # bus contract and DUT-blind; it is regenerated every time and an
-        # operator/chip-lead edit of it is discarded (observed: a chip lead
-        # rewrote its sampling point and SCK period to make a failing chip pass).
-        if reuse_existing_tb and (previous_dv.get("tb_writer_flags") or {}).get("deterministic_bfm"):
-            log("  [INTEG-DV] previous testbench was the deterministic BFM -- "
-                "regenerating from the contract instead of reusing "
-                f"(after {previous_action}); operator edits to it are discarded", YELLOW)
-            write_graph_event(pr, "Integration DV", "deterministic_tb_regenerated", {
-                "after_action": previous_action, "discarded_path": previous_tb_path,
-            })
-            reuse_existing_tb = False
+        # WP-29/WP-40: the engine's deterministic BFM testbench is derived
+        # from the bus contract and DUT-blind. It is engine-owned: reused only
+        # while its content still hashes to what the engine wrote, regenerated
+        # (edit discarded) otherwise (observed: a chip lead rewrote its
+        # sampling point and SCK period to make a failing chip pass).
+        _prev_flags = previous_dv.get("tb_writer_flags") or {}
+        if reuse_existing_tb and _prev_flags.get("deterministic_bfm"):
+            _now_sha = _file_sha256(previous_tb_path)
+            if _prev_flags.get("tb_sha256") and _now_sha == _prev_flags.get("tb_sha256"):
+                log("  [INTEG-DV] previous testbench is the deterministic BFM and "
+                    "is unmodified (sha256 match) -- reusing", YELLOW)
+                write_graph_event(pr, "Integration DV", "deterministic_tb_reused", {
+                    "after_action": previous_action, "path": previous_tb_path,
+                    "tb_sha256": _now_sha,
+                })
+            else:
+                log("  [INTEG-DV] previous deterministic BFM testbench was MODIFIED "
+                    "(or carries no recorded hash) -- regenerating from the "
+                    f"contract (after {previous_action}); the edit is discarded", YELLOW)
+                write_graph_event(pr, "Integration DV", "deterministic_tb_modified", {
+                    "after_action": previous_action, "discarded_path": previous_tb_path,
+                    "recorded_sha256": _prev_flags.get("tb_sha256", ""),
+                    "found_sha256": _now_sha,
+                })
+                reuse_existing_tb = False
 
         generation_error: Exception | None = None
         if reuse_existing_tb:
@@ -8831,9 +8862,13 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
             "outer_agent_guidance": (
                 ("THIS TESTBENCH IS THE ENGINE'S DETERMINISTIC, CONTRACT-DERIVED, "
                  "DUT-BLIND BUS-PROTOCOL BFM (the same protocol the published "
-                 "grader drives). It is regenerated from the contract on every "
-                 "run and cannot be edited: fix_tb is not offered. A failure here "
-                 "is an RTL defect (fix_rtl) or a contract defect (revise).\n\n"
+                 "grader drives). It is engine-OWNED: fix_tb is not offered and "
+                 "an edited copy is discarded (content hash). A failure here is "
+                 "normally an RTL defect (fix_rtl) or a contract defect (revise). "
+                 "If you believe the BFM itself is wrong, say so in `reasoning` "
+                 "with a concrete counterexample (signal, cycle, expected vs "
+                 "observed) and choose retry or abort; the operator owns the "
+                 "BFM and versions any fix.\n\n"
                  if (tb_result or {}).get("deterministic_bfm") else "")
                 + "Integration DV (top-level simulation) failed. As the outer-loop "
                 "diagnostic agent, read the sim log and testbench to diagnose:\n"
