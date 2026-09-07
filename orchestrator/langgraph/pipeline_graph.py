@@ -6244,47 +6244,6 @@ def _merge_mismatches(
     return merged
 
 
-_OUTER_WRAPPER_BLOCK_NAMES = frozenset({
-    "openframe_project_wrapper", "caravel_wrapper", "mpw_wrapper",
-    "openframe_wrapper", "caravel_top",
-})
-
-
-def _is_outer_wrapper_block(name: str, mod) -> bool:
-    """A block that only wraps the graded user_project_wrapper (WP-23).
-
-    Named like the OpenFrame/Caravel shell, or exposing nothing but Caravel
-    chassis pins (power, gpio/io pads, wishbone, clk/reset) -- i.e. no design
-    signal a frontend block could consume.
-    """
-    if str(name).lower() in _OUTER_WRAPPER_BLOCK_NAMES:
-        return True
-    try:
-        ports = [str(p.name).lower() for p in getattr(mod, "ports", [])]
-    except Exception:  # noqa: BLE001
-        return False
-    if not ports:
-        return False
-    chassis = ("vdd", "vss", "vcc", "gpio", "io_in", "io_out", "io_oeb", "wb_",
-               "wbs_", "la_", "user_irq", "user_clock", "analog_", "por", "resetb",
-               "clk", "rst")
-    return all(any(p.startswith(c) or c in p for c in chassis) for p in ports) and \
-        str(name).lower() != "user_project_wrapper"
-
-
-def _drop_outer_wrapper_blocks(modules: dict, rtl_paths: dict,
-                               block_rtl_sources: dict) -> set:
-    """Remove outer-wrapper blocks in place from the three integration maps."""
-    outer = {bn for bn, mod in list(modules.items()) if _is_outer_wrapper_block(bn, mod)}
-    if len(outer) >= len(modules):
-        return set()          # never empty the design
-    for bn in outer:
-        modules.pop(bn, None)
-        rtl_paths.pop(bn, None)
-        block_rtl_sources.pop(bn, None)
-    return outer
-
-
 def _self_assembled_wrapper(wrapper_block: str, modules: dict,
                             block_rtl_sources: dict) -> bool:
     """True when the wrapper block already IS the graded top (WP-24).
@@ -6555,18 +6514,6 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                 log(f"  [INTEGRATION] Failed to parse {block_name} "
                     f"at {rtl_path}", RED)
 
-        # WP-23: an outer MPW/OpenFrame wrapper "block" is a backend shell.
-        # Keeping it in the frontend set wrecks the Caravel assembly (its
-        # contract edge to user_project_wrapper names pad signals neither
-        # block exposes), nests the DV top one level above the graded
-        # boundary, and the QSPI pin-boundary gate then refuses to run.
-        _outer = _drop_outer_wrapper_blocks(modules, rtl_paths, block_rtl_sources)
-        if _outer:
-            log(f"  [INTEGRATION] outer wrapper block(s) {sorted(_outer)} excluded "
-                f"from assembly (backend shell, not a frontend block)", YELLOW)
-            write_graph_event(pr, "Integration Check", "outer_wrapper_excluded", {
-                "blocks": sorted(_outer),
-            })
         span.set_attribute("parsed_blocks", len(modules))
 
         if not modules:
