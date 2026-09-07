@@ -27,9 +27,12 @@ For EVERY connection in the block diagram:
    commit/enable signals for direct-write edges). Port SHAPE is free: a
    decomposed per-field port set (`<channel>_<field>`) is equivalent to a
    packed `tdata` bus and is NOT a mismatch -- do not "fix" it.
-4. **Clock/reset naming**: All blocks must use the same clock port name
-   (`clk`) and reset port name (`rst_n`) unless multiple clock domains
-   exist.
+4. **Clock/reset naming**: All blocks must use the same clock and reset port
+   names and the same reset polarity, as the requirements / locked interface
+   define them (Caravel tasks: `wb_clk_i` + active-high `wb_rst_i`; otherwise
+   the ERS's names; `clk` + active-low `rst_n` only when nothing is specified),
+   unless multiple clock domains exist. Flag a block whose reset polarity or
+   name differs from its own spec.
 5. **Stub coherence**: The Section 9 Verilog Interface Stub of each block
    must match its own Section 2 port table exactly.
 6. **Memory feasibility**: When a block carries a priced memory ledger

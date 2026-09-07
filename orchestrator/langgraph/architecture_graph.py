@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import json
 import operator
+import os
 from pathlib import Path
 from typing import Annotated, TypedDict
 
@@ -1787,6 +1788,9 @@ async def escalate_final_review_node(state: ArchGraphState) -> dict:
         "block_diagram_doc_validation_errors": block_diagram_doc_errors,
         "constraint_rounds_used": state["round"],
         "max_rounds": state["max_rounds"],
+        "feedback_rounds_used": _feedback_rounds_used(
+            state.get("human_response_history"), "final_review"),
+        "feedback_rounds_cap": _max_feedback_rounds(),
         "supported_actions": ["accept", "feedback", "abort"],
         "instructions": (
             "Architecture is complete. Review the design summary above.\n\n"
@@ -1803,6 +1807,7 @@ async def escalate_final_review_node(state: ArchGraphState) -> dict:
     }
 
     response = await _arch_resolve_interrupt(payload)
+    response, _capped = _cap_feedback(state, "final_review", response, "Final Review")
 
     action = response.get("action", "abort") if isinstance(response, dict) else "abort"
     feedback_text = response.get("feedback", "") if isinstance(response, dict) else ""
@@ -1818,7 +1823,7 @@ async def escalate_final_review_node(state: ArchGraphState) -> dict:
         "phase": "final_review", "round": state["round"],
         "action": action, "response": response,
     }]
-    if feedback_text:
+    if feedback_text and action == "feedback":
         updated["human_feedback"] = feedback_text
 
     return updated
@@ -1960,6 +1965,47 @@ def _block_diagram_summary(state: ArchGraphState) -> dict:
     }
 
 
+def _max_feedback_rounds() -> int:
+    """WP-20: feedback rounds a review phase may request before it is accepted."""
+    try:
+        return max(0, int(os.environ.get("CORESMITH_ARCH_MAX_FINAL_FEEDBACK", "2") or 2))
+    except ValueError:
+        return 2
+
+
+def _feedback_rounds_used(history, phase: str) -> int:
+    """How many `feedback` answers this review phase has already consumed."""
+    n = 0
+    for h in history or []:
+        if isinstance(h, dict) and h.get("phase") == phase and h.get("action") == "feedback":
+            n += 1
+    return n
+
+
+def _cap_feedback(state: ArchGraphState, phase: str, response, label: str):
+    """Downgrade `feedback` to the accepting action once the cap is reached.
+
+    Returns (response, capped). The reviewer already saw the remaining budget
+    in its payload; past the cap, wording-level revisions are the uArch/DV
+    stages' job (observed: 4 diagram rounds / 12 decisions on aes_qspi)."""
+    if not isinstance(response, dict) or response.get("action") != "feedback":
+        return response, False
+    used = _feedback_rounds_used(state.get("human_response_history"), phase)
+    cap = _max_feedback_rounds()
+    if used < cap:
+        return response, False
+    accept = "accept" if phase == "final_review" else "continue"
+    _event(state, label, "feedback_cap", {
+        "round": state["round"], "phase": phase, "feedback_rounds_used": used,
+        "cap": cap, "downgraded_to": accept,
+        "feedback": str(response.get("feedback", ""))[:1000],
+    })
+    capped = dict(response)
+    capped["action"] = accept
+    capped["capped_feedback"] = response.get("feedback", "")
+    return capped, True
+
+
 async def escalate_diagram_node(state: ArchGraphState) -> dict:
     """Escalate to human when block diagram has questions or ambiguities.
 
@@ -1989,9 +2035,13 @@ async def escalate_diagram_node(state: ArchGraphState) -> dict:
             "feedback",   # provide text feedback, re-run block diagram
             "abort",      # stop architecture
         ],
+        "feedback_rounds_used": _feedback_rounds_used(
+            state.get("human_response_history"), "block_diagram"),
+        "feedback_rounds_cap": _max_feedback_rounds(),
     }
 
     response = await _arch_resolve_interrupt(payload)
+    response, _capped = _cap_feedback(state, "block_diagram", response, "Escalate Diagram")
 
     action = response.get("action", "abort") if isinstance(response, dict) else "abort"
 

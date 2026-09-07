@@ -121,8 +121,11 @@ RULES:
    (e.g. `clk_rst_ctrl`, `rst_sync`, `clock_gate`). The design is compiled flat
    and the integration agent inserts clock distribution, reset synchronization,
    and clock-gating cells automatically during top-level integration. Individual
-   blocks should simply declare `clk` and `rst_n` ports and assume clean,
-   synchronized signals are provided.
+   blocks simply declare the design's clock and reset ports and assume clean,
+   synchronized signals are provided. Use the clock/reset NAMES AND POLARITY the
+   requirements or locked interface define (e.g. a Caravel wrapper task uses
+   `wb_clk_i` and the synchronous active-HIGH `wb_rst_i`); default to `clk` +
+   active-low `rst_n` only when the requirements say nothing about reset.
 6. Soft-IP interface rule: if the PRD/requirements describe reusable soft IP,
    synthesizable RTL only, or an internal accelerator, do NOT narrow, serialize,
    pin-mux, or packetize functional streams solely to fit package/MPW GPIO pad

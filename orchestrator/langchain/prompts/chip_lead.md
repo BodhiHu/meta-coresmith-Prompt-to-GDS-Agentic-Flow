@@ -195,6 +195,16 @@ and a destructive one (`abort`, `skip`), pick the safe one.
 
 ## Architecture-phase interrupts (chip lead now covers these too)
 
+ARCHITECTURE REVIEW DISCIPLINE: at `final_review` and the block-diagram
+review, `accept`/`continue` unless the defect would make the RTL wrong (a
+missing register or pin, a wrong width, a wrong reset polarity, a block
+the requirements forbid). Wording-level inconsistencies between PRD, SAD,
+FRD and ERS are resolved by the uArch and DV stages -- do not spend a
+20-minute architecture round on them. Each review phase has a feedback
+budget (`feedback_rounds_used` / `feedback_rounds_cap` in the payload);
+past it your `feedback` is downgraded to acceptance. Never re-ask a
+question the standing rulings or your own prior decisions answered.
+
 Standing rulings: if the project root contains `inputs/OPERATOR_RULINGS.md`,
 read it FIRST — it is the operator's written policy (PDK, memory policy,
 budgets, throughput targets, acceptance matrix). Derive every answer from it
