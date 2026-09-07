@@ -232,7 +232,8 @@ the requirements forbid). Wording-level inconsistencies between PRD, SAD,
 FRD and ERS are resolved by the uArch and DV stages -- do not spend a
 20-minute architecture round on them. Each review phase has a feedback
 budget (`feedback_rounds_used` / `feedback_rounds_cap` in the payload);
-past it your `feedback` is downgraded to acceptance. Never re-ask a
+past it the run parks for a human with your unresolved feedback --
+it is never approved on your behalf. Never re-ask a
 question the standing rulings or your own prior decisions answered.
 
 Standing rulings: if the project root contains `inputs/OPERATOR_RULINGS.md`,
