@@ -9117,15 +9117,96 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
                 log(f"  [ACCEPTANCE-DV] PASSED: {_acc.get('reason')}", GREEN)
             else:
                 log(f"  [ACCEPTANCE-DV] FAILED: {_acc.get('reason')}", RED)
+                # WP-19: park for the chip lead exactly like a simulation
+                # failure. Falling through returned a FAIL signoff with no
+                # decision and no fix loop (Arm F-3 re-drive).
+                _acc_cases = _acc.get("cases") or []
+                _acc_lines = [
+                    f"  {c.get('name')}: ok={c.get('ok')} cycles={c.get('cycles')} "
+                    f"rtl_bytes={c.get('rtl_bytes')} "
+                    f"{c.get('note') or c.get('criterion') or ''}"
+                    for c in _acc_cases
+                ]
+                _acc_log = (
+                    "RTL ACCEPTANCE DV FAILED (mission-scale stream run + the "
+                    "task's acceptance predicate):\n" + "\n".join(_acc_lines)
+                    + "\nCaptured RTL output streams: "
+                    + str(Path(pr) / ".coresmith" / "acceptance_dv")
+                    + "\nViolations: " + json.dumps(
+                        _acc.get("violations", []), default=str)[:1500]
+                )
+                _acc_audit = {
+                    "category": "ACCEPTANCE_DV_FAILURE",
+                    "local_fix_possible": None,
+                    "recommended_action": "fix_rtl",
+                    "affected_blocks": [],
+                    "outer_agent_summary": (
+                        f"{sum(1 for c in _acc_cases if c.get('ok') is False)}/"
+                        f"{len(_acc_cases)} mission-scale acceptance case(s) fail "
+                        "the task's acceptance predicate (e.g. the external "
+                        "decoder rejects the stream). The block-level and "
+                        "validation testbenches all passed, so the defect is in "
+                        "something they never checked end-to-end: run the task's "
+                        "grader/decoder on the captured stream to localise it."
+                    ),
+                    "suggested_fix": (
+                        "Grade the captured stream(s) offline with the task's "
+                        "grader (inputs/), read its error (which macroblock / "
+                        "sample / field), map that to the responsible block, "
+                        "fix the RTL (fix_rtl) or the block's spec (revise)."
+                    ),
+                }
+                _acc_payload = {
+                    "type": "validation_dv_failure",
+                    "phase": "acceptance_dv",
+                    "design_name": design_name,
+                    "top_rtl_path": top_rtl_path,
+                    "testbench_path": "",
+                    "test_count": len(_acc_cases),
+                    "requirement_count": 0,
+                    "sim_log": _acc_log[-3000:],
+                    "sim_log_path": str(Path(pr) / ".coresmith" / "acceptance_dv.json"),
+                    "block_rtl_paths": block_rtl_paths,
+                    "contract_audit": _acc_audit,
+                    "contract_audit_path": "",
+                    "acceptance_dv": {k: v for k, v in _acc.items()},
+                    "supported_actions": ["retry", "fix_rtl", "fix_tb", "revise", "abort"],
+                    "outer_agent_guidance": (
+                        "The chip streamed every mission-scale case to completion "
+                        "but the task's acceptance predicate rejects the output. "
+                        "This is the published grader's verdict class -- it is "
+                        "never a testbench to relax. Grade the captured output "
+                        "offline, localise the block, fix it (fix_rtl / revise), "
+                        "then retry."
+                    ),
+                    "reference_files": {
+                        "top_rtl": top_rtl_path,
+                        "acceptance_dv": str(Path(pr) / ".coresmith" / "acceptance_dv.json"),
+                        "captured_streams": str(Path(pr) / ".coresmith" / "acceptance_dv"),
+                        "ers": str(Path(pr) / ".coresmith" / "ers_spec.json"),
+                    },
+                }
+                write_graph_event(pr, "Validation DV", "graph_node_exit", {
+                    "action": "pending_decision", "passed": False,
+                    "phase": "acceptance_dv", "test_count": len(_acc_cases),
+                })
                 return {"validation_dv_result": {
                     "passed": False,
+                    "pending_decision": True,
+                    "interrupt_payload": _acc_payload,
                     "error": "RTL Acceptance DV failed: "
                              + str(_acc.get("reason")),
                     "phase": "acceptance_dv",
+                    "test_count": len(_acc_cases),
+                    "requirement_count": 0,
+                    "testbench_path": "",
+                    "design_name": design_name,
+                    "contract_audit": _acc_audit,
+                    "contract_audit_path": "",
                     "acceptance_dv": {k: v for k, v in _acc.items()
                                       if k != "cases"},
                     "violations": _acc.get("violations", []),
-                }}
+                }, "pipeline_done": False}
         except Exception as _exc:  # noqa: BLE001 - never crash the node
             log(f"  [ACCEPTANCE-DV] gate error (skipped): {_exc}", YELLOW)
 

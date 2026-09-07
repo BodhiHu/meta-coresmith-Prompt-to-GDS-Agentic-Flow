@@ -62,6 +62,16 @@ Omit fields you don't need. `action` MUST be one of the payload's
 - `integration_check`: `accept` when the assembled chip_top lints clean and
   wiring matches the block diagram; lint-clean is NOT functionally-correct,
   so never claim more than acceptance to proceed to DV.
+- `validation_dv_failure` with `phase: acceptance_dv`: the chip ran every
+  mission-scale case to completion but the TASK'S OWN acceptance predicate
+  (the published grader: decode + PSNR, byte-exact result, tolerance)
+  rejects the output. Every testbench passed, so the defect is in what
+  they never checked end-to-end. Grade the captured stream(s) under
+  `.coresmith/acceptance_dv/` offline with the task grader in `inputs/`,
+  read its error (which macroblock / sample / field), map it to the
+  responsible block, and answer `fix_rtl` (surgical) or `revise` (spec
+  defect). `fix_tb` is meaningless here (there is no testbench to fix);
+  never `skip`; `abort` only when the predicate itself is broken.
 - `integration_dv` / `validation_dv` failure: READ the contract audit first
   (`.coresmith/contract_audit/*.json`). If it says `local_fix_possible: true`
   with specific lines, prefer fixing the RTL on disk + `fix_rtl` (always
