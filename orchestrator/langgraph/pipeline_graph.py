@@ -5325,6 +5325,42 @@ async def _single_context_uarch_stage(
     return None
 
 
+
+def _retire_derived_integration_artifacts(project_root: str) -> list[str]:
+    """Move the engine-assembled integration top out of rtl/integration.
+
+    Only files the deterministic assembler writes are moved: the assembled
+    ``user_project_wrapper.v`` (when the persisted integration record says
+    ``caravel_wrapper_assembled``) and ``user_project_wrapper_pads.v``. An
+    LLM-authored or self-assembled top is left alone. Returns the file names
+    moved. Never raises.
+    """
+    import time as _time
+    root = Path(project_root)
+    int_dir = root / "rtl" / "integration"
+    if not int_dir.is_dir():
+        return []
+    assembled = False
+    try:
+        rec = json.loads((root / ".coresmith" / "integration_result.json").read_text())
+        assembled = bool(rec.get("caravel_wrapper_assembled"))
+    except (OSError, ValueError):
+        assembled = False
+    names = ["user_project_wrapper_pads.v"] + (["user_project_wrapper.v"] if assembled else [])
+    moved: list[str] = []
+    dest = int_dir / "_stale" / _time.strftime("%Y%m%dT%H%M%S")
+    for n in names:
+        f = int_dir / n
+        if f.is_file():
+            try:
+                dest.mkdir(parents=True, exist_ok=True)
+                f.rename(dest / n)
+                moved.append(n)
+            except OSError:
+                pass
+    return moved
+
+
 async def init_tier_node(state: OrchestratorState) -> dict:
     """Compute the tier list (once) and log the current tier."""
     pr = state.get("project_root", str(PROJECT_ROOT))
@@ -5377,6 +5413,17 @@ async def init_tier_node(state: OrchestratorState) -> dict:
             current_idx = tier_idx_update = _idx
             tier = tier_list[current_idx]
             tier_blocks = [b for b in block_queue if b.get("tier", 1) == tier]
+    if revise:
+        # WP-31: the assembler's outputs under rtl/integration are rebuilt by
+        # the next integration check; a stale copy misleads the review (the
+        # chip lead cited nets "missing" from a wrapper that had not been
+        # rebuilt, three revise rounds in a row on ax25_9600).
+        _retired = _retire_derived_integration_artifacts(pr)
+        if _retired:
+            log(f"  Targeted revise: retired stale derived artifact(s) "
+                f"{_retired} (rebuilt at the next integration check)", CYAN)
+            write_graph_event(pr, "Init Tier", "derived_artifacts_retired",
+                              {"files": _retired})
 
     # Section 7a: stamp the engine git SHA at run start + WARN in the daemon log
     # if it changes mid-run (a hot-swap that flipped behavior under the run).
