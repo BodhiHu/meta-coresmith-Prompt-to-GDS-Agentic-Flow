@@ -1,4 +1,4 @@
-"""WP-26: an illegal contract name is skipped by the Caravel assembler, not a hazard."""
+"""WP-36: an illegal contract name is a HAZARD naming both endpoints (reverses WP-26's silent skip)."""
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -24,7 +24,7 @@ def _port_exact(modules):
     return f
 
 
-def test_dotted_producer_port_is_skipped_not_a_hazard():
+def test_dotted_producer_port_is_a_hazard_naming_both_endpoints():
     edge = {"edge_id": "aes_controller__status_done__to__user_project_wrapper__irq_level",
             "producer_block": "aes_controller", "producer_port": "status.done",
             "consumer_block": "user_project_wrapper", "consumer_port": "irq_level",
@@ -33,7 +33,9 @@ def test_dotted_producer_port_is_skipped_not_a_hazard():
     res = _resolve_by_contract(edge, "aes_controller", "user_project_wrapper", _port_exact(mods), mods)
     assert res is not None
     paired, hazards = res
-    assert hazards == [] and paired == []
+    assert paired == [] and len(hazards) == 1
+    assert "aes_controller" in hazards[0] and "user_project_wrapper" in hazards[0]
+    assert "not legal Verilog identifiers" in hazards[0] and "revise the CONTRACT" in hazards[0]
 
 
 def test_legal_edge_still_reports_missing_ports():
