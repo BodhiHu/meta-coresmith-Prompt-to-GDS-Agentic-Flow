@@ -8271,6 +8271,18 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
             and previous_tb_path
             and Path(previous_tb_path).exists()
         )
+        # WP-29: the engine's deterministic BFM testbench is derived from the
+        # bus contract and DUT-blind; it is regenerated every time and an
+        # operator/chip-lead edit of it is discarded (observed: a chip lead
+        # rewrote its sampling point and SCK period to make a failing chip pass).
+        if reuse_existing_tb and (previous_dv.get("tb_writer_flags") or {}).get("deterministic_bfm"):
+            log("  [INTEG-DV] previous testbench was the deterministic BFM -- "
+                "regenerating from the contract instead of reusing "
+                f"(after {previous_action}); operator edits to it are discarded", YELLOW)
+            write_graph_event(pr, "Integration DV", "deterministic_tb_regenerated", {
+                "after_action": previous_action, "discarded_path": previous_tb_path,
+            })
+            reuse_existing_tb = False
 
         generation_error: Exception | None = None
         if reuse_existing_tb:
@@ -8792,15 +8804,28 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
             "block_rtl_paths": block_rtl_paths,
             "contract_audit": contract_audit,
             "contract_audit_path": contract_audit.get("audit_path", ""),
-            "supported_actions": [
-                "retry",        # regenerate testbench + re-simulate
-                "fix_rtl",      # outer agent fixed RTL, re-run sim only
-                "fix_tb",       # outer agent fixed testbench, re-run sim only
-                "revise",       # feedback -> affected uArch specs + tier regen
-                "abort",        # stop the pipeline
-            ],
+            "supported_actions": (
+                # WP-29: the deterministic BFM is contract-derived and
+                # DUT-blind -- there is no testbench to fix.
+                ["retry", "fix_rtl", "revise", "abort"]
+                if (tb_result or {}).get("deterministic_bfm")
+                else [
+                    "retry",        # regenerate testbench + re-simulate
+                    "fix_rtl",      # outer agent fixed RTL, re-run sim only
+                    "fix_tb",       # outer agent fixed testbench, re-run sim only
+                    "revise",       # feedback -> affected uArch specs + tier regen
+                    "abort",        # stop the pipeline
+                ]
+            ),
+            "deterministic_bfm": bool((tb_result or {}).get("deterministic_bfm")),
             "outer_agent_guidance": (
-                "Integration DV (top-level simulation) failed. As the outer-loop "
+                ("THIS TESTBENCH IS THE ENGINE'S DETERMINISTIC, CONTRACT-DERIVED, "
+                 "DUT-BLIND BUS-PROTOCOL BFM (the same protocol the published "
+                 "grader drives). It is regenerated from the contract on every "
+                 "run and cannot be edited: fix_tb is not offered. A failure here "
+                 "is an RTL defect (fix_rtl) or a contract defect (revise).\n\n"
+                 if (tb_result or {}).get("deterministic_bfm") else "")
+                + "Integration DV (top-level simulation) failed. As the outer-loop "
                 "diagnostic agent, read the sim log and testbench to diagnose:\n"
                 "1. TESTBENCH BUG: If the testbench has incorrect port names, "
                 "wrong timing, or bad assumptions, edit the testbench at "
