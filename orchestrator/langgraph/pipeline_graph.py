@@ -9448,14 +9448,16 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
                     "RTL ACCEPTANCE DV FAILED (mission-scale stream run + the "
                     "task's acceptance predicate):\n" + "\n".join(_acc_lines)
                     + "\nCaptured RTL output streams: "
-                    + str(Path(pr) / ".coresmith" / "acceptance_dv")
+                    + (_acc.get("captured_dir") or str(Path(pr) / ".coresmith" / "acceptance_dv"))
                     + "\nViolations: " + json.dumps(
                         _acc.get("violations", []), default=str)[:1500]
                 )
+                _acc_oracle = bool(_acc.get("oracle_incomplete"))
                 _acc_audit = {
-                    "category": "ACCEPTANCE_DV_FAILURE",
+                    "category": ("ACCEPTANCE_ORACLE_INCOMPLETE" if _acc_oracle
+                                 else "ACCEPTANCE_DV_FAILURE"),
                     "local_fix_possible": None,
-                    "recommended_action": "fix_rtl",
+                    "recommended_action": "retry" if _acc_oracle else "fix_rtl",
                     "affected_blocks": [],
                     "outer_agent_summary": (
                         f"{sum(1 for c in _acc_cases if c.get('ok') is False)}/"
@@ -9487,19 +9489,29 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
                     "contract_audit": _acc_audit,
                     "contract_audit_path": "",
                     "acceptance_dv": {k: v for k, v in _acc.items()},
-                    "supported_actions": ["retry", "fix_rtl", "fix_tb", "revise", "abort"],
+                    # WP-38: no fix_tb -- the acceptance oracle is task-owned;
+                    # an oracle problem offers only retry/abort.
+                    "supported_actions": (["retry", "abort"] if _acc_oracle
+                                          else ["retry", "fix_rtl", "revise", "abort"]),
                     "outer_agent_guidance": (
-                        "The chip streamed every mission-scale case to completion "
-                        "but the task's acceptance predicate rejects the output. "
-                        "This is the published grader's verdict class -- it is "
-                        "never a testbench to relax. Grade the captured output "
-                        "offline, localise the block, fix it (fix_rtl / revise), "
-                        "then retry."
+                        ("The acceptance ORACLE did not complete (kind="
+                         f"{_acc.get('kind')}): {_acc.get('reason')}. This is NOT "
+                         "an RTL verdict. Do not change RTL for it; the operator "
+                         "fixes the adapter / toolchain, then retry.")
+                        if _acc_oracle else
+                        ("The task's acceptance oracle rejected the chip. Per "
+                         "case: status=1 (watchdog) means the case never "
+                         "completed within its cycle budget; criterion="
+                         "acceptance_predicate means the output was wrong. This "
+                         "is the published grader's verdict class -- there is no "
+                         "testbench to relax and fix_tb is not offered. Grade the "
+                         "captured output offline, localise the block, fix it "
+                         "(fix_rtl / revise), then retry.")
                     ),
                     "reference_files": {
                         "top_rtl": top_rtl_path,
                         "acceptance_dv": str(Path(pr) / ".coresmith" / "acceptance_dv.json"),
-                        "captured_streams": str(Path(pr) / ".coresmith" / "acceptance_dv"),
+                        "captured_streams": (_acc.get("captured_dir") or str(Path(pr) / ".coresmith" / "acceptance_dv")),
                         "ers": str(Path(pr) / ".coresmith" / "ers_spec.json"),
                     },
                 }

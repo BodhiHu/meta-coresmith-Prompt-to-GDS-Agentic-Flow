@@ -50,14 +50,22 @@ def test_axis_shape_still_classified_as_axis():
 
 def test_map_stimulus_explicit_cfg_dict():
     m = ad.map_stimulus({"data": b"\x01\x02", "cfg": {0: 6, 1: 64, 2: 48, 3: 28},
-                         "cycle_cap": 1000}, _contract())
+                         "cycle_cap": 1000, "word_bytes": 1}, _contract())
     assert m["payload"] == [1, 2] and m["cfg"] == [(0, 6), (1, 64), (2, 48), (3, 28)]
-    assert m["cycle_cap"] == 1000
+    assert m["cycle_cap"] == 1000 and m["in_word_bytes"] == 1 and m["out_word_bytes"] == 1
+    assert (m["max_out_words"], m["seed"], m["gap_pct"], m["bp_pct"]) == (0, 0, 10, 15)
 
 
-def test_map_stimulus_derives_cfg_from_shape_keys():
-    m = ad.map_stimulus({"data": [9], "n_frames": 2, "width": 64, "height": 48, "qp": 28}, _contract())
-    assert m["cfg"] == [(0, 2), (1, 64), (2, 48), (3, 28)]
+def test_map_stimulus_never_infers_cfg():
+    """WP-38: the n_frames/width/height/qp convention is the task's, not the engine's."""
+    assert ad.map_stimulus({"data": [9], "n_frames": 2, "width": 64, "height": 48, "qp": 28,
+                            "word_bytes": 1}, _contract()) is None
+    assert "no explicit 'cfg'" in ad.stream_case_problem({"data": [9], "n_frames": 2})
+
+
+def test_map_stimulus_requires_word_packing():
+    assert ad.map_stimulus({"data": [9], "cfg": {0: 1}}, _contract()) is None
+    assert "word_bytes" in ad.stream_case_problem({"data": [9], "cfg": {0: 1}})
 
 
 def test_map_stimulus_without_cfg_is_unmappable():
@@ -81,7 +89,8 @@ def test_pack_cases_stream_layout(tmp_path):
     assert struct.unpack("<II", b[4:12]) == (0, 1)
     assert struct.unpack("<II", b[12:20]) == (3, 28)
     assert struct.unpack("<I", b[20:24])[0] == 99
-    assert struct.unpack("<I", b[24:28])[0] == 2 and b[28:] == b"\x07\x08"
+    assert struct.unpack("<IIIIII", b[24:48]) == (0, 0, 10, 15, 1, 1)   # WP-38 schedule defaults
+    assert struct.unpack("<I", b[48:52])[0] == 2 and b[52:] == b"\x07\x08"
 
 
 # ---- E2E with a real verilator build: a byte echo with configurable offset --
@@ -141,7 +150,7 @@ def _project(tmp_path, offset: int, cfg_offset: int):
     top = root / "rtl" / "echo_top.v"
     top.write_text(ECHO_RTL)
     (root / "inputs" / "acceptance_stimulus.py").write_text(
-        "cases = [('a', {'data': bytes(range(1, 40)), 'cfg': {5: %d}, 'cycle_cap': 20000})]\n" % cfg_offset)
+        "cases = [('a', {'data': bytes(range(1, 40)), 'cfg': {5: %d}, 'cycle_cap': 20000, 'word_bytes': 1})]\n" % cfg_offset)
     (root / "inputs" / "golden.py").write_text(
         "def run(stim):\n    return bytes((b + %d) & 0xFF for b in stim['data'])\n" % offset)
     (root / "inputs" / "accept.py").write_text(
@@ -159,7 +168,9 @@ def test_stream_core_echo_passes_with_predicate(tmp_path, monkeypatch):
     res = ad.run_acceptance_dv(str(root), str(top), [])
     assert res["passed"], res
     assert res["cases"][0]["criterion"] == "acceptance_predicate"
-    assert (root / ".coresmith" / "acceptance_dv" / "a.out.bin").read_bytes() == bytes((b + 3) & 0xFF for b in range(1, 40))
+    assert (Path(res["captured_dir"]) / "a.out.bin").read_bytes() == bytes((b + 3) & 0xFF for b in range(1, 40))
+    assert res["candidate_sha"] and res["requested_cases"] == res["completed_cases"] == 1
+    assert (Path(res["captured_dir"]) / "receipt.json").exists()
 
 
 @needs_verilator
