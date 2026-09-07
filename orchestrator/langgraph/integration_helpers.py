@@ -2364,6 +2364,7 @@ MODULE = {module_stem}
 WAVES = 1
 EXTRA_ARGS += --trace --trace-structs
 EXTRA_ARGS += --build-jobs 1
+EXTRA_ARGS += -Wno-fatal
 include $(shell cocotb-config --makefiles)/Makefile.sim
 """
     sharded = (
@@ -2401,6 +2402,7 @@ TOPLEVEL = {safe_name}
 MODULE = {module_stem}
 COMPILE_ARGS += --trace --trace-structs --trace-depth 1 --trace-max-array 64
 EXTRA_ARGS += --build-jobs 1
+EXTRA_ARGS += -Wno-fatal
 CUSTOM_COMPILE_DEPS += Makefile
 {mission_line}include $(shell cocotb-config --makefiles)/Makefile.sim
 

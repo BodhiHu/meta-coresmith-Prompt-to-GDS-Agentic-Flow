@@ -1823,6 +1823,7 @@ MODULE = test_{block_name}
 WAVES = 1
 EXTRA_ARGS += --trace --trace-structs
 EXTRA_ARGS += --build-jobs {_build_jobs}
+EXTRA_ARGS += -Wno-fatal
 {_cov_line}{_def_line}include $(shell cocotb-config --makefiles)/Makefile.sim
 """
     # Clear a stale Verilator build if the flags/sources changed since last run

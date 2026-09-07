@@ -6854,6 +6854,15 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                 # Integration Lead + integration_failure interrupt, the same
                 # fail-closed retry path the generic branch uses.
                 if lint_clean and not missing:
+                    # WP-27: persist the record the backend (WP-17b) and the
+                    # graders read; this branch never wrote it, so a stale
+                    # Integration-Lead result named the wrong top.
+                    try:
+                        _ir_path = Path(pr) / ".coresmith" / "integration_result.json"
+                        _ir_path.parent.mkdir(parents=True, exist_ok=True)
+                        _ir_path.write_text(json.dumps(integration_result, indent=2, default=str))
+                    except OSError:
+                        pass
                     return {"integration_result": integration_result}
                 log(f"  [INTEGRATION] deterministic Caravel assembly NOT clean "
                     f"(lint_clean={lint_clean}, missing={missing}) -- "
