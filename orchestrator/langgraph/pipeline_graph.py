@@ -848,13 +848,17 @@ def _chip_lead_max_decisions() -> int:
 
 
 def _engine_checkout_guard() -> list[str]:
-    """WP-25: the engine checkout is read-only for the chip lead.
+    """WP-25/WP-37: the engine checkout is read-only for the chip lead.
 
     After every chip-lead decision, look for modifications in the engine's own
     git checkout (observed: a chip lead "repaired the DV resolver" inside
     orchestrator/ and its tests). ``CORESMITH_ENGINE_READONLY``: ``0`` -> off,
-    ``1`` (default) -> log + event, ``revert`` -> also `git checkout -- .` and
-    `git clean -fdq`. Returns the modified paths. Never raises.
+    anything else -> detect. Returns the modified paths (staged, unstaged or
+    untracked); the CALLER parks the run. Nothing is reverted: WP-25's
+    `git checkout -- .` restored from the index and missed staged edits, and
+    `git clean` could destroy legitimate operator files (review round 2). The
+    real boundary is a checkout the worker cannot write; this is detection.
+    Never raises.
     """
     mode = (os.environ.get("CORESMITH_ENGINE_READONLY", "1") or "1").strip().lower()
     if mode in ("0", "false", "no", "off"):
@@ -876,14 +880,21 @@ def _engine_checkout_guard() -> list[str]:
                           "Chip Lead", "engine_modified", {"paths": dirty[:32], "mode": mode})
     except Exception:  # noqa: BLE001
         pass
-    if mode == "revert":
-        try:
-            _sp.run(["git", "-C", str(root), "checkout", "--", "."], capture_output=True, timeout=60)
-            _sp.run(["git", "-C", str(root), "clean", "-fdq"], capture_output=True, timeout=60)
-            log("  [CHIP-LEAD] engine checkout reverted", YELLOW)
-        except Exception:  # noqa: BLE001
-            pass
     return dirty
+
+
+def _engine_modified_payload(payload: dict, dirty: list) -> dict:
+    """The parked payload for a chip-lead decision made from a modified engine
+    checkout (WP-37): the decision is discarded, a human takes over."""
+    parked = dict(payload or {})
+    parked["engine_modified"] = list(dirty)[:32]
+    parked["message"] = (
+        "ENGINE CHECKOUT MODIFIED after a chip-lead decision "
+        f"({len(dirty)} path(s): {list(dirty)[:6]}). The decision was discarded and "
+        "the chip lead is tripped for this run. Restore the engine checkout "
+        "(git status / git stash) and resume; nothing was reverted "
+        "automatically.\n\n" + str(parked.get("message", "")))
+    return parked
 
 
 async def _resolve_interrupt(payload: dict) -> dict:
@@ -936,7 +947,12 @@ async def _resolve_interrupt(payload: dict) -> dict:
             _CHIP_LEAD_TRIPPED = True
             return interrupt(payload)
 
-    _engine_checkout_guard()
+    _dirty = _engine_checkout_guard()
+    if _dirty:
+        # WP-37: a decision made from a modified engine is invalid. Trip the
+        # chip lead and park for a human; never revert automatically.
+        _CHIP_LEAD_TRIPPED = True
+        return interrupt(_engine_modified_payload(payload, _dirty))
     action = (decision or {}).get("action", "")
     supported = payload.get("supported_actions") or []
     if not action or (supported and action not in supported):

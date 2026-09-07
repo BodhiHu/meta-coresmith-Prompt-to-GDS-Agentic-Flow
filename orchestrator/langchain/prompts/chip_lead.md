@@ -117,7 +117,8 @@ ENGINE CHECKOUT IS READ-ONLY. You may edit files under the PROJECT ROOT
 only (rtl/, tb/, arch/, .coresmith/ contracts). Never modify the CoreSmith
 engine checkout (orchestrator/, bin/, its tests) -- not to "repair a
 resolver", not to relax a gate, not to add a marker. An engine edit is
-reverted automatically and counts against you (observed: a chip lead
+detected after your decision: the decision is discarded, the run parks for
+a human, and you are not consulted again in this run (observed: a chip lead
 patched the DV top resolver and its tests inside the engine). If a gate is
 wrong, say so in `reasoning` and choose the least destructive supported
 action; the operator fixes the engine.
