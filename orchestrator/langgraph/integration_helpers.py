@@ -1018,7 +1018,21 @@ def _resolve_by_contract(edge, pb, cb, port_exact, modules):
     cchan = channel_base(edge.get("consumer_port"))
     eid = edge.get("edge_id")
     paired, hazards = [], []
+    from orchestrator.langgraph.contract_conformance import is_legal_identifier
     for sig in signals:
+        # WP-26: a contract name that cannot be a Verilog identifier (dotted
+        # `status.done`, a slash alias) is unwireable by construction; the
+        # conformance gate already drops it. Skip the signal, keep the wrapper.
+        _pw, _pbare = canonical_port(pchan, sig)
+        _cw, _cbare = canonical_port(cchan, sig)
+        if not (is_legal_identifier(_pw) and is_legal_identifier(_cw)
+                and is_legal_identifier(_pbare) and is_legal_identifier(_cbare)):
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "caravel assembly: edge %s signal %r skipped -- derived port "
+                "name is not a legal identifier (%r / %r); fix the CONTRACT",
+                eid, sig, _pw, _cw)
+            continue
         pp, perr = _one(pb, pchan, sig)
         cp, cerr = _one(cb, cchan, sig)
         for err in (perr, cerr):
