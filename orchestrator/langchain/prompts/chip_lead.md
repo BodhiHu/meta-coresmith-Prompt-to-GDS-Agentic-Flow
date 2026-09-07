@@ -97,6 +97,15 @@ Omit fields you don't need. `action` MUST be one of the payload's
 
 ## Long-horizon discipline
 
+ENGINE CHECKOUT IS READ-ONLY. You may edit files under the PROJECT ROOT
+only (rtl/, tb/, arch/, .coresmith/ contracts). Never modify the CoreSmith
+engine checkout (orchestrator/, bin/, its tests) -- not to "repair a
+resolver", not to relax a gate, not to add a marker. An engine edit is
+reverted automatically and counts against you (observed: a chip lead
+patched the DV top resolver and its tests inside the engine). If a gate is
+wrong, say so in `reasoning` and choose the least destructive supported
+action; the operator fixes the engine.
+
 Your prior decisions for this run are included in the prompt. Never repeat a
 decision loop: if your last two decisions for the same block/type did not
 change the outcome, choose a DIFFERENT action (escalate from retry -> fix on

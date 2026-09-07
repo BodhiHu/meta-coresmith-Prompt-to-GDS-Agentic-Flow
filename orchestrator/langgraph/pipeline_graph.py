@@ -846,6 +846,46 @@ def _chip_lead_max_decisions() -> int:
         return 50
 
 
+
+def _engine_checkout_guard() -> list[str]:
+    """WP-25: the engine checkout is read-only for the chip lead.
+
+    After every chip-lead decision, look for modifications in the engine's own
+    git checkout (observed: a chip lead "repaired the DV resolver" inside
+    orchestrator/ and its tests). ``CORESMITH_ENGINE_READONLY``: ``0`` -> off,
+    ``1`` (default) -> log + event, ``revert`` -> also `git checkout -- .` and
+    `git clean -fdq`. Returns the modified paths. Never raises.
+    """
+    mode = (os.environ.get("CORESMITH_ENGINE_READONLY", "1") or "1").strip().lower()
+    if mode in ("0", "false", "no", "off"):
+        return []
+    import subprocess as _sp
+    root = Path(__file__).resolve().parent.parent.parent
+    try:
+        r = _sp.run(["git", "-C", str(root), "status", "--porcelain", "--untracked-files=normal"],
+                    capture_output=True, text=True, timeout=30)
+    except Exception:  # noqa: BLE001
+        return []
+    dirty = [ln[3:] for ln in (r.stdout or "").splitlines() if ln.strip()]
+    if not dirty:
+        return []
+    log(f"  [CHIP-LEAD] ENGINE CHECKOUT MODIFIED ({len(dirty)} path(s)): "
+        f"{dirty[:6]} -- the engine is read-only for the chip lead", RED)
+    try:
+        write_graph_event(os.environ.get("CORESMITH_PROJECT_ROOT", str(PROJECT_ROOT)),
+                          "Chip Lead", "engine_modified", {"paths": dirty[:32], "mode": mode})
+    except Exception:  # noqa: BLE001
+        pass
+    if mode == "revert":
+        try:
+            _sp.run(["git", "-C", str(root), "checkout", "--", "."], capture_output=True, timeout=60)
+            _sp.run(["git", "-C", str(root), "clean", "-fdq"], capture_output=True, timeout=60)
+            log("  [CHIP-LEAD] engine checkout reverted", YELLOW)
+        except Exception:  # noqa: BLE001
+            pass
+    return dirty
+
+
 async def _resolve_interrupt(payload: dict) -> dict:
     """Park (default) or let the in-graph chip lead decide. Fail-safe: any
     chip-lead failure trips to parked interrupts for the process lifetime
@@ -896,6 +936,7 @@ async def _resolve_interrupt(payload: dict) -> dict:
             _CHIP_LEAD_TRIPPED = True
             return interrupt(payload)
 
+    _engine_checkout_guard()
     action = (decision or {}).get("action", "")
     supported = payload.get("supported_actions") or []
     if not action or (supported and action not in supported):
@@ -8044,6 +8085,27 @@ def _maxgeo_gate_verdict(
             project_root, tb_path, tb_result, dims, marker, missing)
         if scoped is not None:
             return scoped
+        # WP-25: the engine's own deterministic BFM is DUT-blind and cannot
+        # co-tune around the declared maxima (the co-tuning this gate exists
+        # to catch). A fixed-geometry design (N=256 FFT) attains its maximum on
+        # every case yet never matches the value heuristic. Advisory, loudly.
+        if ((tb_result or {}).get("deterministic_bfm")
+                and (tb_result or {}).get("contract")
+                and not (tb_result or {}).get("conformance_only")):
+            return {
+                "advisory": True,
+                "scope": "deterministic-bfm",
+                "uncovered_dims": missing,
+                "value_only_dims": value_only,
+                "declared_dims": dims,
+                "marker_pairs": marker,
+                "reason": (
+                    "MAX-GEOMETRY gate: the engine's deterministic, DUT-blind "
+                    f"BFM drove this run; declared maxima {sorted(missing)} are "
+                    "not individually proven by marker value -- recorded as a "
+                    "loud advisory gap, not a hard failure."
+                ),
+            }
         # run3-followups: a functional MAXIMUM-CONFIGURATION case (baked by the
         # deterministic codegen, advertised via # MAXGEO_CASE) drives the max
         # config register value and the full IN/OUT payload extents end-to-end
