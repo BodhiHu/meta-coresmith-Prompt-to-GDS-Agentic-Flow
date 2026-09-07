@@ -1,4 +1,5 @@
-"""WP-21: valid_only channels carry their strobe; flow-control extras never park a block."""
+"""WP-21/WP-34: valid_only channels carry their strobe; the strobe is REQUIRED and
+undeclared flow-control ports are deviations (review round 2 reversed WP-21b)."""
 from __future__ import annotations
 
 import json
@@ -45,18 +46,24 @@ def test_ax25_shape_conforms(tmp_path):
     assert r.undeclared == [] and r.missing == [], (r.undeclared, r.missing)
 
 
-def test_flow_control_extra_is_reported_not_undeclared(tmp_path):
+def test_flow_control_extra_is_undeclared(tmp_path):
     root = _project(tmp_path, [_edge("a", "b", "req_ch", ["addr"], proto="req_resp")])
     r = check_block(root, "b", _rtl(tmp_path, "b", ["req_ch_addr", "req_ch_req", "req_ch_ack", "req_ch_bogus"]))
-    assert r.handshake_extra == ["req_ch_ack", "req_ch_req"]
-    assert r.undeclared == ["req_ch_bogus"]
+    assert r.undeclared == ["req_ch_ack", "req_ch_bogus", "req_ch_req"] and not r.ok
 
 
-def test_missing_synthesized_valid_only_strobe_is_reported_not_missing(tmp_path):
+def test_missing_synthesized_valid_only_strobe_is_missing(tmp_path):
     root = _project(tmp_path, [_edge("ctl", "shaper", "soft_reset", ["pulse"])])
     r = check_block(root, "shaper", _rtl(tmp_path, "shaper", ["soft_reset_pulse"]))
-    assert r.missing == [] and r.ok, (r.missing, r.undeclared)
-    assert r.handshake_missing == [("soft_reset", "soft_reset_valid")]
+    assert ("soft_reset", "soft_reset_valid") in r.missing and not r.ok
+
+
+def test_wrong_handshake_does_not_pass(tmp_path):
+    """Review round 2 counterexample: no required go_valid, a stray go_ready -> WP-21b said ok."""
+    root = _project(tmp_path, [_edge("ctl", "shaper", "go", ["mode"])])
+    r = check_block(root, "shaper", _rtl(tmp_path, "shaper", ["go_mode", "go_ready"]))
+    assert not r.ok
+    assert ("go", "go_valid") in r.missing and "go_ready" in r.undeclared
 
 
 def test_contract_enumerated_valid_is_still_required(tmp_path):

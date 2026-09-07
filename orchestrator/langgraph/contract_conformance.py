@@ -252,8 +252,6 @@ class ConformanceResult:
     checked_edges: int = 0
     missing: list = field(default_factory=list)     # [(channel, expected_port)]
     undeclared: list = field(default_factory=list)  # [port] -- <channel>_* not in the contract
-    handshake_extra: list = field(default_factory=list)  # WP-21: <channel>_<flow-control>, reported only
-    handshake_missing: list = field(default_factory=list)  # WP-21b: [(channel, port)] synthesized valid_only strobe absent, reported only
     ambiguous: list = field(default_factory=list)   # [(channel, explanation)]
     instantiates: list = field(default_factory=list)  # sibling blocks wired in
     accounted: set = field(default_factory=set)     # ports bound to a declared signal
@@ -528,15 +526,6 @@ def declared_ports(rtl_text: str, module: str | None = None) -> set[str]:
     return ports
 
 
-#: Flow-control / qualifier suffixes a channel may legitimately carry beyond
-#: its enumerated payload (WP-21). A `<channel>_<suffix>` RTL port with one of
-#: these is the channel's handshake, not an undeclared deviation.
-_FLOW_CONTROL_SUFFIXES = frozenset({
-    "valid", "ready", "req", "ack", "resp_valid", "rvalid", "rready", "wvalid",
-    "wready", "strobe", "stb", "srdy", "drdy", "tvalid", "tready", "tlast", "last",
-})
-
-
 def check_block(project_root, block_name: str, rtl_path,
                 siblings=()) -> ConformanceResult:
     """Verify one block's ports against every contract edge that touches it."""
@@ -625,15 +614,6 @@ def check_block(project_root, block_name: str, rtl_path,
                                    f"'{chan}'; prefix it"))
                     bare_owner[bare] = chan
                     accepted.add(bare)
-                elif (row.get("kind") == "handshake"
-                      and str(edge.get("handshake_protocol") or "").strip().lower()
-                      == "valid_only"):
-                    # WP-21b: the strobe was synthesized by signal_specs, not
-                    # enumerated by the contract; a valid_only consumer may
-                    # legitimately key off a pulse-encoded payload field.
-                    # Report it, never fail the block over it (blocks generated
-                    # before the derivation carried `valid` lacked it: AX25).
-                    res.handshake_missing.append((chan, prefixed))
                 else:
                     res.missing.append((chan, prefixed))
 
@@ -644,7 +624,6 @@ def check_block(project_root, block_name: str, rtl_path,
     # either a misspelling of one of the above or an invented signal; both break
     # name-based edge resolution.
     channels = set()
-    declared_by_chan: dict = {}
     for edge in _load_contracts(project_root):
         for role, key in (("producer_block", "producer_port"),
                           ("consumer_block", "consumer_port")):
@@ -652,24 +631,12 @@ def check_block(project_root, block_name: str, rtl_path,
                 base = channel_base(edge[key])
                 if base:
                     channels.add(base)
-                    declared_by_chan.setdefault(base, set()).update(
-                        str(sp["name"]).split("/", 1)[0] for sp in signal_specs(edge))
     for port in sorted(ports):
         if port in accepted or port in _LOCKED_BOUNDARY_PORTS:
             continue
         for chan in channels:
             if port.startswith(chan + "_"):
-                # WP-21: a channel's flow-control signal is part of the
-                # channel even when the contract forgot to enumerate it;
-                # report it, never fail the block over it.
-                _suffix = port[len(chan) + 1:]
-                _declared = declared_by_chan.get(chan, set())
-                _collapsed = any(n == _suffix or n.endswith("_" + _suffix)
-                                 for n in _declared)
-                if _suffix in _FLOW_CONTROL_SUFFIXES and not _collapsed:
-                    res.handshake_extra.append(port)
-                else:
-                    res.undeclared.append(port)
+                res.undeclared.append(port)
                 break
     return res
 
