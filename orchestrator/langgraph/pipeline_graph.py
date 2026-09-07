@@ -6197,6 +6197,29 @@ def _drop_outer_wrapper_blocks(modules: dict, rtl_paths: dict,
     return outer
 
 
+def _self_assembled_wrapper(wrapper_block: str, modules: dict,
+                            block_rtl_sources: dict) -> bool:
+    """True when the wrapper block already IS the graded top (WP-24).
+
+    It must declare the locked Caravel pad boundary (io_in/io_out/io_oeb) and
+    instantiate every other frontend block in its own source.
+    """
+    mod = modules.get(wrapper_block)
+    if mod is None:
+        return False
+    try:
+        names = {str(p.name) for p in mod.ports}
+    except Exception:  # noqa: BLE001
+        return False
+    if not {"io_in", "io_out", "io_oeb"} <= names:
+        return False
+    others = {b for b in modules if b != wrapper_block}
+    if not others:
+        return False
+    from orchestrator.langchain.agents.integration_lead import assert_blocks_instantiated
+    return assert_blocks_instantiated(block_rtl_sources.get(wrapper_block, ""), others) is None
+
+
 async def integration_check_node(state: OrchestratorState) -> dict:
     """Run the Integration Lead agent to check compatibility and generate top-level RTL.
 
@@ -6633,6 +6656,52 @@ async def integration_check_node(state: OrchestratorState) -> dict:
             load_interface_contract_edges,
         )
         _wrapper_block = detect_wrapper_block(modules)
+        # WP-24: the generator may have written the wrapper block as the
+        # COMPLETE graded top (pads + every core block instantiated). Re-wrapping
+        # it produces wiring hazards and a nested top the QSPI pin-boundary gate
+        # rejects; adopt it as the chip top instead.
+        if _wrapper_block is not None and _self_assembled_wrapper(
+                _wrapper_block, modules, block_rtl_sources):
+            _sa_top = rtl_paths[_wrapper_block]
+            _sa_blocks = [p for b, p in rtl_paths.items() if b != _wrapper_block]
+            log(f"  [INTEGRATION] wrapper block '{_wrapper_block}' already IS the "
+                f"graded top (locked pads + {len(_sa_blocks)} blocks instantiated) "
+                f"-- adopting it as chip top", CYAN)
+            lint_result = await asyncio.to_thread(
+                lint_top_level, _sa_top, _sa_blocks, "user_project_wrapper",
+                project_root=_pr(state),
+            )
+            lint_clean = lint_result.get("clean", False)
+            integration_result = {
+                "design_name": design_name,
+                "top_module": modules[_wrapper_block].name or "user_project_wrapper",
+                "top_rtl_path": _sa_top,
+                "block_count": len(modules),
+                "wire_count": 0,
+                "skipped_connections": [],
+                "mismatches": [],
+                "error_count": 0 if lint_clean else 1,
+                "warning_count": 0,
+                "lint_clean": lint_clean,
+                "lint_errors": lint_result.get("errors", ""),
+                "block_rtl_paths": {b: p for b, p in rtl_paths.items() if b != _wrapper_block},
+                "self_assembled_wrapper": True,
+            }
+            try:
+                _ir_path = Path(pr) / ".coresmith" / "integration_result.json"
+                _ir_path.write_text(json.dumps(integration_result, indent=2, default=str))
+            except OSError:
+                pass
+            write_graph_event(pr, "Integration Check", "graph_node_exit", {
+                "success": bool(lint_clean), "top_module": integration_result["top_module"],
+                "block_count": len(modules), "self_assembled_wrapper": True,
+                "lint_clean": lint_clean,
+            })
+            if lint_clean:
+                return {"integration_result": integration_result}
+            log("  [INTEGRATION] self-assembled wrapper does not lint clean -- "
+                "continuing with the deterministic assembly / Integration Lead",
+                YELLOW)
         # The PRD's structured pin map, when present, lets the top route the pads
         # itself -- so the design needs no pin-adapter block and assembly no
         # longer depends on finding one.
