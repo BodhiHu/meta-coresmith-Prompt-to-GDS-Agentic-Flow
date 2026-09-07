@@ -6798,8 +6798,21 @@ async def integration_check_node(state: OrchestratorState) -> dict:
         from orchestrator.langchain.agents.integration_lead import (
             assert_blocks_instantiated,
         )
+        # WP-22: a Caravel-style top is a HIERARCHY (chip top -> wrapper ->
+        # blocks); the assembled wrapper lives next to the top under
+        # rtl/integration. Judge instantiation over the whole hierarchy.
+        _hier_text = chip_top_text
+        try:
+            _int_dir = Path(top_rtl_path).parent if top_rtl_path else None
+            if _int_dir and _int_dir.is_dir():
+                for _vf in sorted(_int_dir.glob("*.v")):
+                    if top_rtl_path and _vf.resolve() == Path(top_rtl_path).resolve():
+                        continue
+                    _hier_text += "\n" + _vf.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            pass
         postcond = assert_blocks_instantiated(
-            chip_top_text, set(block_rtl_sources.keys())
+            _hier_text, set(block_rtl_sources.keys())
         )
         if postcond:
             log(f"  [INTEGRATION] Postcondition failed: {postcond}", RED)
@@ -6807,13 +6820,51 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                 "error": "block_instantiation_postcondition_failed",
                 "missing_summary": postcond,
             })
-            return {"integration_result": {
-                "skipped": True,
+            # WP-22: park for the chip lead instead of ending the run (the
+            # fft256_qspi run went straight to status "done" here).
+            _pc_payload = {
+                "type": "integration_failure",
+                "phase": "postcondition",
+                "design_name": design_name,
+                "top_rtl_path": top_rtl_path,
+                "block_count": len(block_rtl_sources),
+                "error_count": 1,
+                "lint_clean": False,
+                "postcondition": postcond,
+                "block_rtl_paths": rtl_paths,
+                "agent_notes": str(agent_result.get("notes", ""))[:2000],
+                "supported_actions": ["retry", "fix_rtl", "abort"],
+                "outer_agent_guidance": (
+                    "The Integration Lead's chip top does not instantiate every "
+                    "block (postcondition). Either the top dropped blocks (retry "
+                    "re-runs the Integration Lead) or you can wire the missing "
+                    "blocks into the top on disk yourself (fix_rtl). abort only if "
+                    "the block set itself is wrong."
+                ),
+                "reference_files": {"top_rtl": top_rtl_path},
+            }
+            _pc_resp = await _resolve_interrupt(_pc_payload)
+            _pc_action = (_pc_resp or {}).get("action", "abort") if isinstance(_pc_resp, dict) else "abort"
+            write_graph_event(pr, "Integration Check", "graph_node_exit", {
+                "action": _pc_action, "phase": "postcondition",
+            })
+            _pc_result = {
                 "reason": postcond,
                 "postcondition_failed": True,
                 "agent_notes": agent_result.get("notes", ""),
                 "top_rtl_path": top_rtl_path,
-            }}
+                "action_taken": _pc_action,
+            }
+            if _pc_action in ("retry", "fix_rtl"):
+                _pc_result["retry_requested"] = True
+                _pc_result["fix_applied"] = str((_pc_resp or {}).get("rtl_fix_description", ""))
+                log(f"  [INTEGRATION] postcondition park -> {_pc_action}; "
+                    f"re-running the integration check", YELLOW)
+            else:
+                _pc_result["aborted"] = True
+                _pc_result["skipped"] = True
+                log("  [INTEGRATION] postcondition park -> abort", RED)
+            return {"integration_result": _pc_result}
 
         # Memory-primitive postcondition (fix #3): the integration LLM must
         # INSTANTIATE library memory cells (cs_mem/cs_sram/cs_fpmem), never
@@ -7239,6 +7290,8 @@ def route_after_integration(state: OrchestratorState) -> str:
     result = state.get("integration_result") or {}
     if result.get("aborted"):
         return END
+    if result.get("retry_requested"):
+        return "integration_check"   # WP-22: re-run after a postcondition park
     if result.get("skipped") or result.get("skipped_by_user"):
         return END
     if result.get("lint_clean") is False:
@@ -7256,6 +7309,7 @@ def route_after_integration(state: OrchestratorState) -> str:
 route_after_integration.__edge_labels__ = {
     END: "DONE",
     "integration_dv": "DV",
+    "integration_check": "Retry",
 }
 
 

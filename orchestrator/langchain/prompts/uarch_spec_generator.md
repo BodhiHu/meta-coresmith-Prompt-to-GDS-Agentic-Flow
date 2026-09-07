@@ -115,8 +115,9 @@ For each port, verify:
    "coeff_data_in" / "coeff_data_out").
 
 5. **Clock and reset**: ALL blocks in the same clock domain must use
-   identical clock and reset port names and polarities. Each block simply
-   declares `clk` and `rst_n` (or per the ERS convention) as inputs and
+   identical clock and reset port names and polarities, taken from the ERS /
+   locked interface (Caravel: `wb_clk_i` + active-high `wb_rst_i`; `clk` +
+   `rst_n` only when the ERS specifies nothing). Each block declares them as inputs and
    assumes clean, synchronized signals. Do NOT include clock/reset
    synchronization logic, clock gating, or reset synchronizer sub-blocks
    inside the block -- these are inserted by the integration agent during
