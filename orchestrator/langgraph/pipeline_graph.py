@@ -9416,11 +9416,20 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
         # Honest-skip (recorded, non-blocking) when no artifact/tooling; a
         # divergence/fidelity break FAILS validation_dv with the case evidence.
         try:
+            from orchestrator.harness.task_adapter import run_task_adapter
             from orchestrator.langgraph.acceptance_dv import run_acceptance_dv
 
+            # WP-41: a task ADAPTER (inputs/task_adapter.py) runs the task's
+            # own driver/checker on the candidate and is the acceptance
+            # authority when present; the engine's native stream harness is
+            # the fallback for tasks without one.
             _acc = await asyncio.to_thread(
-                run_acceptance_dv, pr, top_rtl_path, block_rtl_paths,
+                run_task_adapter, pr, top_rtl_path, block_rtl_paths,
             )
+            if _acc is None:
+                _acc = await asyncio.to_thread(
+                    run_acceptance_dv, pr, top_rtl_path, block_rtl_paths,
+                )
             span.set_attribute("acceptance_dv_passed", bool(_acc.get("passed")))
             span.set_attribute("acceptance_dv_skipped", bool(_acc.get("skipped")))
             write_graph_event(pr, "Validation DV", "acceptance_dv", {
@@ -9502,7 +9511,12 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
                         ("The task's acceptance oracle rejected the chip. Per "
                          "case: status=1 (watchdog) means the case never "
                          "completed within its cycle budget; criterion="
-                         "acceptance_predicate means the output was wrong. This "
+                         "acceptance_predicate / task_adapter_functional means "
+                         "the output was wrong; kind=budget_fail means the "
+                         "output was right but over the task's cycle budget "
+                         "(throughput) -- a real failure of the published "
+                         "grader, fixed in the RTL's architecture, not by "
+                         "changing the budget. This "
                          "is the published grader's verdict class -- there is no "
                          "testbench to relax and fix_tb is not offered. Grade the "
                          "captured output offline, localise the block, fix it "
