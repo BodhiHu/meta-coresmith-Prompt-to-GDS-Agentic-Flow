@@ -25,6 +25,10 @@ RULES:
    Caravel task, `rst` active-high when the spec says so). Only when the spec
    declares no reset at all, default to a synchronous active-low `rst_n`.
 4. Use a single clock domain (the spec's clock port; `clk` when unspecified).
+4b. Port names come from the AUTHORITATIVE PORT NAMES table verbatim. A contract
+   signal that already starts with its channel prefix or equals the channel name is
+   NOT prefixed again (channel `irq` + signal `irq` -> port `irq`, never `irq_irq`),
+   even if the uArch spec says otherwise -- the table wins.
 5. All arithmetic must be fixed-point -- no floating point.
 6. Use explicit bit widths on all signals. No implicit widths.
 7. Include a module header comment with: block name, description, I/O ports.
