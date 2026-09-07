@@ -32,13 +32,10 @@ from orchestrator.langgraph.architecture_graph import build_architecture_graph
 from orchestrator.tests.conftest import assert_doc_files
 from orchestrator.tests.fft16_fixtures import (
     FFT16_BLOCK_DIAGRAM,
-    FFT16_CLOCK_TREE,
     FFT16_FRD_MARKDOWN,
-    FFT16_MEMORY_MAP,
     FFT16_PRD_ANSWERS,
     FFT16_PRD_DOCUMENT,
     FFT16_PRD_QUESTIONS,
-    FFT16_REGISTER_SPEC,
     FFT16_SAD_MARKDOWN,
 )
 
@@ -60,9 +57,6 @@ def _patch_all_arch_specialists(
     sad_result=None,
     frd_result=None,
     block_diagram_result=None,
-    memory_map_result=None,
-    clock_tree_result=None,
-    register_spec_result=None,
     constraint_result=None,
 ):
     """Patch all architecture specialists at the node level.
@@ -92,21 +86,6 @@ def _patch_all_arch_specialists(
         "orchestrator.architecture.specialists.block_diagram.analyze_block_diagram",
         new_callable=AsyncMock,
         return_value=block_diagram_result or FFT16_BLOCK_DIAGRAM,
-    ))
-    stack.enter_context(patch(
-        "orchestrator.architecture.specialists.memory_map.analyze_memory_map",
-        new_callable=AsyncMock,
-        return_value=memory_map_result or FFT16_MEMORY_MAP,
-    ))
-    stack.enter_context(patch(
-        "orchestrator.architecture.specialists.clock_tree.analyze_clock_tree",
-        new_callable=AsyncMock,
-        return_value=clock_tree_result or FFT16_CLOCK_TREE,
-    ))
-    stack.enter_context(patch(
-        "orchestrator.architecture.specialists.register_spec.analyze_register_spec",
-        new_callable=AsyncMock,
-        return_value=register_spec_result or FFT16_REGISTER_SPEC,
     ))
     stack.enter_context(patch(
         "orchestrator.architecture.constraints.check_constraints",
@@ -555,9 +534,6 @@ class TestDocumentSetCompleteness:
         sad_result=None,
         frd_result=None,
         block_diagram_result=None,
-        memory_map_result=None,
-        clock_tree_result=None,
-        register_spec_result=None,
         constraint_result=None,
     ):
         """Patch all specialists including the new SAD and FRD nodes."""
@@ -582,21 +558,6 @@ class TestDocumentSetCompleteness:
             "orchestrator.architecture.specialists.block_diagram.analyze_block_diagram",
             new_callable=AsyncMock,
             return_value=block_diagram_result or FFT16_BLOCK_DIAGRAM,
-        ))
-        stack.enter_context(patch(
-            "orchestrator.architecture.specialists.memory_map.analyze_memory_map",
-            new_callable=AsyncMock,
-            return_value=memory_map_result or FFT16_MEMORY_MAP,
-        ))
-        stack.enter_context(patch(
-            "orchestrator.architecture.specialists.clock_tree.analyze_clock_tree",
-            new_callable=AsyncMock,
-            return_value=clock_tree_result or FFT16_CLOCK_TREE,
-        ))
-        stack.enter_context(patch(
-            "orchestrator.architecture.specialists.register_spec.analyze_register_spec",
-            new_callable=AsyncMock,
-            return_value=register_spec_result or FFT16_REGISTER_SPEC,
         ))
         stack.enter_context(patch(
             "orchestrator.architecture.constraints.check_constraints",
