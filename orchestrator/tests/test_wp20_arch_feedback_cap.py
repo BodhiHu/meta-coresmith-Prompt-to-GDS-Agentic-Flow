@@ -55,6 +55,7 @@ def test_prompts_follow_contract_reset():
     root = Path(ag.__file__).resolve().parent.parent
     bd = (root / "langchain/prompts/block_diagram.md").read_text()
     ir = (root / "langchain/prompts/integration_review.md").read_text()
-    assert "wb_rst_i" in bd and "wb_rst_i" in ir
+    assert "names them, with their polarity" in bd
+    assert "declared names and polarity" in ir
     from orchestrator.langchain.agents.chip_lead_agent import CHIP_LEAD_PROMPT
     assert "ARCHITECTURE REVIEW DISCIPLINE" in CHIP_LEAD_PROMPT

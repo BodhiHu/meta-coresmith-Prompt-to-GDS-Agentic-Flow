@@ -1,5 +1,5 @@
 **DETERMINISTIC BFM RULE.** If the simulation log says `DETERMINISTIC BFM ACTIVE` or
-`QSPI-SLAVE CONFORMANCE DV ACTIVE`, the testbench is the engine's contract-derived,
+`<BUS> CONFORMANCE DV ACTIVE`, the testbench is the engine's contract-derived,
 DUT-blind bus driver -- the same protocol the published grader drives. It is
 engine-owned: `fix_tb` is not available and an edited copy is discarded. A failure
 there (DONE never seen, a read nibble released or unresolved, a byte mismatch) is
@@ -56,7 +56,7 @@ Important rules:
   classify as `UARCH_SPEC_ERROR` or `ARCHITECTURE_ERROR`.
 - If the VCD is missing, empty, or header-only, classify that
   as `DV_PROCESS_ERROR` unless there is enough other evidence to decide.
-- For application KPIs like PSNR, compression ratio, decoded frame quality,
+- For application KPIs like output quality, compression ratio, decoded-output fidelity,
   latency, or throughput, identify the first internal semantic value that
   diverges from the golden trace. Do not stop at "KPI failed."
 - Do not recommend skipping validation.

@@ -102,7 +102,7 @@ Must include at minimum:
 - **MPW-002**: GDS file validity -- GDS exists, is non-empty (> 1KB),
   and contains valid layer data.
 - **MPW-003**: Port naming -- wrapper port names match the shuttle's
-  golden reference (io_in, io_out, io_oeb for OpenFrame).
+  golden reference (the shuttle's locked pad ports).
 - **MPW-004**: Power connections -- vccd1/vssd1 properly connected
   via power connection macros.
 - **MPW-005**: Precheck pass -- the full MPW precheck suite must pass
@@ -139,7 +139,7 @@ sub-unit match on one tile". Three axes, all REQUIRED:
    multiple transform windows for audio IPs, a complete representative file
    for compression IPs, a full benchmark program (e.g. Dhrystone/CoreMark
    class) for CPUs, a full packet/burst sequence for interface IPs. ONE
-   tile / block / macroblock / instruction is NEVER acceptance scale — a
+   tile / block / coding unit / instruction is NEVER acceptance scale — a
    sub-unit stimulus has no state-feedback cascade depth and certifies
    nothing about the mission.
 2. **Content class**: real-world or boundary-exercising content (textured

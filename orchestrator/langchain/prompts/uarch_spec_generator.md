@@ -43,17 +43,18 @@ design the ready/valid registers to them.
 PUBLISHED STREAM SAMPLER CONTRACT (chip-boundary stream ports ONLY):
 The task's shipped sampler/testbench is the contract for these ports; the
 ERS transcribes its acceptance semantics and that transcription wins over
-anything below. For the ppabench `stream_tb.py` family the semantics are:
-the grader drives the chip's top-level stream ports (in_valid/in_ready/in_data/
-in_last, out_valid/out_ready/out_data/out_last) before each rising edge and
-samples them in the read-only phase AFTER the edge. It counts:
+anything below. When the task's sampler is a post-edge stream driver (the
+common cocotb pattern: it drives the chip's top-level stream ports -- the
+input stream's valid/ready/data/last and the output stream's
+valid/ready/data/last, named as the task declares them -- before each rising
+edge and samples them in the read-only phase AFTER the edge), it counts:
   input word accepted on edge N  <=> in_valid (driven before N) && in_ready as it
                                      reads AFTER N (the value in_ready takes at N)
   output beat consumed on edge N <=> out_valid/out_data as they read after N &&
                                      out_ready as driven for cycle N
 Rules that follow. Violating either desyncs the grader; the failure is
 seed-dependent under backpressure and is NOT caught by a testbench that samples
-ready before the edge (arms A, B and E of the h264 experiment all shipped it):
+ready before the edge (a common and expensive mistake):
   - in_ready: the grader re-offers a word whenever in_ready reads 0 after the
     edge, and counts it accepted on the first edge after which in_ready reads 1.
     Two self-consistent ways to honour that; pick ONE and keep it everywhere:
@@ -123,7 +124,7 @@ spell `irq_irq`: the conformance gate demands the collapsed name and parks the b
 
 5. **Clock and reset**: ALL blocks in the same clock domain must use
    identical clock and reset port names and polarities, taken from the ERS /
-   locked interface (Caravel: `wb_clk_i` + active-high `wb_rst_i`; `clk` +
+   locked interface (the task's declared names and polarity; `clk` +
    `rst_n` only when the ERS specifies nothing). Each block declares them as inputs and
    assumes clean, synchronized signals. Do NOT include clock/reset
    synchronization logic, clock gating, or reset synchronizer sub-blocks
@@ -145,7 +146,7 @@ For this block, identify and document:
 1. **Payload semantics**: exact field layout, numeric format, mode encoding,
    sideband meaning, packet ordering, and when each field is valid.
 2. **Atomicity rules**: which payload fields and sideband metadata must refer
-   to the same transaction, sample, macroblock, packet, frame, or state update.
+   to the same transaction, sample, coding unit, packet, frame, or state update.
 3. **Stateful feedback loops**: any predictor, context RAM, recurrence,
    reconstruction feedback, adaptive coding state, rolling checksum, history
    buffer, or neighbor table that is updated from this block or consumed by it.
@@ -160,11 +161,11 @@ For codecs and predictors, explicitly specify the closed-loop invariant. For
 example:
 
 > The reconstructed pixels emitted for neighbor/context update after each
-> macroblock MUST be generated from the same selected mode, selected quantized
+> coding unit MUST be generated from the same selected mode, selected quantized
 > coefficients, predictor samples, inverse transform, dequantization, clipping,
 > and deblock rules that the decoder/golden model applies to the emitted
-> bitstream. The context update for macroblock N MUST occur before any
-> dependent macroblock N+1 consumes that context, and mode/coefficient/context
+> bitstream. The context update for coding unit N MUST occur before any
+> dependent coding unit N+1 consumes that context, and mode/coefficient/context
 > metadata must advance atomically.
 
 If the block cannot satisfy a required semantic contract with the interfaces
@@ -683,11 +684,11 @@ RULES
     the relevant interfaces or explicitly require a block repartition. Guessing
     or recomputing from incomplete metadata is not acceptable.
 
-## Caravel pad-adapter block
+## Pad-adapter block (locked chip boundary)
 
-If this block is the `user_project_wrapper` of a Caravel task, specify a PAD
-ADAPTER, not a structural chip top: its ports are the locked `io_in` /
-`io_out` / `io_oeb` pads plus the inward contract channels it produces or
+If this block carries the task's declared locked boundary (the block named as
+the task's `top`), specify a PAD ADAPTER, not a structural chip top: its ports
+are the locked boundary pins plus the inward contract channels it produces or
 consumes; it instantiates no other block and routes no contract edge. The
 engine assembles the chip top from all blocks and the interface contract; a
 block that instantiates a sibling fails the conformance gate.

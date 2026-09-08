@@ -29,15 +29,15 @@ For EVERY connection in the block diagram:
    packed `tdata` bus and is NOT a mismatch -- do not "fix" it.
 4. **Clock/reset naming**: All blocks must use the same clock and reset port
    names and the same reset polarity, as the requirements / locked interface
-   define them (Caravel tasks: `wb_clk_i` + active-high `wb_rst_i`; otherwise
+   define them (a locked interface's declared names and polarity; otherwise
    the ERS's names; `clk` + active-low `rst_n` only when nothing is specified),
    unless multiple clock domains exist. Flag a block whose reset polarity or
    name differs from its own spec.
 5. **Stub coherence**: The Section 9 Verilog Interface Stub of each block
    must match its own Section 2 port table exactly.
-6. **Pad-adapter scope** (Caravel tasks): the block named
-   `user_project_wrapper` is a PAD ADAPTER, a leaf exposing the locked
-   `io_in`/`io_out`/`io_oeb` pads plus its inward contract ports. The ENGINE
+6. **Pad-adapter scope** (locked-boundary tasks): the block named as the
+   task's declared `top` is a PAD ADAPTER, a leaf exposing the locked
+   boundary pins plus its inward contract ports. The ENGINE
    assembles the chip top from the blocks and the contract after RTL
    generation, and its conformance gate rejects a block that instantiates a
    sibling. "The wrapper does not instantiate the other blocks" / "edges are

@@ -10,7 +10,7 @@ P = Path(pg.__file__).resolve().parent.parent / "langchain" / "prompts"
 def test_chip_lead_never_demands_a_structural_wrapper():
     s = (P / "chip_lead.md").read_text()
     assert "THE ENGINE ASSEMBLES THE CHIP TOP" in s
-    assert "must NOT instantiate the other blocks" in s
+    assert "PAD ADAPTER -- a LEAF" in s and "must NOT instantiate" in s
     assert "engine adopted as the top (WP-24)" not in s
 
 
@@ -21,4 +21,4 @@ def test_integration_review_excludes_wrapper_instantiation_from_issues():
 
 def test_uarch_spec_prompt_specifies_a_pad_adapter():
     s = (P / "uarch_spec_generator.md").read_text()
-    assert "Caravel pad-adapter block" in s and "instantiates no other block" in s
+    assert "Pad-adapter block (locked chip boundary)" in s and "instantiates no other block" in s
