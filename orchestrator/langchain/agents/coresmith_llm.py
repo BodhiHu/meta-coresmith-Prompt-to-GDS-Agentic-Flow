@@ -1713,8 +1713,16 @@ class ClaudeLLM:
         resume_session_id: str | None = None,
         supported_flags: frozenset[str] | None = None,
         reasoning_effort: str = "",
+        project_root: str | None = None,
     ) -> list[str]:
         """Construct the ``codex exec [resume <id>]`` argv (testable, no I/O).
+
+        WP-50: the sandbox is REAL unless the operator opts out with
+        ``CORESMITH_CODEX_SANDBOX=danger-full-access``. ``workspace-write``
+        confines the worker's writes to its cwd (a scratch dir inside the
+        project) plus the project root (``--add-dir``); the engine checkout
+        and the home directory are read-only at the OS level. ``project_root``
+        ``None`` resolves ``CORESMITH_PROJECT_ROOT``; "" adds no dir.
 
         ``reasoning_effort`` overrides the model_reasoning_effort tier for this
         call (the architecture specialists pass "xhigh"); empty falls back to
@@ -1739,10 +1747,14 @@ class ClaudeLLM:
             head += ["resume", resume_session_id]
 
         # (flag, value-or-None) in the original argv order.
+        if project_root is None:
+            project_root = os.environ.get("CORESMITH_PROJECT_ROOT", "").strip()
+        _bypass = (sandbox or "").strip() == "danger-full-access"
         tail_spec: list[tuple[str, str | None]] = [
             ("--json", None),
-            ("--dangerously-bypass-approvals-and-sandbox", None),
+            *([("--dangerously-bypass-approvals-and-sandbox", None)] if _bypass else []),
             ("--sandbox", sandbox),
+            *([("--add-dir", project_root)] if (project_root and not _bypass) else []),
             ("--skip-git-repo-check", None),
             ("-C", workdir),
             ("-c", "model_reasoning_effort=" + (
@@ -1773,6 +1785,7 @@ class ClaudeLLM:
         "--json",
         "--dangerously-bypass-approvals-and-sandbox",
         "--sandbox",
+        "--add-dir",
         "--skip-git-repo-check",
         "-C",
         "-c",

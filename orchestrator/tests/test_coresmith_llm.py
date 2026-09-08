@@ -737,7 +737,9 @@ class TestCommandConstruction:
             assert "--json" in cmd
             assert "-m" in cmd
             assert cmd[cmd.index("-m") + 1] == "gpt-5.6-sol"
-            assert "--dangerously-bypass-approvals-and-sandbox" in cmd
+            # WP-50: the sandbox is real by default
+            assert "--dangerously-bypass-approvals-and-sandbox" not in cmd
+            assert cmd[cmd.index("--sandbox") + 1] == "workspace-write"
 
 
 class TestWatchdogBehaviour:
@@ -882,7 +884,6 @@ class TestBuildCodexCmdFlagFiltering:
         expected = [
             "/x/codex", "exec",
             "--json",
-            "--dangerously-bypass-approvals-and-sandbox",
             "--sandbox", "workspace-write",
             "--skip-git-repo-check",
             "-C", "/wd",
@@ -893,7 +894,7 @@ class TestBuildCodexCmdFlagFiltering:
         # A supported_flags set that would drop everything must NOT affect fresh.
         cmd = ClaudeLLM._build_codex_cmd(
             "/x/codex", "gpt-5.5", "/wd", "workspace-write",
-            None, supported_flags=frozenset(),
+            None, supported_flags=frozenset(), project_root="",
         )
         assert cmd == expected
 
