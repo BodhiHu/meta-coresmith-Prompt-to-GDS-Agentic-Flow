@@ -115,6 +115,10 @@ def parse_verilog_ports(rtl_path: str, module: str | None = None) -> VerilogModu
     # Strip comments (line and block)
     source = re.sub(r'//.*?$', '', source, flags=re.MULTILINE)
     source = re.sub(r'/\*.*?\*/', '', source, flags=re.DOTALL)
+    # WP-45: see the lint/sim configuration (no defines): `ifdef USE_POWER_PINS
+    # port sections are not ports, and `endif is never a pin name.
+    from orchestrator.langgraph.contract_conformance import strip_preprocessor
+    source = strip_preprocessor(source)
 
     # Narrow to the requested module, else the file stem -- the same precedence
     # rtl_module_name uses. Sliced to its endmodule so a later module's

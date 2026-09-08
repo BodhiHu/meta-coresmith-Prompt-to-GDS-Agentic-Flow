@@ -254,8 +254,23 @@ def run_task_adapter(project_root: str, top_rtl: str, block_rtls: Any = None) ->
         return _incomplete("adapter declares no CASES (or duplicates)", "adapter_defect", **common)
     declared = [str(d) for d in declared]
     if receipt.get("declared_top") and str(receipt["declared_top"]) != cand["top"]:
-        return _incomplete(f"adapter grades top {receipt['declared_top']!r} but the "
-                           f"candidate top is {cand['top']!r}", "oracle_incomplete", **common)
+        # WP-45: a wrong top is an INTEGRATION defect (the graded boundary was
+        # not produced), not an oracle problem: park with fix actions.
+        _why = (f"the task grades top {receipt['declared_top']!r} but the candidate's "
+                f"top module is {cand['top']!r}; the graded boundary was not produced")
+        summary = {"passed": False, "skipped": False, "kind": "boundary_mismatch",
+                   "reason": _why, "cases": [], "violations": [{
+                       "type": "acceptance_dv_failure",
+                       "criterion": "task_adapter_boundary", "kind": "boundary_mismatch",
+                       "gap_class": "integration", "suggested_fix": _why}],
+                   "budgets": {}, "requested_cases": 0, "completed_cases": 0, **common}
+        try:
+            (keep / "summary.json").write_text(json.dumps(summary, default=str, indent=1))
+            (Path(project_root) / ".coresmith" / "acceptance_dv.json").write_text(
+                json.dumps(summary, default=str, indent=1))
+        except OSError:
+            pass
+        return summary
     cases = receipt.get("cases")
     if not isinstance(cases, dict):
         return _incomplete("receipt has no cases dict", "oracle_incomplete", **common)

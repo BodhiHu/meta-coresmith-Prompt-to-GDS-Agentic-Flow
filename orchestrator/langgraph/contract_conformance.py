@@ -535,6 +535,58 @@ def format_contract_port_table(project_root, block_name: str) -> str:
     return "\n".join(lines)
 
 
+_PP_RE = re.compile(r"^[ \t]*`(ifdef|ifndef|elsif|else|endif|define|undef|include|timescale|default_nettype|resetall)\b[ \t]*([A-Za-z_][A-Za-z0-9_]*)?[^\n]*$")
+
+
+def strip_preprocessor(text: str, defines=()) -> str:
+    """Evaluate Verilog compiler directives the way lint/sim sees the file
+    with ``defines`` set (default: none), and drop the directive lines (WP-45).
+
+    `ifdef X` keeps its body only when X is defined; `ifndef X` the reverse;
+    `else`/`elsif` switch; nesting is honoured. Without this, a pad block's
+    `ifdef USE_POWER_PINS ... `endif port section was parsed as ports and the
+    assembled Caravel wrapper instantiated a pin named `endif`.
+    """
+    defined = set(defines or ())
+    out: list[str] = []
+    # stack of (this_branch_active, any_branch_taken, parent_active)
+    stack: list[list[bool]] = []
+
+    def _active() -> bool:
+        return all(fr[0] for fr in stack)
+
+    for line in str(text).splitlines(keepends=True):
+        m = _PP_RE.match(line)
+        if not m:
+            if _active():
+                out.append(line)
+            continue
+        kw, name = m.group(1), m.group(2) or ""
+        if kw == "ifdef":
+            parent = _active()
+            take = parent and name in defined
+            stack.append([take, take, parent])
+        elif kw == "ifndef":
+            parent = _active()
+            take = parent and name not in defined
+            stack.append([take, take, parent])
+        elif kw == "elsif":
+            if stack:
+                fr = stack[-1]
+                take = fr[2] and not fr[1] and name in defined
+                fr[0], fr[1] = take, fr[1] or take
+        elif kw == "else":
+            if stack:
+                fr = stack[-1]
+                take = fr[2] and not fr[1]
+                fr[0], fr[1] = take, True
+        elif kw == "endif":
+            if stack:
+                stack.pop()
+        # define/undef/include/timescale/... : dropped, never a port
+    return "".join(out)
+
+
 _PORT_RE = re.compile(r"\b(?:input|output|inout)\b([^;)]*)", re.MULTILINE)
 
 
@@ -548,6 +600,7 @@ def declared_ports(rtl_text: str, module: str | None = None) -> set[str]:
     them, while the top module itself has only the Caravel boundary. Defaults to
     the FIRST module, which is the one the file is named for.
     """
+    rtl_text = strip_preprocessor(rtl_text)   # WP-45
     text = re.sub(r"/\*.*?\*/", " ", rtl_text, flags=re.S)
     text = re.sub(r"//[^\n]*", " ", text)
     if module:

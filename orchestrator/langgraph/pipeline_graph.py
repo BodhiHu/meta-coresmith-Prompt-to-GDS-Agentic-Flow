@@ -6283,6 +6283,66 @@ def _self_assembled_wrapper(wrapper_block: str, modules: dict,
     return assert_blocks_instantiated(block_rtl_sources.get(wrapper_block, ""), others) is None
 
 
+async def _park_caravel_assembly_failure(pr: str, design_name: str, rtl_paths: dict,
+                                         reason: str, errors: list, top_rtl_path: str) -> dict:
+    """WP-45: the deterministic Caravel assembly is the ONLY way to produce the
+    graded `user_project_wrapper`; when it is not clean, park instead of
+    falling back to an LLM-assembled top with a different module name."""
+    errors = [str(e) for e in (errors or [])][:24]
+    log(f"  [INTEGRATION] deterministic Caravel assembly NOT clean ({reason}) -- "
+        "parking (no Integration Lead fallback for a locked Caravel boundary)", RED)
+    for _e in errors[:8]:
+        log(f"      - {_e}", RED)
+    write_graph_event(pr, "Integration Check", "caravel_assembly_failed", {
+        "reason": reason, "errors": errors, "top_rtl_path": top_rtl_path,
+    })
+    payload = {
+        "type": "integration_failure",
+        "phase": "caravel_assembly",
+        "design_name": design_name,
+        "top_rtl_path": top_rtl_path,
+        "block_count": len(rtl_paths or {}),
+        "error_count": max(1, len(errors)),
+        "lint_clean": False,
+        "assembly_reason": reason,
+        "assembly_errors": errors,
+        "block_rtl_paths": rtl_paths,
+        "supported_actions": ["retry", "fix_rtl", "abort"],
+        "outer_agent_guidance": (
+            "The ENGINE assembles the graded `user_project_wrapper` from the "
+            "blocks and the interface contract; that assembly did not come out "
+            f"clean ({reason}; see assembly_errors). There is NO LLM-integrator "
+            "fallback for a locked Caravel boundary: a differently named top "
+            "cannot be graded. Fix the block RTL or port declarations the "
+            "errors point at (fix_rtl), or retry after an engine/operator fix. "
+            "abort only if the block set itself is wrong."
+        ),
+        "reference_files": {"top_rtl": top_rtl_path},
+    }
+    resp = await _resolve_interrupt(payload)
+    action = (resp or {}).get("action", "abort") if isinstance(resp, dict) else "abort"
+    write_graph_event(pr, "Integration Check", "graph_node_exit", {
+        "action": action, "phase": "caravel_assembly",
+    })
+    result = {
+        "reason": f"caravel assembly {reason}",
+        "caravel_assembly_failed": True,
+        "assembly_errors": errors,
+        "top_rtl_path": top_rtl_path,
+        "action_taken": action,
+    }
+    if action in ("retry", "fix_rtl"):
+        result["retry_requested"] = True
+        result["fix_applied"] = str((resp or {}).get("rtl_fix_description", ""))
+        log(f"  [INTEGRATION] caravel assembly park -> {action}; re-running the "
+            "integration check", YELLOW)
+    else:
+        result["aborted"] = True
+        result["skipped"] = True
+        log("  [INTEGRATION] caravel assembly park -> abort", RED)
+    return result
+
+
 async def integration_check_node(state: OrchestratorState) -> dict:
     """Run the Integration Lead agent to check compatibility and generate top-level RTL.
 
@@ -6809,6 +6869,12 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                     "wiring_errors": _wiring_errors[:16],
                     "wiring_errors_path": str(_haz_path),
                 })
+            if _wiring_errors:
+                # WP-45: fail closed -- never hand a locked boundary to the
+                # Integration Lead.
+                return {"integration_result": await _park_caravel_assembly_failure(
+                    pr, design_name, rtl_paths, "wiring hazards",
+                    list(_wiring_errors), "")}
             if not _wiring_errors:
                 top_rtl_path = asm["rtl_path"]
                 # Lint with the pad block's renamed copy swapped in (avoids a
@@ -6874,10 +6940,15 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                     except OSError:
                         pass
                     return {"integration_result": integration_result}
-                log(f"  [INTEGRATION] deterministic Caravel assembly NOT clean "
-                    f"(lint_clean={lint_clean}, missing={missing}) -- "
-                    f"escalating to Integration Lead / fail-closed interrupt",
-                    YELLOW)
+                _errs = [ln for ln in str(lint_result.get("errors", "")).splitlines()
+                         if ln.strip()][:20]
+                if missing:
+                    _errs.append("blocks not instantiated by the assembled wrapper: "
+                                 + ", ".join(missing))
+                return {"integration_result": await _park_caravel_assembly_failure(
+                    pr, design_name, asm["lint_block_paths"],
+                    "lint errors" if not lint_clean else "missing instantiations",
+                    _errs, top_rtl_path)}
             # else: wiring hazards / not-clean assembly -> fall through to the
             # Integration Lead below (which raises the integration_failure
             # interrupt for retry).
@@ -9516,7 +9587,9 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
                          "output was right but over the task's cycle budget "
                          "(throughput) -- a real failure of the published "
                          "grader, fixed in the RTL's architecture, not by "
-                         "changing the budget. This "
+                         "changing the budget; kind=boundary_mismatch means "
+                         "the candidate's top module is not the task's graded "
+                         "boundary (fix the integration, never the adapter). This "
                          "is the published grader's verdict class -- there is no "
                          "testbench to relax and fix_tb is not offered. Grade the "
                          "captured output offline, localise the block, fix it "

@@ -124,7 +124,9 @@ def grade(candidate, workdir):
     return {"cases": {"x": {"ok": True}}}
 ''')
     res = ta.run_task_adapter(str(root), str(top), {"leaf": str(blk)})
-    assert res["oracle_incomplete"] and "candidate top is 'chip_top'" in res["reason"]
+    assert res["passed"] is False and res["kind"] == "boundary_mismatch"
+    assert not res.get("oracle_incomplete") and "top module is 'chip_top'" in res["reason"]
+    assert res["violations"][0]["criterion"] == "task_adapter_boundary"
     (root / "inputs" / "task_adapter.py").write_text("import nonexistent_package_xyz\nCASES=['x']\n")
     res = ta.run_task_adapter(str(root), str(top), {"leaf": str(blk)})
     assert res["oracle_incomplete"] and res["kind"] == "adapter_defect" and "rc=3" in res["reason"]
