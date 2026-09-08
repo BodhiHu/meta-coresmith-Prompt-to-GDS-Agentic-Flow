@@ -33,7 +33,8 @@ def test_dotted_producer_port_is_a_hazard_naming_both_endpoints():
     res = _resolve_by_contract(edge, "aes_controller", "user_project_wrapper", _port_exact(mods), mods)
     assert res is not None
     paired, hazards = res
-    assert paired == [] and len(hazards) == 1
+    assert paired == [] and len(hazards) >= 1     # WP-46: the synthesized strobe is a hazard too
+    assert all("aes_controller" in h and "user_project_wrapper" in h for h in hazards)
     assert "aes_controller" in hazards[0] and "user_project_wrapper" in hazards[0]
     assert "not legal Verilog identifiers" in hazards[0] and "revise the CONTRACT" in hazards[0]
 

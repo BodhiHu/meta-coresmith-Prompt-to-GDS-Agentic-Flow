@@ -961,18 +961,22 @@ def _contract_signal_names(edge: dict) -> list[str]:
     concluded the contract did not record signal names at all. Their union is
     the channel's port set.
     """
-    out: list[str] = []
-    for f in (edge.get("fields") or []):
-        n = f.get("name") if isinstance(f, dict) else f
-        if n:
-            out.append(str(n))
-    for s in (edge.get("sideband_signals") or []):
-        n = s.get("name") if isinstance(s, dict) else s
-        if n:
-            out.append(str(n))
+    declared = [f.get("name") if isinstance(f, dict) else f
+                for f in (edge.get("fields") or [])] + \
+               [s.get("name") if isinstance(s, dict) else s
+                for s in (edge.get("sideband_signals") or [])]
+    if not any(declared):
+        return []          # a legacy edge: the name-keyed fallback applies
+    # WP-46: ONE derivation shared with the conformance gate and the RTL
+    # prompt (signal_specs): fields + sidebands + the handshake strobes the
+    # protocol implies (WP-21). Binding only the declared fields left the
+    # synthesized `valid` to the bare-name stage, which merged it with a
+    # same-named port of another block (ax25_9600: START resolved to X).
+    from orchestrator.langgraph.contract_conformance import signal_specs
     seen, uniq = set(), []
-    for n in out:
-        if n not in seen:
+    for spec in signal_specs(edge):
+        n = str(spec.get("name") or "")
+        if n and n not in seen:
             seen.add(n)
             uniq.append(n)
     return uniq
@@ -1354,6 +1358,9 @@ def generate_caravel_wrapper_top(
         return out
 
     edge_bound: set[frozenset] = set()
+    # WP-46: ports the CONTRACT stage bound; the legacy name-keyed stage
+    # must never re-union them (or any two same-direction ports).
+    bound_ports: set[tuple[str, str]] = set()
     for e in edges:
         pb, cb = e.get("producer_block"), e.get("consumer_block")
         if pb not in modules or cb not in modules or pb == cb:
@@ -1369,6 +1376,7 @@ def generate_caravel_wrapper_top(
                 continue
             for pp, cp in _paired:
                 uf.union((pb, pp.name), (cb, cp.name))
+            bound_ports.update({(pb, pp.name), (cb, cp.name)})
             if _paired:
                 edge_bound.add(frozenset((pb, cb)))
             continue
@@ -1423,6 +1431,7 @@ def generate_caravel_wrapper_top(
             continue
         for pp, cp in paired:
             uf.union((pb, pp.name), (cb, cp.name))
+            bound_ports.update({(pb, pp.name), (cb, cp.name)})
         if paired:
             edge_bound.add(frozenset((pb, cb)))
 
@@ -1437,6 +1446,17 @@ def generate_caravel_wrapper_top(
         a, b = tuple(pair)
         for key in sorted(set(keyed[a]) & set(keyed[b])):
             pa, pbp = keyed[a][key], keyed[b][key]
+            # WP-46: a port the contract already bound is never re-unioned by
+            # name (modem_controller.start_valid <- regmap vs hdlc_framer.
+            # start_valid <- modem_controller.stage_start_valid share a NAME,
+            # not a net), and two inputs / two outputs are never a connection.
+            if any((a, p.name) in bound_ports for p in pa) or \
+                    any((b, p.name) in bound_ports for p in pbp):
+                continue
+            if (len(pa) == 1 and len(pbp) == 1
+                    and pa[0].direction == pbp[0].direction
+                    and pa[0].direction != "inout"):
+                continue
             if len(pa) != 1 or len(pbp) != 1:
                 if frozenset((a, b)) not in edge_bound:
                     wiring_errors.append(
@@ -1468,6 +1488,24 @@ def generate_caravel_wrapper_top(
             wiring_errors.append(
                 f"wire group {sorted(members)} mixes widths {sorted(widths)} -- "
                 f"refusing to short different-width nets")
+            continue
+        # WP-46: exactly one driver per net. Two outputs on one net (or none)
+        # is a wiring hazard -- with a locked Caravel boundary it parks (WP-45)
+        # instead of shipping a wrapper that resolves to X.
+        _dirs = {(bn, pn): (modules[bn].port_by_name(pn).direction
+                            if modules[bn].port_by_name(pn) else "")
+                 for (bn, pn) in members}
+        _drv = sorted(k for k, d in _dirs.items() if d == "output")
+        _inout = [k for k, d in _dirs.items() if d == "inout"]
+        if len(_drv) > 1:
+            wiring_errors.append(
+                f"wire group {sorted(members)} is driven by {len(_drv)} outputs "
+                f"{_drv} -- refusing a multiply-driven net")
+            continue
+        if not _drv and not _inout:
+            wiring_errors.append(
+                f"wire group {sorted(members)} has no driver (inputs only) -- "
+                "refusing to short two inputs")
             continue
         width = max(widths) if widths else 1
         rb, rp = root
