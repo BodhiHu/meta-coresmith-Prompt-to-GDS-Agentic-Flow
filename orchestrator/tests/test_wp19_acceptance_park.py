@@ -10,7 +10,7 @@ def test_acceptance_failure_returns_pending_decision():
     src = inspect.getsource(pg.validation_dv_node)
     i = src.find("[ACCEPTANCE-DV] FAILED")
     assert i > 0
-    tail = src[i:i + 6000]
+    tail = src[i:i + 12000]   # the park block grew with WP-38/41/45/47 guidance
     assert '"pending_decision": True' in tail
     assert '"type": "validation_dv_failure"' in tail
     assert '"phase": "acceptance_dv"' in tail
