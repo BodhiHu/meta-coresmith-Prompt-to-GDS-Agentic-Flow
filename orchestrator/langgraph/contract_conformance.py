@@ -201,6 +201,48 @@ def canonical_port(chan: str, signal) -> tuple[str, str]:
     return f"{chan}_{sig}", sig
 
 
+def illegal_edge_end_names(edge: dict, chan_raw) -> list[dict]:
+    """The names on ONE END of an edge whose derived port is not a legal
+    Verilog identifier (WP-44). Each entry: {edge_id, channel, signal,
+    derived, message}. Empty when every derived name is declarable."""
+    out: list[dict] = []
+    eid = edge.get("edge_id")
+    chan = channel_base(chan_raw)
+    if chan and not is_legal_identifier(chan):
+        out.append({"edge_id": eid, "channel": str(chan_raw), "signal": "<channel>",
+                    "derived": chan,
+                    "message": (f"edge {eid!r}: channel {chan_raw!r} reduces to "
+                                f"{chan!r}, which is not a legal Verilog identifier "
+                                "-- revise the CONTRACT (a dotted or otherwise "
+                                "undeclarable name cannot be a port)")})
+        return out
+    for spec in signal_specs(edge):
+        port, _bare = canonical_port(chan, spec["name"])
+        if port and not is_legal_identifier(port):
+            out.append({"edge_id": eid, "channel": str(chan_raw), "signal": str(spec["name"]),
+                        "derived": port,
+                        "message": (f"edge {eid!r}: signal {spec['name']!r} on channel "
+                                    f"{chan_raw!r} derives port {port!r}, which is not a "
+                                    "legal Verilog identifier -- revise the CONTRACT")})
+    return out
+
+
+def illegal_contract_names(edges) -> list[dict]:
+    """Every undeclarable derived name across a contract set (both ends of
+    every edge), for the interface-definition structural gate (WP-44)."""
+    out: list[dict] = []
+    for edge in edges or []:
+        if not isinstance(edge, dict):
+            continue
+        for key, end in (("producer_port", "producer"), ("consumer_port", "consumer")):
+            raw = edge.get(key)
+            if not raw:
+                continue
+            for bad in illegal_edge_end_names(edge, raw):
+                out.append({**bad, "end": end})
+    return out
+
+
 def channel_signals(edge: dict, chan_raw) -> list[dict]:
     """Canonical port rows for ONE END of a contract edge.
 
@@ -586,6 +628,12 @@ def check_block(project_root, block_name: str, rtl_path,
             # or signal spelled as a slash enumeration/alias is reduced here,
             # never concatenated into an unparseable name.
             chan = channel_base(chan_raw)
+            # WP-44: an undeclarable derived name fails the block with the
+            # reason instead of vanishing from the port set (channel_signals
+            # still drops it from the rows, so the generator is never asked
+            # to declare it).
+            for _bad in illegal_edge_end_names(edge, chan_raw):
+                res.ambiguous.append((chan or chan_raw, _bad["message"]))
             for row in channel_signals(edge, chan_raw):
                 prefixed, bare = row["port"], row["bare"]
                 has_p = prefixed in ports
