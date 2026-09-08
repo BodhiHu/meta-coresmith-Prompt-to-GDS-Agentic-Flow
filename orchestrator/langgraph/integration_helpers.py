@@ -935,25 +935,17 @@ def _is_power_pin(port_name: str) -> bool:
     return bool(_POWER_PIN_RE.match(port_name))
 
 
-def detect_wrapper_block(modules: dict[str, VerilogModule]) -> str | None:
-    """Identify the pad-adapter / Caravel wrapper block among the parsed modules.
-
-    Prefers a block literally named ``user_project_wrapper``; else the block
-    whose ports carry the Caravel GPIO pad vector (io_in / io_out / io_oeb); else
-    a block whose *module* name is ``user_project_wrapper``. Returns the block
-    key or None (non-Caravel design)."""
-    if CARAVEL_TOP_MODULE in modules:
-        return CARAVEL_TOP_MODULE
-    for bn, mod in modules.items():
-        names = {p.name for p in mod.ports}
-        if all(io in names for io in _PAD_IO_PORTS):
-            return bn
-    for bn, mod in modules.items():
-        if mod.name == CARAVEL_TOP_MODULE:
-            return bn
+def detect_wrapper_block(modules: dict[str, VerilogModule], top_name: str = "") -> str | None:
+    """The block that IS the declared chassis top (WP-51): matched by name
+    only -- the block key or its module name equals ``top_name`` (default: the
+    Caravel chassis top). No port-pattern inference."""
+    want = top_name or CARAVEL_TOP_MODULE
+    if want in modules:
+        return want
+    for name, mod in modules.items():
+        if mod.name == want:
+            return name
     return None
-
-
 def _contract_signal_names(edge: dict) -> list[str]:
     """Every signal a contract edge declares: payload fields + sideband.
 

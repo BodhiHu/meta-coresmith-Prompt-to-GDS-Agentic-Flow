@@ -59,7 +59,13 @@ from pathlib import Path
 #: A block whose module declares the full Caravel pad boundary has externally
 #: MANDATED port names (io_in/io_out/io_oeb[37:0] are fixed by the shuttle), so
 #: the <channel>_<field> convention cannot apply to it.
-_LOCKED_BOUNDARY_PORTS = ("io_in", "io_out", "io_oeb")
+def _locked_boundary_ports(project_root) -> tuple[str, ...]:
+    """WP-51: the task's chassis says which pad ports are locked."""
+    try:
+        from orchestrator.chassis.profile import locked_boundary_ports
+        return locked_boundary_ports(project_root)
+    except Exception:  # noqa: BLE001 - layering guard
+        return ("io_in", "io_out", "io_oeb")
 
 _logger = logging.getLogger(__name__)
 
@@ -663,7 +669,8 @@ def check_block(project_root, block_name: str, rtl_path,
     # at all. The architecture specifies a pin ADAPTER with ports; the RTL
     # produced a competing top. Nothing can wire that, which is why the
     # deterministic assembler always fell back to an LLM-authored integration.
-    res.locked_boundary = all(p in ports for p in _LOCKED_BOUNDARY_PORTS)
+    _locked = _locked_boundary_ports(project_root)
+    res.locked_boundary = bool(_locked) and all(p in ports for p in _locked)
 
     bare_owner: dict[str, str] = {}      # bare port -> channel that claimed it
     accepted: set[str] = set()
@@ -733,7 +740,7 @@ def check_block(project_root, block_name: str, rtl_path,
                 if base:
                     channels.add(base)
     for port in sorted(ports):
-        if port in accepted or port in _LOCKED_BOUNDARY_PORTS:
+        if port in accepted or port in _locked:
             continue
         for chan in channels:
             if port.startswith(chan + "_"):
