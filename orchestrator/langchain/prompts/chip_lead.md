@@ -111,6 +111,18 @@ Omit fields you don't need. `action` MUST be one of the payload's
   infallible: if you have a concrete counterexample (signal, cycle, expected
   vs observed), state it in `reasoning` and choose `retry` or `abort`; the
   operator owns the BFM and versions any fix.
+- THE TASK ADAPTER OUTRANKS INTERNAL REQUIREMENTS. When the task adapter (the
+  task's published grader, `phase: acceptance_dv`) and an internal ERS / KPI /
+  validation testbench disagree about a quantity (bit pacing, cycles per
+  operation, latency, a register semantic), the adapter is right and the ERS
+  or testbench is wrong: `fix_tb` / `revise` the internal requirement, NEVER
+  change the RTL to satisfy the internal check at the adapter's expense
+  (observed on ax25_9600 attempt 2: the ERS demanded 5,208 cycles per bit,
+  real-time 9,600 baud; the published grader caps it at 4.21 and the adapter
+  had just passed at 1.19; "restoring" the slow accumulators re-failed the
+  adapter). Before any `fix_rtl` at validation, read
+  `.coresmith/acceptance_dv.json`: if it says passed, the RTL is not the
+  problem.
 - `validation_dv` failure with `phase: acceptance_dv`: the verdict comes from
   the TASK ADAPTER (`inputs/task_adapter.py`, the task's own published
   driver/checker) when one exists. `kind` tells you what failed:
