@@ -220,6 +220,11 @@ class TestBackendSingleBlock:
         integ_dir.mkdir(parents=True)
         integ_top = integ_dir / "adder_8bit_top.v"
         integ_top.write_text("module adder_8bit_top();\n  adder_8bit u (); endmodule\n")
+        # WP-49: the backend reads the integration RECORD; it never discovers a top from files.
+        (tmp_path / ".coresmith").mkdir(exist_ok=True)
+        (tmp_path / ".coresmith" / "integration_result.json").write_text(json.dumps({
+            "top_module": "adder_8bit_top", "top_rtl_path": str(integ_top),
+            "block_rtl_paths": {block_name: str(rtl_dir / f"{block_name}.v")}}))
 
         state = {
             "project_root": str(tmp_path),

@@ -6730,6 +6730,20 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                 "block_count": 1,
                 "single_block_wrapper": True,
             })
+            # WP-49: the single-block path records the candidate too -- the
+            # backend reads the record and never discovers a top from files.
+            try:
+                _ir_path = Path(pr) / ".coresmith" / "integration_result.json"
+                _ir_path.parent.mkdir(parents=True, exist_ok=True)
+                _ir_path.write_text(json.dumps(integration_result, indent=2, default=str))
+            except OSError:
+                pass
+            try:
+                from orchestrator.harness.top_module import write_candidate_receipt
+                write_candidate_receipt(pr, top_name, output_path, rtl_paths,
+                                        note="single-block passthrough")
+            except (ValueError, OSError) as _exc:
+                log(f"  [INTEGRATION] candidate receipt skipped: {_exc}", YELLOW)
             return {"integration_result": integration_result}
 
         # ---- Defect 4: deterministic Caravel user_project_wrapper assembly ----
@@ -6744,7 +6758,11 @@ async def integration_check_node(state: OrchestratorState) -> dict:
             generate_caravel_wrapper_top,
             load_interface_contract_edges,
         )
-        _wrapper_block = detect_wrapper_block(modules)
+        from orchestrator.chassis.profile import chassis_top
+        from orchestrator.harness.top_module import declared_top as _declared_top_fn
+        # WP-51: the wrapper block is the one named as the task's declared top.
+        _wrapper_block = detect_wrapper_block(
+            modules, _declared_top_fn(pr) or chassis_top(pr) or "")
         # WP-24: the generator may have written the wrapper block as the
         # COMPLETE graded top (pads + every core block instantiated). Re-wrapping
         # it produces wiring hazards and a nested top the QSPI pin-boundary gate

@@ -60,7 +60,7 @@ def test_resolve_top_falls_back_to_a_verified_integration_record(tmp_path):
 
 def test_integration_check_records_and_enforces_the_top():
     src = inspect.getsource(pg.integration_check_node)
-    assert src.count("write_candidate_receipt(") == 2
+    assert src.count("write_candidate_receipt(") >= 3   # caravel, single-block, lead paths
     assert '"top module mismatch"' in src
     assert "_self_assembled_wrapper" not in src
 
