@@ -609,3 +609,80 @@ Test suite at ff83964 (`-m "not live_llm"`): 1 failed (PDK Tech LEF, environment
 Replay plan (no LLM): `/tmp/replay_adapters.py` on e6 grades the retained candidates through the
 adapters -- expected ax25 FAIL (functional + budget), aes PASS, fft PASS, h264 F-2 FAIL, F-3b PASS,
 mcu3 PASS(smoke) -- before any re-drive.
+
+### WP-43 (0e2d9b7, 2026-09-08): the engine assembles the Caravel chip top; the wrapper block is a pad adapter
+
+Observed on ax25_9600 attempt 2 (engine v31): the chip lead revised twice at the integration review
+demanding that the `user_project_wrapper` block "instantiate all six children and route all 21 edges",
+while `contract_conformance.check_block` rejects any block that instantiates a sibling and the
+integration check assembles `rtl/integration/user_project_wrapper.v` itself (arm-g-1 shipped exactly
+that way: `caravel_wrapper_assembled: True`). The RTL generator obeyed the gate; the review demanded the
+opposite; each round cost ~35 min and 2 decisions. WP-42's sentence "a policy-authored wrapper adopted
+as the top is judged like any other block" fed the confusion. Fix is prompt-only: chip_lead.md (rule
+"THE ENGINE ASSEMBLES THE CHIP TOP"), integration_review.md (pad-adapter scope is not an issue),
+uarch_spec_generator.md (specify a pad adapter). WP-24's self-assembled-wrapper adoption stays as code
+but cannot trigger under the conformance gate; noted for the reviewer. Run hot-swapped to v32.
+
+### WP-44 (2026-09-08): undeclarable contract names are violations, never silent drops
+
+ax25_9600 attempt 2 exposed the last silent-drop path the round-2 review pointed at: the
+interface-definition specialist emitted dotted channel names (`start.valid/start.payload`,
+`qspi_pads.csn_in/sck_in/qio_in`, `irq.done_level`); `channel_signals` dropped those rows from the
+generator's port table and from the gate (38 drops, stderr only), the blocks were generated without the
+ports, and the chip lead needed three revise rounds and a manual contract re-freeze. Now
+`illegal_contract_names` makes them `illegal_identifier` structural violations in the
+interface-definition validator (routes to Escalate Constraints before specs exist) and
+`check_block` fails the block with the edge/signal/derived name. e6 checkout `arm-e-v33`; the live AX25
+run stays on v32 (its contract is already legal). Suite at e9c2eb0: 1 failed (PDK, environmental) / 3,244 passed.
+
+### WP-45 (2026-09-08): a locked Caravel boundary fails closed; parsers evaluate preprocessor conditionals
+
+ax25_9600 attempt 2 again: the deterministic `user_project_wrapper` assembly failed lint with
+`Pin not found: 'endif'` (the pad block's `` `ifdef USE_POWER_PINS `` port section parsed as ports),
+and the engine fell back to the Integration Lead, whose top was named `ax_25_9600_..._top`. Under the
+published grader that top does not exist; `user_project_wrapper` would elaborate as the empty pad
+adapter. Fixes: `strip_preprocessor()` (no-define configuration) before both port parsers; with the
+deterministic Caravel top enabled and a wrapper block / pin map present, wiring hazards, lint errors or
+missing instantiations park as `integration_failure` phase `caravel_assembly` (retry / fix_rtl / abort),
+never an LLM fallback; the task adapter types a wrong top as `boundary_mismatch`. The integration DV
+on the LLM top did catch a real AES-class defect (OEB released after every READ byte) with the WP-39
+strict drive check -- the chip lead revised `qspi_slave_frontend` only. e6 checkout `arm-e-v34`; the
+run was hot-swapped to v34 before its next integration check. Suite at 080220c: 1 failed (PDK, environmental) / 3,248 passed.
+
+### WP-46 (2026-09-08): the Caravel assembler wires by contract, never by bare port name
+
+ax25_9600 attempt 2, first adapter run: the published testbench saw nothing (no bits, no DONE) while
+the engine's bus-protocol DV passed. The chip lead found START resolving to X in the assembled
+`user_project_wrapper`: `modem_controller.start_valid` (input, from regmap_buffers) and
+`hdlc_framer.start_valid` (input, from `modem_controller.stage_start_valid`) share a port NAME, and the
+assembler's legacy pair stage unions any same-named port across a connected block pair -- merging two
+contract-bound nets into one multiply-driven net. Underneath: `_contract_signal_names` bound only the
+declared fields, not the synthesized `valid` strobe, so every valid_only handshake fell to that
+bare-name stage. Fixes: the contract stage derives names via `signal_specs` (WP-21, one derivation with
+the gate and the prompt); ports bound by the contract are never re-unioned by name; two same-direction
+ports are never a connection; a net with >1 output driver or none is a wiring hazard (parks via WP-45).
+The chip lead's hand edit of the assembled wrapper (fragile: regenerated on re-entry) is thereby made
+unnecessary. Reproduced by `test_wp46_no_bare_name_merge.py` before the fix.
+Follow-ups the same night: WP-46b (contract-directed unions register bound ports; the legacy stage had
+still re-merged regmap->hdlc `start_length_bytes` through a third block pair) and WP-46c (a stray
+dedented line from a substring-matched anchor). Verified on the real run by regenerating the wrapper
+offline with union tracing: only the two contract unions remain, zero hazards, `start_valid` and
+`start_length_bytes` nets split exactly as the chip lead's hand fix did. e6 checkout `arm-e-v37`
+(v35/v36 carry the incomplete WP-46; superseded). AX25 attempt 2 hot-swapped to v37 during Validation DV. Suite at 4dc0d89: 1 failed (PDK, environmental) / 3,250 passed.
+
+### WP-47 (2026-09-08): the task adapter outranks internal ERS/validation requirements
+
+ax25_9600 attempt 2, after the adapter passed at 1.19 cycles/bit: the LLM-authored ERS validation
+testbench asserted a bit interval of 5,208 cycles (real-time 9,600 baud, the reading that sank attempt
+1) and the chip lead "restored" the slow accumulators; the adapter then failed exactly as attempt 1 had
+externally (5,263 cycles/bit, timeouts). chip_lead.md now states: when the task adapter and an internal
+ERS/KPI/validation requirement disagree, the adapter is right -- fix_tb / revise the requirement, never
+the RTL -- and read `.coresmith/acceptance_dv.json` before any fix_rtl at validation. Under the rule
+(run swapped to v38) the chip lead reverted modem_controller to the passing candidate and retried.
+WP-47b widens a WP-19 source-window test. e6 checkout `arm-e-v38`.
+
+### Outcome: ax25_9600 attempt 2 passes the published grader (2026-09-08 06:20)
+
+PASS on every check (byte-exact 10/10, Dire Wolf decode + negative control, caps, Fmax 270.7 MHz,
+throughput 1.191 cycles/bit vs cap 4.21). The adapter loop (WP-41) turned attempt 1's invisible failure
+into an in-engine park that the chip lead fixed; WP-43..47 were the engine defects that run surfaced.
