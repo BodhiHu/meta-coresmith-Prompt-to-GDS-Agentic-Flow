@@ -110,9 +110,14 @@ def assemble_candidate(project_root: str, top_rtl: str, block_rtls: Any) -> dict
     top_p = Path(top_rtl)
     if not top_rtl or not top_p.exists():
         return None
-    text = top_p.read_text(encoding="utf-8", errors="replace")
-    m = re.search(r"\bmodule\s+([A-Za-z_][A-Za-z0-9_]*)", text)
-    top_module = m.group(1) if m else top_p.stem
+    from orchestrator.harness.top_module import resolve_top
+    _rt_mod, _rt_path = resolve_top(project_root)
+    if _rt_mod and _rt_path and Path(_rt_path).resolve() == top_p.resolve():
+        top_module = _rt_mod                      # WP-49: the recorded candidate top
+    else:
+        text = top_p.read_text(encoding="utf-8", errors="replace")
+        m = re.search(r"\bmodule\s+([A-Za-z_][A-Za-z0-9_]*)", text)
+        top_module = m.group(1) if m else top_p.stem
     if isinstance(block_rtls, dict):
         blocks = [str(p) for p in block_rtls.values() if p]
     else:

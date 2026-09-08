@@ -926,6 +926,17 @@ def run_acceptance_dv(project_root: str, top_rtl: str,
     if not mname:
         return _skip("no module declaration in chip top")
     top_module = mname.group(1)
+    try:
+        # WP-49: the recorded candidate top wins over the first `module` in the file.
+        from orchestrator.harness.top_module import resolve_top as _resolve_top
+        _rt_mod, _rt_path = _resolve_top(project_root)
+        if _rt_mod and _rt_path and Path(_rt_path).resolve() == top_p.resolve():
+            top_module = _rt_mod
+            _bm = re.search(rf"\bmodule\s+{re.escape(top_module)}\b", rtl_text)
+            if _bm:
+                mname = _bm
+    except Exception:  # noqa: BLE001
+        pass
     # dv-hardening-23 (armD driver-found, defect #9): scope port discovery to
     # the TOP module span. Integration chip-tops carry helper modules in the
     # same file (e.g. rst_sync_2ff); their inputs leaked into the sideband map

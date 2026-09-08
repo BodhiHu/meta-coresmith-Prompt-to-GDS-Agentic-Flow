@@ -1730,6 +1730,7 @@ def lint_top_level(
     block_rtl_paths: list[str],
     design_name: str = "integration",
     project_root=None,
+    top_module: str = "",
 ) -> dict:
     """Run Verilator lint on the top-level module with all block RTL files.
 
@@ -1785,7 +1786,7 @@ def lint_top_level(
     cmd = [
         "verilator", "--lint-only", "-Wall", "-Wno-fatal",
         "-Wno-EOFNEWLINE",
-        "--top-module", Path(top_rtl_path).stem,
+        "--top-module", top_module or Path(top_rtl_path).stem,   # WP-49: explicit
         *lint_sources,
     ]
 
@@ -1816,32 +1817,21 @@ def lint_top_level(
 
 
 def _existing_top_module(int_dir: Path, preferred: str = "") -> str:
-    """Name of the real top module in an existing ``rtl/integration`` file.
+    """The recorded candidate top living in ``int_dir``, or "" (WP-49).
 
-    Preference: ``preferred`` when declared; a module matching the file stem;
-    the unique module never instantiated in the file; else the last declared
-    module. ``""`` when no file declares a module. The ``module`` keyword is
-    matched anywhere (a top declared behind a same-line comment still counts).
+    WP-17 inferred it from file contents (stem, first module, the module
+    nobody instantiates); that was one of five disagreeing guesses. The only
+    source now is the candidate receipt / integration record.
     """
-    if not int_dir.is_dir():
+    from orchestrator.harness.top_module import resolve_top
+    try:
+        mod, path = resolve_top(Path(int_dir).parent.parent)
+    except Exception:  # noqa: BLE001
         return ""
-    for vf in sorted(int_dir.glob("*.v")):
-        try:
-            src = vf.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        mods = re.findall(r"\bmodule\s+([A-Za-z_]\w*)", src)
-        if not mods:
-            continue
-        if preferred and preferred in mods:
-            return preferred
-        if vf.stem in mods:
-            return vf.stem
-        uninst = [m for m in mods if len(re.findall(rf"\b{re.escape(m)}\b", src)) == 1]
-        if len(uninst) == 1:
-            return uninst[0]
-        return mods[-1]
+    if mod and path and Path(path).parent.resolve() == Path(int_dir).resolve():
+        return mod
     return ""
+
 
 def load_architecture_connections(project_root: str) -> tuple[list[dict], str]:
     """Load block-to-block connections from architecture state.

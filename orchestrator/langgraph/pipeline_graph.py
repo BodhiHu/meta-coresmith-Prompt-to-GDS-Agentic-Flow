@@ -6260,29 +6260,6 @@ def _merge_mismatches(
     return merged
 
 
-def _self_assembled_wrapper(wrapper_block: str, modules: dict,
-                            block_rtl_sources: dict) -> bool:
-    """True when the wrapper block already IS the graded top (WP-24).
-
-    It must declare the locked Caravel pad boundary (io_in/io_out/io_oeb) and
-    instantiate every other frontend block in its own source.
-    """
-    mod = modules.get(wrapper_block)
-    if mod is None:
-        return False
-    try:
-        names = {str(p.name) for p in mod.ports}
-    except Exception:  # noqa: BLE001
-        return False
-    if not {"io_in", "io_out", "io_oeb"} <= names:
-        return False
-    others = {b for b in modules if b != wrapper_block}
-    if not others:
-        return False
-    from orchestrator.langchain.agents.integration_lead import assert_blocks_instantiated
-    return assert_blocks_instantiated(block_rtl_sources.get(wrapper_block, ""), others) is None
-
-
 async def _park_caravel_assembly_failure(pr: str, design_name: str, rtl_paths: dict,
                                          reason: str, errors: list, top_rtl_path: str) -> dict:
     """WP-45: the deterministic Caravel assembly is the ONLY way to produce the
@@ -6724,6 +6701,7 @@ async def integration_check_node(state: OrchestratorState) -> dict:
             solo_rtl_path = rtl_paths.get(solo_name) or list(rtl_paths.values())[0]
             lint_result = await asyncio.to_thread(
                 lint_top_level, output_path, [solo_rtl_path], top_name,
+                top_module=top_name,
                 project_root=_pr(state),
             )
             lint_clean = lint_result.get("clean", False)
@@ -6771,48 +6749,6 @@ async def integration_check_node(state: OrchestratorState) -> dict:
         # COMPLETE graded top (pads + every core block instantiated). Re-wrapping
         # it produces wiring hazards and a nested top the QSPI pin-boundary gate
         # rejects; adopt it as the chip top instead.
-        if _wrapper_block is not None and _self_assembled_wrapper(
-                _wrapper_block, modules, block_rtl_sources):
-            _sa_top = rtl_paths[_wrapper_block]
-            _sa_blocks = [p for b, p in rtl_paths.items() if b != _wrapper_block]
-            log(f"  [INTEGRATION] wrapper block '{_wrapper_block}' already IS the "
-                f"graded top (locked pads + {len(_sa_blocks)} blocks instantiated) "
-                f"-- adopting it as chip top", CYAN)
-            lint_result = await asyncio.to_thread(
-                lint_top_level, _sa_top, _sa_blocks, "user_project_wrapper",
-                project_root=_pr(state),
-            )
-            lint_clean = lint_result.get("clean", False)
-            integration_result = {
-                "design_name": design_name,
-                "top_module": modules[_wrapper_block].name or "user_project_wrapper",
-                "top_rtl_path": _sa_top,
-                "block_count": len(modules),
-                "wire_count": 0,
-                "skipped_connections": [],
-                "mismatches": [],
-                "error_count": 0 if lint_clean else 1,
-                "warning_count": 0,
-                "lint_clean": lint_clean,
-                "lint_errors": lint_result.get("errors", ""),
-                "block_rtl_paths": {b: p for b, p in rtl_paths.items() if b != _wrapper_block},
-                "self_assembled_wrapper": True,
-            }
-            try:
-                _ir_path = Path(pr) / ".coresmith" / "integration_result.json"
-                _ir_path.write_text(json.dumps(integration_result, indent=2, default=str))
-            except OSError:
-                pass
-            write_graph_event(pr, "Integration Check", "graph_node_exit", {
-                "success": bool(lint_clean), "top_module": integration_result["top_module"],
-                "block_count": len(modules), "self_assembled_wrapper": True,
-                "lint_clean": lint_clean,
-            })
-            if lint_clean:
-                return {"integration_result": integration_result}
-            log("  [INTEGRATION] self-assembled wrapper does not lint clean -- "
-                "continuing with the deterministic assembly / Integration Lead",
-                YELLOW)
         # The PRD's structured pin map, when present, lets the top route the pads
         # itself -- so the design needs no pin-adapter block and assembly no
         # longer depends on finding one.
@@ -6882,6 +6818,7 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                 _lint_paths = list(asm["lint_block_paths"].values())
                 lint_result = await asyncio.to_thread(
                     lint_top_level, top_rtl_path, _lint_paths, "user_project_wrapper",
+                    top_module="user_project_wrapper",
                     project_root=_pr(state),
                 )
                 lint_clean = lint_result.get("clean", False)
@@ -6939,6 +6876,14 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                         _ir_path.write_text(json.dumps(integration_result, indent=2, default=str))
                     except OSError:
                         pass
+                    from orchestrator.harness.top_module import write_candidate_receipt
+                    try:   # WP-49: the candidate receipt (top, file, sources, sha)
+                        write_candidate_receipt(pr, "user_project_wrapper", top_rtl_path,
+                                                asm["lint_block_paths"], note="caravel assembly")
+                    except ValueError as _exc:
+                        return {"integration_result": await _park_caravel_assembly_failure(
+                            pr, design_name, rtl_paths, "top module not declared",
+                            [str(_exc)], top_rtl_path)}
                     return {"integration_result": integration_result}
                 _errs = [ln for ln in str(lint_result.get("errors", "")).splitlines()
                          if ln.strip()][:20]
@@ -7054,18 +6999,20 @@ async def integration_check_node(state: OrchestratorState) -> dict:
         # WP-22: a Caravel-style top is a HIERARCHY (chip top -> wrapper ->
         # blocks); the assembled wrapper lives next to the top under
         # rtl/integration. Judge instantiation over the whole hierarchy.
-        _hier_text = chip_top_text
+        # WP-49: judged over the ELABORATED hierarchy rooted at the top (a
+        # block instantiated only inside an unreferenced module does not count).
+        _hier_sources: list[str] = []
         try:
             _int_dir = Path(top_rtl_path).parent if top_rtl_path else None
             if _int_dir and _int_dir.is_dir():
                 for _vf in sorted(_int_dir.glob("*.v")):
                     if top_rtl_path and _vf.resolve() == Path(top_rtl_path).resolve():
                         continue
-                    _hier_text += "\n" + _vf.read_text(encoding="utf-8", errors="replace")
+                    _hier_sources.append(_vf.read_text(encoding="utf-8", errors="replace"))
         except OSError:
             pass
         postcond = assert_blocks_instantiated(
-            _hier_text, set(block_rtl_sources.keys())
+            chip_top_text, set(block_rtl_sources.keys()), sources=_hier_sources,
         )
         if postcond:
             log(f"  [INTEGRATION] Postcondition failed: {postcond}", RED)
@@ -7150,7 +7097,7 @@ async def integration_check_node(state: OrchestratorState) -> dict:
         block_rtl_list = list(rtl_paths.values())
         lint_result = await asyncio.to_thread(
             lint_top_level, top_rtl_path, block_rtl_list,
-            design_name, project_root=_pr(state),
+            design_name, project_root=_pr(state), top_module=module_name,
         )
 
         lint_clean = lint_result.get("clean", False)
@@ -7196,6 +7143,27 @@ async def integration_check_node(state: OrchestratorState) -> dict:
         except Exception:  # noqa: BLE001
             pass
 
+        # WP-49: the produced top must be the task's declared top, and the
+        # candidate is recorded once (top, file, exact sources, sha).
+        from orchestrator.harness.top_module import declared_top, write_candidate_receipt
+        _declared = declared_top(pr)
+        if _declared and module_name != _declared:
+            return {"integration_result": await _park_caravel_assembly_failure(
+                pr, design_name, rtl_paths, "top module mismatch",
+                [f"the task declares top {_declared!r}; the integration produced "
+                 f"{module_name!r} -- the graded boundary was not produced"],
+                top_rtl_path)}
+        if top_rtl_path and Path(top_rtl_path).exists():
+            try:
+                write_candidate_receipt(pr, module_name, top_rtl_path, rtl_paths,
+                                        note="integration lead")
+            except ValueError as _exc:
+                return {"integration_result": await _park_caravel_assembly_failure(
+                    pr, design_name, rtl_paths, "top module not declared",
+                    [str(_exc)], top_rtl_path)}
+        else:
+            log(f"  [INTEGRATION] no top file on disk ({top_rtl_path!r}); "
+                "candidate receipt skipped", YELLOW)
         has_issues = len(errors) > 0 or not lint_clean
         if has_issues:
             log("  [INTEGRATION] Issues found -- interrupting for review", YELLOW)

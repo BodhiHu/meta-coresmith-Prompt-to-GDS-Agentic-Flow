@@ -291,8 +291,33 @@ class IntegrationLeadAgent:
         return result
 
 
+_INST_RE = re.compile(r"\b([A-Za-z_]\w*)\s+(?:#\s*\([^;]*?\)\s*)?[A-Za-z_\\]\w*\s*\(")
+
+
+def _reachable_hierarchy(top_code: str, other_codes: list[str]) -> str:
+    """The bodies of every module reachable by instantiation from the modules
+    defined in ``top_code`` (WP-49). Comments are already stripped."""
+    bodies: dict[str, str] = {}
+    for text in [top_code, *other_codes]:
+        for m in re.finditer(r"\bmodule\s+([A-Za-z_]\w*)", text):
+            end = text.find("endmodule", m.end())
+            bodies.setdefault(m.group(1), text[m.start():end if end != -1 else len(text)])
+    frontier = re.findall(r"\bmodule\s+([A-Za-z_]\w*)", top_code)
+    reachable: list[str] = []
+    while frontier:
+        name = frontier.pop()
+        if name in reachable:
+            continue
+        reachable.append(name)
+        for im in _INST_RE.finditer(bodies.get(name, "")):
+            child = im.group(1)
+            if child in bodies and child not in reachable:
+                frontier.append(child)
+    return "\n".join(bodies[n] for n in reachable)
+
+
 def assert_blocks_instantiated(
-    chip_top_verilog: str, expected_block_names: set[str]
+    chip_top_verilog: str, expected_block_names: set[str], sources=None,
 ) -> str | None:
     """Postcondition: every expected block must appear as an instantiation
     inside the Integration Lead's chip_top Verilog. Returns None on success
@@ -310,6 +335,12 @@ def assert_blocks_instantiated(
     # appear only in commentary.
     code = re.sub(r"//[^\n]*", "", chip_top_verilog)
     code = re.sub(r"/\*.*?\*/", "", code, flags=re.DOTALL)
+    if sources:
+        # WP-49: only modules reachable from the top count; text that merely
+        # sits in a neighbouring file (or an unreferenced module) does not.
+        _others = [re.sub(r"/\*.*?\*/", "", re.sub(r"//[^\n]*", "", str(t)), flags=re.DOTALL)
+                   for t in sources if t]
+        code = _reachable_hierarchy(code, _others)
 
     # Modules DEFINED in the chip_top file: a tier-1 block NAMED like one of
     # them (the Caravel `user_project_wrapper` collision -- the pad-adapter

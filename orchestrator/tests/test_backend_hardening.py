@@ -72,43 +72,7 @@ class TestEdaStepTimeouts:
         assert _eda_timeout("CORESMITH_DRC_TIMEOUT", 2400) == 5400
 
 
-class TestIntegrationTopSelection:
-    def _mk(self, tmp_path, files):
-        d = tmp_path / "rtl" / "integration"
-        d.mkdir(parents=True)
-        for name, body in files.items():
-            (d / name).write_text(body)
-        return d
-
-    def test_root_that_instantiates_children_wins(self, tmp_path):
-        from orchestrator.langgraph.backend_graph import _select_integration_top
-        d = self._mk(tmp_path, {
-            # alphabetically first, but a leaf that instantiates nothing
-            "openframe_project_wrapper.v":
-                "module openframe_project_wrapper(input a); endmodule\n",
-            "user_project_wrapper.v":
-                "module user_project_wrapper(input clk);\n"
-                "  user_project_wrapper_pads u_p(.clk(clk));\n"
-                "  aes_core u_c(.clk(clk));\nendmodule\n",
-            "user_project_wrapper_pads.v":
-                "module user_project_wrapper_pads(input clk); endmodule\n",
-        })
-        f, m = _select_integration_top(d)
-        assert m == "user_project_wrapper"
-        assert f.endswith("user_project_wrapper.v")
-
-    def test_single_file_returned(self, tmp_path):
-        from orchestrator.langgraph.backend_graph import _select_integration_top
-        d = self._mk(tmp_path, {
-            "only_top.v": "module only_top(input a); endmodule\n"})
-        f, m = _select_integration_top(d)
-        assert m == "only_top" and f.endswith("only_top.v")
-
-    def test_empty_dir(self, tmp_path):
-        from orchestrator.langgraph.backend_graph import _select_integration_top
-        d = tmp_path / "rtl" / "integration"
-        d.mkdir(parents=True)
-        assert _select_integration_top(d) == ("", "")
+# WP-49: the backend no longer selects a top from the files on disk; see test_wp17b_backend_top.py.
 
 
 class TestExhaustionReopen:

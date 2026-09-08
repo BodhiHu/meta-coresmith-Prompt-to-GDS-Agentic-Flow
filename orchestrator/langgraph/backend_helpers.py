@@ -385,6 +385,7 @@ def generate_flat_synthesis_script(
     block_rtl_paths: dict[str, str],
     target_clock_mhz: float = 50.0,
     output_dir: str = "",
+    top_module: str = "",
 ) -> str:
     """Generate a Yosys synthesis script for the flat top-level design.
 
@@ -406,7 +407,10 @@ def generate_flat_synthesis_script(
             read_cmds.append(f"read_verilog {bp}")
     reads = "\n".join(read_cmds)
 
-    top_module = Path(top_rtl_path).stem
+    # WP-49: the recorded top module; the file stem only when nothing declares it
+    from orchestrator.harness.top_module import module_declared_in
+    if not (top_module and module_declared_in(top_rtl_path, top_module)):
+        top_module = Path(top_rtl_path).stem
 
     # --- SRAM macro awareness (5th fix) ---------------------------------
     # If the RTL instantiates a pre-built macro, read its verilog as a
@@ -490,6 +494,7 @@ def run_flat_synthesis(
         design_name, top_rtl_path, block_rtl_paths,
         target_clock_mhz=target_clock_mhz,
         output_dir=output_dir,
+        top_module=design_name,      # WP-49: the recorded module (init_design)
     )
 
     cmd = ["yosys", "-s", script_path]

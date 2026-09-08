@@ -1,55 +1,52 @@
-"""WP-17: the integration design name comes from the real top module."""
+"""WP-17/WP-49: the integration design name comes from the recorded candidate, never a file guess."""
 from __future__ import annotations
 
 import json
 
+from orchestrator.harness.top_module import write_candidate_receipt
 from orchestrator.langgraph.integration_helpers import (
     _existing_top_module,
     load_architecture_connections,
 )
 
-TOP = "h264_enc_core_top"
+TOP = "video_enc_core_top"
 
 
-def _write_top(int_dir, name, body):
-    int_dir.mkdir(parents=True, exist_ok=True)
-    (int_dir / name).write_text(body)
+def _top_file(tmp_path, name="chip.v", body=None):
+    d = tmp_path / "rtl" / "integration"
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / name
+    p.write_text(body or ("module helper(); endmodule\nmodule " + TOP + "(); helper h(); endmodule\n"))
+    return p
 
 
-def test_top_behind_same_line_comment_beats_helper(tmp_path):
-    body = (
-        "module h264_normative_rom_arbiter(input clk); endmodule\n"
-        "/* Design: x */ module " + TOP + "(input clk); "
-        "h264_normative_rom_arbiter u_arb(.clk(clk)); endmodule\n"
-    )
-    _write_top(tmp_path / "rtl" / "integration", TOP + ".v", body)
+def test_recorded_candidate_names_the_design(tmp_path):
+    p = _top_file(tmp_path)
+    write_candidate_receipt(tmp_path, TOP, str(p), {})
     assert _existing_top_module(tmp_path / "rtl" / "integration") == TOP
-
-
-def test_preferred_name_wins_when_declared(tmp_path):
-    body = "module helper(); endmodule\nmodule " + TOP + "(); helper h(); endmodule\n"
-    _write_top(tmp_path / "rtl" / "integration", "chip.v", body)
-    assert _existing_top_module(tmp_path / "rtl" / "integration", TOP) == TOP
     assert _existing_top_module(tmp_path / "rtl" / "integration", "other") == TOP
 
 
-def test_no_file_returns_empty(tmp_path):
+def test_no_receipt_means_no_name(tmp_path):
+    _top_file(tmp_path)          # a file alone is not evidence of the top
     assert _existing_top_module(tmp_path / "rtl" / "integration") == ""
+    assert _existing_top_module(tmp_path / "rtl" / "nothing") == ""
 
 
-def test_load_architecture_connections_uses_real_top(tmp_path):
+def test_load_architecture_connections_uses_the_receipt(tmp_path):
     cs = tmp_path / ".coresmith"
     cs.mkdir()
     (cs / "architecture_state.json").write_text(json.dumps({
         "block_diagram": {"connections": [{"from_block": "a", "to_block": "b"}]},
-        "prd_spec": {"prd": {"title": "PRD - H264 Enc Core"}},
+        "prd_spec": {"prd": {"title": "PRD - Video Enc Core"}},
     }))
     conns, name = load_architecture_connections(str(tmp_path))
-    assert conns and name == "h264_enc_core_top"
-    body = (
-        "module rom_arbiter(input clk); endmodule\n"
-        "/* c */ module h264_enc_core_top(input clk); rom_arbiter u(.clk(clk)); endmodule\n"
-    )
-    _write_top(tmp_path / "rtl" / "integration", "h264_enc_core_top.v", body)
+    assert conns and name == "video_enc_core_top"
+    p = _top_file(tmp_path, "other_name.v",
+                  "module rom_arbiter(input clk); endmodule\n"
+                  "/* c */ module " + TOP + "(input clk); rom_arbiter u(.clk(clk)); endmodule\n")
     conns, name = load_architecture_connections(str(tmp_path))
-    assert name == "h264_enc_core_top"
+    assert name == "video_enc_core_top"       # no receipt: the PRD name, not the file
+    write_candidate_receipt(tmp_path, TOP, str(p), {})
+    conns, name = load_architecture_connections(str(tmp_path))
+    assert name == TOP
