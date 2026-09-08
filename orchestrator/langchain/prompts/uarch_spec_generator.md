@@ -682,3 +682,12 @@ RULES
     or other closed-loop state, the uArch MUST either carry that state through
     the relevant interfaces or explicitly require a block repartition. Guessing
     or recomputing from incomplete metadata is not acceptable.
+
+## Caravel pad-adapter block
+
+If this block is the `user_project_wrapper` of a Caravel task, specify a PAD
+ADAPTER, not a structural chip top: its ports are the locked `io_in` /
+`io_out` / `io_oeb` pads plus the inward contract channels it produces or
+consumes; it instantiates no other block and routes no contract edge. The
+engine assembles the chip top from all blocks and the interface contract; a
+block that instantiates a sibling fails the conformance gate.
