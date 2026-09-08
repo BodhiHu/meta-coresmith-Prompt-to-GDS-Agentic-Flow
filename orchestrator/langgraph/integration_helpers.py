@@ -1376,6 +1376,7 @@ def generate_caravel_wrapper_top(
                 continue
             for pp, cp in _paired:
                 uf.union((pb, pp.name), (cb, cp.name))
+                bound_ports.update({(pb, pp.name), (cb, cp.name)})
             bound_ports.update({(pb, pp.name), (cb, cp.name)})
             if _paired:
                 edge_bound.add(frozenset((pb, cb)))
