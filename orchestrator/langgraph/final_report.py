@@ -452,6 +452,12 @@ def build_final_report(state: dict, project_root: str, *,
     valid = state.get("validation_dv_result") or {}
     design_name = (integ.get("design_name") or valid.get("design_name")
                    or state.get("design_name") or "chip_top")
+    from orchestrator.harness.top_module import CandidateError, resolve_top
+    try:
+        top_module, top_rtl_path = resolve_top(project_root)
+        candidate_error = ""
+    except CandidateError as exc:
+        top_module, top_rtl_path, candidate_error = None, None, str(exc)
 
     integ_dv_row = _dv_one(sb, design_name, "chip")
     valid_dv_row = _dv_one(sb, design_name, "validation")
@@ -486,7 +492,7 @@ def build_final_report(state: dict, project_root: str, *,
         if st["ran"] and st["testbench"]:
             tb_total += 1
 
-    top_ppa = _block_ppa(sb, design_name, period_ns)
+    top_ppa = _block_ppa(sb, top_module, period_ns) if top_module else {"measured": False}
 
     cov_aggregate = (round(100.0 * cov_hit_sum / cov_total_sum, 2)
                      if cov_total_sum else None)
@@ -578,6 +584,9 @@ def build_final_report(state: dict, project_root: str, *,
         "generated_at": _iso(now),
         "project_root": str(project_root),
         "design_name": design_name,
+        "top_module": top_module,
+        "top_rtl_path": top_rtl_path,
+        "candidate_error": candidate_error,
         "target_clock_mhz": target_clock_mhz,
         "engine_sha": engine_prov.get("sha", ""),
         "engine_sha_changed_mid_run": bool(engine_prov.get("changed")),
@@ -724,6 +733,10 @@ def render_markdown(report: dict) -> str:
     )
     lines.append(f"- Generated: `{report.get('generated_at', '')}`")
     lines.append(f"- Project: `{report.get('project_root', '')}`")
+    if report.get("top_module"):
+        lines.append(f"- Top module: `{report['top_module']}` (`{report['top_rtl_path']}`)")
+    else:
+        lines.append(f"- Top module: unknown ({report.get('candidate_error') or 'no validated candidate'})")
     if report.get("engine_sha"):
         _chg = " ⚠️ CHANGED MID-RUN" if report.get("engine_sha_changed_mid_run") else ""
         lines.append(f"- Engine SHA: `{report.get('engine_sha')}`{_chg}")

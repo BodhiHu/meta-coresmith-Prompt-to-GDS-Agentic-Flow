@@ -7,6 +7,7 @@ import pytest
 from orchestrator.harness import gate_sim as gs
 from orchestrator.langgraph import final_report as fr
 from orchestrator.langgraph import pipeline_graph as pg
+from orchestrator.tests.candidate_fixtures import adopt
 from orchestrator.tests.test_gate_sim import _BLOCK, _good_ref, _runner_for, _stub_env
 
 
@@ -59,6 +60,9 @@ class Score:
 
 @pytest.mark.parametrize('measured', [False,True])
 def test_top_timing_never_uses_leaf_minimum(tmp_path,measured):
+    top = tmp_path / 'chip_top.v'
+    top.write_text('module chip_top(); endmodule\n')
+    adopt(tmp_path, top)
     result = fr.build_final_report({'block_queue':[{'name':'leaf'}],'completed_blocks':[{'name':'leaf','success':True}],'design_name':'chip_top','target_clock_mhz':50},str(tmp_path),scoreboard=Score(measured))
     assert result['signoff']['top_fmax_mhz'] == (40 if measured else None)
     assert result['signoff']['leaf_estimate_fmax_mhz'] == 50

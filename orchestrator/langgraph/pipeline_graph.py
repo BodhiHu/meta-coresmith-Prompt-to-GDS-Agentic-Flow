@@ -6116,11 +6116,62 @@ def _merge_mismatches(
     return merged
 
 
+async def _park_candidate_failure(pr: str, design_name: str, rtl_paths: dict,
+                                  reason: str, errors: list, top_rtl_path: str,
+                                  *, phase: str = "single_block", deterministic: bool = False) -> dict:
+    """Park a rejected candidate without claiming a chassis assembly failed."""
+    from orchestrator.harness.top_module import invalidate_candidate
+    invalidate_candidate(pr)
+    errors = [str(e) for e in (errors or [])][:24]
+    log(f"  [INTEGRATION] {reason} -- parking", RED)
+    for error in errors[:8]:
+        log(f"      - {error}", RED)
+    payload = {
+        "type": "integration_failure", "phase": phase,
+        "design_name": design_name, "top_rtl_path": top_rtl_path,
+        "block_count": len(rtl_paths), "block_rtl_paths": rtl_paths,
+        "error_count": max(1, len(errors)), "lint_clean": False,
+        "reason": reason, "errors": errors, "deterministic": deterministic,
+        "supported_actions": ["retry", "fix_rtl", "abort"],
+        "outer_agent_guidance": (
+            f"Candidate adoption failed ({reason}; see errors). Fix the task top "
+            "declaration or the block RTL identified by the errors before retrying. "
+            "A declared top must already exist in the selected RTL on the single-block path. "
+            "An unchanged deterministic mismatch will recur on retry."
+        ),
+        "reference_files": {"task": str(Path(pr) / "inputs/task.yaml"),
+                            "top_rtl": top_rtl_path},
+    }
+    write_graph_event(pr, "Integration Check", "candidate_adoption_failed", payload)
+    resp = await _resolve_interrupt(payload)
+    resp = resp if isinstance(resp, dict) else {}
+    action = resp.get("action", "abort")
+    result = {
+        "reason": reason, "candidate_adoption_failed": True,
+        "errors": errors, "lint_clean": False, "top_rtl_path": top_rtl_path,
+        "action_taken": action, "deterministic": deterministic,
+    }
+    if action in ("retry", "fix_rtl"):
+        result["retry_requested"] = True
+        result["fix_applied"] = str(resp.get("rtl_fix_description", ""))
+    else:
+        result.update(aborted=True, skipped=True)
+    write_graph_event(pr, "Integration Check", "graph_node_exit", {
+        "action": action, "phase": phase,
+    })
+    log(f"  [INTEGRATION] {phase} park -> {action}", YELLOW if result.get("retry_requested") else RED)
+    return result
+
+
 async def _park_caravel_assembly_failure(pr: str, design_name: str, rtl_paths: dict,
                                          reason: str, errors: list, top_rtl_path: str) -> dict:
     """WP-45: the deterministic Caravel assembly is the ONLY way to produce the
     graded `user_project_wrapper`; when it is not clean, park instead of
     falling back to an LLM-assembled top with a different module name."""
+    from orchestrator.chassis.profile import CARAVEL, declared_chassis
+    if declared_chassis(pr) != CARAVEL:
+        return await _park_candidate_failure(pr, design_name, rtl_paths, reason, errors,
+                                             top_rtl_path, phase="candidate_adoption")
     errors = [str(e) for e in (errors or [])][:24]
     log(f"  [INTEGRATION] deterministic Caravel assembly NOT clean ({reason}) -- "
         "parking (no Integration Lead fallback for a locked Caravel boundary)", RED)
@@ -6524,39 +6575,59 @@ async def integration_check_node(state: OrchestratorState) -> dict:
             safe_name = f"top_{safe_name}"
         output_path = str(rtl_dir / f"{safe_name}.v")
 
-        # Single-block designs: generate a passthrough wrapper that
-        # instantiates the block and wires all ports to the top level.
-        # This ensures the backend always has an integration top-level
-        # module regardless of block count.
+        # A declared single-block top must already exist in the selected RTL.
+        # Only an undeclared top permits a generated passthrough wrapper.
         if len(modules) == 1:
+            from orchestrator.harness.top_module import (
+                declared_top,
+                module_declared_in,
+                write_candidate_receipt,
+            )
             solo_name, solo_mod = next(iter(modules.items()))
-            top_name = f"{safe_name}_top" if not safe_name.endswith("_top") else safe_name
-            lines = [f"module {top_name} ("]
-            port_decls = []
-            for p in solo_mod.ports:
-                width_str = f"[{p.msb}:{p.lsb}] " if p.width > 1 else ""
-                port_decls.append(f"    {p.direction} wire {width_str}{p.name}")
-            lines.append(",\n".join(port_decls))
-            lines.append(");")
-            lines.append("")
-            inst_conns = [f"        .{p.name}({p.name})" for p in solo_mod.ports]
-            lines.append(f"    {solo_mod.name} u_{solo_name} (")
-            lines.append(",\n".join(inst_conns))
-            lines.append("    );")
-            lines.append("")
-            lines.append("endmodule")
-            wrapper_src = "\n".join(lines) + "\n"
-            Path(output_path).write_text(wrapper_src, encoding="utf-8")
+            try:
+                top_name = declared_top(pr)
+            except (ValueError, OSError) as exc:
+                return {"integration_result": await _park_candidate_failure(
+                    pr, design_name, rtl_paths, "invalid top declaration on the single-block path",
+                    [str(exc)], "")}
+            single_block_wrapper = not top_name
+            top_mod = solo_mod
+            if top_name:
+                declaring_paths = list(dict.fromkeys(
+                    str(Path(path).resolve()) for path in rtl_paths.values()
+                    if module_declared_in(path, top_name)))
+                if len(declaring_paths) != 1:
+                    return {"integration_result": await _park_candidate_failure(
+                        pr, design_name, rtl_paths, "declared top mismatch on the single-block path",
+                        [f"The task declares top {top_name!r}; expected exactly one block RTL file "
+                         f"declaring it, found {len(declaring_paths)}. No wrapper was generated."],
+                        "", deterministic=True)}
+                output_path = declaring_paths[0]
+                top_mod = await asyncio.to_thread(parse_verilog_ports, output_path, top_name)
+                log(f"  [INTEGRATION] Single-block design: using declared top "
+                    f"{top_name} from {output_path}", GREEN)
+            else:
+                top_name = f"{safe_name}_top" if not safe_name.endswith("_top") else safe_name
+                lines = [f"module {top_name} ("]
+                port_decls = []
+                for p in solo_mod.ports:
+                    width_str = f"[{p.msb}:{p.lsb}] " if p.width > 1 else ""
+                    port_decls.append(f"    {p.direction} wire {width_str}{p.name}")
+                lines.append(",\n".join(port_decls))
+                lines.append(");")
+                lines.append("")
+                inst_conns = [f"        .{p.name}({p.name})" for p in solo_mod.ports]
+                lines.append(f"    {solo_mod.name} u_{solo_name} (")
+                lines.append(",\n".join(inst_conns))
+                lines.append("    );")
+                lines.append("")
+                lines.append("endmodule")
+                Path(output_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+                log(f"  [INTEGRATION] Single-block design: generated wrapper "
+                    f"{top_name} for {solo_name}", GREEN)
 
-            log(f"  [INTEGRATION] Single-block design: generated wrapper "
-                f"{top_name} for {solo_name}", GREEN)
-
-            # By NAME: rtl_paths can still carry other blocks' files, and
-            # linting the wrapper against the wrong source is a confusing
-            # failure at best and a wrong chip at worst.
-            solo_rtl_path = rtl_paths.get(solo_name) or list(rtl_paths.values())[0]
             lint_result = await asyncio.to_thread(
-                lint_top_level, output_path, [solo_rtl_path], top_name,
+                lint_top_level, output_path, list(rtl_paths.values()), top_name,
                 top_module=top_name,
                 project_root=_pr(state),
             )
@@ -6569,7 +6640,7 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                 "top_module": top_name,
                 "top_rtl_path": output_path,
                 "block_count": 1,
-                "wire_count": len(solo_mod.ports),
+                "wire_count": len(top_mod.ports),
                 "skipped_connections": [],
                 "mismatches": [],
                 "error_count": 0,
@@ -6577,21 +6648,28 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                 "lint_clean": lint_clean,
                 "lint_errors": lint_result.get("errors", ""),
                 "block_rtl_paths": rtl_paths,
-                "single_block_wrapper": True,
+                "single_block_wrapper": single_block_wrapper,
             }
 
             try:
-                from orchestrator.harness.top_module import write_candidate_receipt
                 if not lint_clean:
-                    raise ValueError("Single-block wrapper did not lint cleanly")
+                    raise ValueError(f"Single-block candidate did not lint cleanly: {lint_result.get('errors', '')}")
+                # The block can be the elaborated root itself. Every other
+                # expected block must still occur as a reachable child cell.
+                expected = [name for name in rtl_paths
+                            if not (name == solo_name and top_name == solo_mod.name
+                                    and not single_block_wrapper)]
                 write_candidate_receipt(pr, top_name, output_path, rtl_paths,
-                                        note="single-block passthrough", integration_result=integration_result)
+                                        expected_blocks=expected,
+                                        note="single-block passthrough" if single_block_wrapper else "single-block declared top",
+                                        integration_result=integration_result)
             except (ValueError, OSError) as exc:
-                return {"integration_result": await _park_caravel_assembly_failure(
-                    pr, design_name, rtl_paths, "top module mismatch", [str(exc)], output_path)}
+                return {"integration_result": await _park_candidate_failure(
+                    pr, design_name, rtl_paths, "candidate validation failed on the single-block path",
+                    [str(exc)], output_path)}
             write_graph_event(pr, "Integration Check", "graph_node_exit", {
                 "success": True, "top_module": top_name, "block_count": 1,
-                "single_block_wrapper": True,
+                "single_block_wrapper": single_block_wrapper,
             })
             return {"integration_result": integration_result}
 

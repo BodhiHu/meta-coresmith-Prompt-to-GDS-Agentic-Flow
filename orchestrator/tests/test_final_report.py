@@ -21,6 +21,7 @@ from orchestrator.langgraph.final_report import (
     fmax_mhz,
     render_markdown,
 )
+from orchestrator.tests.candidate_fixtures import adopt
 
 
 class _FakeScoreboard:
@@ -61,6 +62,9 @@ def _write_chip_tput(root: Path, rec: dict) -> None:
 
 
 def _passing_setup(tmp_path):
+    top = tmp_path / "chip_top.v"
+    top.write_text("module chip_top(); endmodule\n")
+    adopt(tmp_path, top)
     state = {
         "project_root": str(tmp_path),
         "target_clock_mhz": 100.0,  # 10 ns period

@@ -128,6 +128,13 @@ def _atomic_json(path: Path, data: dict):
         Path(tmp).unlink(missing_ok=True)
 
 
+def invalidate_candidate(project_root) -> None:
+    """A rejected replacement must not leave an older success discoverable."""
+    root = Path(project_root)
+    (root / RECEIPT_REL).unlink(missing_ok=True)
+    (root / ".coresmith/integration_result.json").unlink(missing_ok=True)
+
+
 def write_candidate_receipt(project_root, top_module: str, top_rtl_path: str,
                             block_rtls: Any, note: str = "", *, defines=(), parameters=None,
                             expected_blocks=None, integration_result=None) -> dict:
@@ -136,9 +143,7 @@ def write_candidate_receipt(project_root, top_module: str, top_rtl_path: str,
     root = Path(project_root).resolve()
     receipt_path = root / RECEIPT_REL
     record_path = root / ".coresmith/integration_result.json"
-    # A rejected replacement must not leave an older success discoverable.
-    receipt_path.unlink(missing_ok=True)
-    record_path.unlink(missing_ok=True)
+    invalidate_candidate(root)
     defines, parameters = sorted(defines or []), dict(parameters or {})
     declared = declared_top(root)
     if declared and top_module != declared:
