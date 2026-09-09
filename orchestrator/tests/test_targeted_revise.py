@@ -497,7 +497,8 @@ class TestContractPortGateHandshake:
         (tmp_path / ".coresmith").mkdir()
         (tmp_path / ".coresmith" / "interface_contracts.json").write_text(
             json.dumps({"contracts": [self.EDGE]}))
-        p = tmp_path / "forward.v"; p.write_text(rtl)
+        p = tmp_path / "forward.v"
+        p.write_text(rtl)
         return p
 
     def test_flattened_fields_with_handshake_pass(self, tmp_path):
@@ -641,7 +642,6 @@ class TestPrdAnswersFromFeedback:
     def test_feedback_json_counts_as_answers(self):
         # WP-14: the chip lead used to be told to answer in `feedback`; the PRD
         # node only read `answers`, so every answer was dropped (F-2 looped 8x).
-        import json as _json
         from orchestrator.langgraph import architecture_graph as ag
         src = open(ag.__file__).read()
         assert 'human_response.get("feedback")' in src and "_parsed" in src

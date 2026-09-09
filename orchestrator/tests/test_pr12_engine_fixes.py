@@ -6,7 +6,6 @@
 #9/#12). Pure-function unit coverage; no LLM / EDA toolchain."""
 from __future__ import annotations
 
-import json
 import re
 
 

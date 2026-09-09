@@ -147,8 +147,7 @@ class TestTestbenchGeneratorProjectRoot:
         self, roots, monkeypatch
     ):
         checkout, run = roots
-        import orchestrator.langchain.agents.integration_testbench_generator \
-            as gen_mod
+        import orchestrator.langchain.agents.integration_testbench_generator as gen_mod
         monkeypatch.setattr(gen_mod, "IntegrationTestbenchGenerator", _FakeGen)
 
         result = await ih.generate_integration_testbench(
@@ -163,8 +162,7 @@ class TestTestbenchGeneratorProjectRoot:
         self, roots, monkeypatch
     ):
         checkout, run = roots
-        import orchestrator.langchain.agents.integration_testbench_generator \
-            as gen_mod
+        import orchestrator.langchain.agents.integration_testbench_generator as gen_mod
         monkeypatch.setattr(gen_mod, "IntegrationTestbenchGenerator", _FakeGen)
 
         result = await ih.generate_integration_testbench(

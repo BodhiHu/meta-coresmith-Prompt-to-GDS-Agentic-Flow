@@ -672,7 +672,7 @@ def _park_conformance_unrepairable(state: BlockState, block_name: str,
 _PERSISTENT_CONSTRAINT_SOURCES = ("chip_dv_revise", "chip_dv_fix", "human")
 
 
-from orchestrator.state_store.project_db import open_project as _open_project
+from orchestrator.state_store.project_db import open_project as _open_project  # noqa: E402
 
 _PROJECT_DBS: dict = {}
 
@@ -3966,7 +3966,6 @@ async def synthesize_node(state: BlockState) -> dict:
     block = state["current_block"]
     block_name = block["name"]
 
-    import os as _os
     rtl_path = state.get("rtl_path", "")
     if not rtl_path or not Path(rtl_path).exists():
         log("  [SYNTH] Skipped -- RTL file not found", RED)

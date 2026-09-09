@@ -18,10 +18,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
-from orchestrator.langgraph.pipeline_graph import generate_rtl_node
-
 
 def _passed_block_state(tmp_path):
     """A BlockState re-entering a block that previously PASSED sim."""

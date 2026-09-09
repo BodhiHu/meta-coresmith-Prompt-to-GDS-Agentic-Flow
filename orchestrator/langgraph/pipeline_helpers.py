@@ -1842,7 +1842,6 @@ EXTRA_ARGS += --build-jobs {_build_jobs}
         shutil.copy2(wrapper_src, sim_dir / f"{block_name}_model.py")
 
     env = os.environ.copy()
-    import sys
     venv_bin = str(Path(sys.prefix) / "bin")
     env["PATH"] = f"{venv_bin}:{env.get('PATH', '/usr/bin:/bin')}"
     env["SHELL"] = shutil.which("bash") or "/bin/bash"

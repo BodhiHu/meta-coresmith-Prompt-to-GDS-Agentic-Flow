@@ -742,13 +742,17 @@ class ProjectDB:
             if f.is_file() and f.stat().st_size > 0:
                 docs[name] = _uj(f.read_text(encoding="utf-8"), None)
         if isinstance(docs.get("block_diagram.json"), dict):
-            self.import_block_diagram(docs["block_diagram.json"]); imported.append("block_diagram.json")
+            self.import_block_diagram(docs["block_diagram.json"])
+            imported.append("block_diagram.json")
         if isinstance(docs.get("block_specs.json"), list):
-            self.import_block_specs(docs["block_specs.json"]); imported.append("block_specs.json")
+            self.import_block_specs(docs["block_specs.json"])
+            imported.append("block_specs.json")
         elif isinstance(docs.get("block_queue.json"), list):
-            self.import_block_specs(docs["block_queue.json"]); imported.append("block_queue.json")
+            self.import_block_specs(docs["block_queue.json"])
+            imported.append("block_queue.json")
         if isinstance(docs.get("interface_contracts.json"), dict):
-            self.import_contracts(docs["interface_contracts.json"]); imported.append("interface_contracts.json")
+            self.import_contracts(docs["interface_contracts.json"])
+            imported.append("interface_contracts.json")
         blocks_dir = cdir / "blocks"
         if blocks_dir.is_dir():
             kinds = (("best", "best_result.json"), ("coverage", "coverage.json"),

@@ -1440,8 +1440,8 @@ def build_block_review(root: Path, block: str) -> dict:
     previous_error = read_text(prev_err_path) if prev_err_path.exists() else ""
 
     # Simulation: latest simulate log parse (tests table)
-    sim_logs = [l for l in idx.step_logs.get(block, []) if l["step"] == "simulate"]
-    sim_logs.sort(key=lambda l: l["mtime"])
+    sim_logs = [entry for entry in idx.step_logs.get(block, []) if entry["step"] == "simulate"]
+    sim_logs.sort(key=lambda entry: entry["mtime"])
     sim_parsed = None
     if sim_logs:
         p = root / sim_logs[-1]["rel_path"]
@@ -1449,8 +1449,8 @@ def build_block_review(root: Path, block: str) -> dict:
         sim_parsed = dict(sim_parsed or {})
         sim_parsed["log_rel_path"] = sim_logs[-1]["rel_path"]
         sim_parsed["mtime"] = sim_logs[-1]["mtime"]
-    lint_logs = [l for l in idx.step_logs.get(block, []) if l["step"] == "lint"]
-    lint_logs.sort(key=lambda l: l["mtime"])
+    lint_logs = [entry for entry in idx.step_logs.get(block, []) if entry["step"] == "lint"]
+    lint_logs.sort(key=lambda entry: entry["mtime"])
     lint_parsed = None
     if lint_logs:
         p = root / lint_logs[-1]["rel_path"]
@@ -1523,7 +1523,7 @@ def build_block_review(root: Path, block: str) -> dict:
         "cell_types": (stat.get("cell_types") or [])[:400],
         "module": stat.get("module"),
         "history": [r for r in db["ppa_history"]],
-        "synth_logs": [l for l in idx.step_logs.get(block, []) if l["step"] == "synthesize"],
+        "synth_logs": [entry for entry in idx.step_logs.get(block, []) if entry["step"] == "synthesize"],
     }
 
     # Diagnoses as recorded in the event stream.  The sqlite diagnoses /
@@ -1685,12 +1685,12 @@ def build_block_trajectory(root: Path, block: str) -> dict:
         for s in segs:
             calls = [idx.call(cid) for cid in s["calls"]]
             calls = [c for c in calls if c]
-            logs = [l for l in idx.step_logs.get(block, []) if l.get("seg_id") == s["seg_id"]]
+            logs = [entry for entry in idx.step_logs.get(block, []) if entry.get("seg_id") == s["seg_id"]]
             steps: list[dict] = []
             for c in calls:
                 steps.append({"type": "llm_call", "ts": c["start_ts"] or c["ts"], **c})
-            for l in logs:
-                steps.append({"type": "tool_run", "ts": l["mtime"], **l})
+            for entry in logs:
+                steps.append({"type": "tool_run", "ts": entry["mtime"], **entry})
             for se in s.get("sub_events", []):
                 steps.append({"type": "event", **se})
             steps.sort(key=lambda x: x.get("ts") or 0)
@@ -1713,7 +1713,7 @@ def build_block_trajectory(root: Path, block: str) -> dict:
     # Calls attributed to the block but to no node segment (e.g. chip-lead
     # calls, lint-fix inner calls outside a node window).
     orphan_calls = [c for c in idx.calls if c.get("block") == block and c.get("seg_id") is None]
-    orphan_logs = [l for l in idx.step_logs.get(block, []) if l.get("seg_id") is None]
+    orphan_logs = [entry for entry in idx.step_logs.get(block, []) if entry.get("seg_id") is None]
     return {
         "block": block, "meta": idx.blocks_meta.get(block) or {"name": block},
         "status": idx.block_status(block), "rounds": rounds_out,
@@ -1844,8 +1844,8 @@ def unified_diff(root: Path, rel_a: str, rel_b: str, context: int = 3) -> dict |
     a = read_text(pa).splitlines()
     b = read_text(pb).splitlines()
     diff = list(difflib.unified_diff(a, b, fromfile=rel_a, tofile=rel_b, lineterm="", n=context))
-    added = sum(1 for l in diff if l.startswith("+") and not l.startswith("+++"))
-    removed = sum(1 for l in diff if l.startswith("-") and not l.startswith("---"))
+    added = sum(1 for entry in diff if entry.startswith("+") and not entry.startswith("+++"))
+    removed = sum(1 for entry in diff if entry.startswith("-") and not entry.startswith("---"))
     return {"a": rel_a, "b": rel_b, "lines": diff[:20000], "added": added, "removed": removed,
             "truncated": len(diff) > 20000, "identical": not diff}
 
@@ -1979,8 +1979,8 @@ def build_integration(root: Path) -> dict:
         ir["lint_log_rel_path"] = rebase_path(root, ir.get("lint_log_path"))
         ir["top_rtl_rel_path"] = rebase_path(root, ir.get("top_rtl_path"))
     for sub in ("integration", "chip_top"):
-        for l in idx.step_logs.get(sub, []):
-            out["logs"].append(l)
+        for entry in idx.step_logs.get(sub, []):
+            out["logs"].append(entry)
     for s in tier_segs:
         out["segments"].append({
             "seg_id": s["seg_id"], "node": s["node"], "tier": s.get("tier"), "enter_ts": s["enter_ts"],

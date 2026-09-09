@@ -17,7 +17,6 @@ Hermetic (no LLM, no EDA except an optional real-yosys probe elsewhere):
 """
 from __future__ import annotations
 
-
 import pytest
 
 from orchestrator.langgraph import pipeline_graph

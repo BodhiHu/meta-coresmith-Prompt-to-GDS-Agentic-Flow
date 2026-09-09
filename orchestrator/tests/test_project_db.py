@@ -162,7 +162,7 @@ def test_rounds_keep_history_and_scope_reads(tmp_path):
 
 def test_ppa_history_records_tns_and_migrates(tmp_path):
     from orchestrator.state_store import Scoreboard
-    db = open_project(tmp_path)
+    open_project(tmp_path)
     sb = Scoreboard(tmp_path)
     assert sb.record_ppa(block="ctrl", probe="synth", cells=10, ff=2, wns_ns=1.5, tns_ns=-0.25)
     row = sb.latest_ppa("ctrl")
@@ -180,11 +180,15 @@ def test_ppa_history_records_tns_and_migrates(tmp_path):
 
 
 def test_pre_layout_sta_persists_report(tmp_path, monkeypatch):
-    from orchestrator.langgraph import ppa_check
     import subprocess
-    netlist = tmp_path / "n.v"; netlist.write_text("module top(input clk); endmodule\n")
-    sdc = tmp_path / "t.sdc"; sdc.write_text("create_clock -name clk -period 20 [get_ports clk]\n")
-    lib = tmp_path / "l.lib"; lib.write_text("library(x){}\n")
+
+    from orchestrator.langgraph import ppa_check
+    netlist = tmp_path / "n.v"
+    netlist.write_text("module top(input clk); endmodule\n")
+    sdc = tmp_path / "t.sdc"
+    sdc.write_text("create_clock -name clk -period 20 [get_ports clk]\n")
+    lib = tmp_path / "l.lib"
+    lib.write_text("library(x){}\n")
     monkeypatch.setattr(ppa_check.shutil, "which", lambda n: "/usr/bin/sta" if n == "sta" else None)
     captured = {}
 

@@ -18,7 +18,6 @@ assemble (truncation adapters would destroy the amended semantics).
 import json
 
 
-
 def _write_contracts(root, contracts):
     (root / ".coresmith").mkdir(exist_ok=True)
     (root / ".coresmith" / "interface_contracts.json").write_text(
