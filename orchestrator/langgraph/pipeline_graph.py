@@ -322,6 +322,7 @@ class OrchestratorState(TypedDict):
     integration_review_action: str | None
     # Targeted revise plan from integration_review: {block: reuse_spec}. Only
     # these blocks re-enter the tier on a revise; None = normal entry.
+    integration_approved_specs: Annotated[dict | None, _last]
     revise_blocks: Annotated[dict | None, _last]
 
     # Integration check results ────────────────────────────────────────────
@@ -5437,30 +5438,10 @@ def _revise_named_blocks(response: dict, candidates: list[str]) -> list[str]:
     return [c for c in candidates if c in named]
 
 
-def _adopt_reviewed_specs(pr: str, edited_blocks, reviewed_specs) -> list[str]:
-    """WP-58: copy every reviewed spec over its canonical file atomically
-    (write to a temp file, then replace). Returns the blocks adopted; a block
-    whose copy failed is NOT in the list and its canonical spec is untouched."""
-    import shutil as _shutil
-    import tempfile as _tempfile
-    spec_dir = Path(pr) / "arch" / "uarch_specs"
-    adopted: list[str] = []
-    for name in list(edited_blocks or []):
-        src = (reviewed_specs or {}).get(name)
-        canonical = spec_dir / f"{name}.md"
-        try:
-            if not src or not Path(src).exists() or Path(src).resolve() == canonical.resolve():
-                continue
-            canonical.parent.mkdir(parents=True, exist_ok=True)
-            fd, tmp = _tempfile.mkstemp(prefix=f".{name}.", suffix=".md", dir=str(canonical.parent))
-            os.close(fd)
-            _shutil.copy2(src, tmp)
-            os.replace(tmp, canonical)
-            os.utime(canonical, None)
-            adopted.append(name)
-        except OSError as exc:
-            log(f"  [INTEGRATION REVIEW] {name}: could not adopt reviewed spec: {exc}", RED)
-    return adopted
+def _adopt_reviewed_specs(pr: str, edited_blocks, reviewed_specs):
+    """Adopt all reviewed files as one fail-closed operation."""
+    from orchestrator.state_store.spec_adoption import adopt_reviewed_specs
+    return adopt_reviewed_specs(_db(pr), edited_blocks, reviewed_specs)
 
 
 def _plan_targeted_revise(
@@ -5484,8 +5465,6 @@ def _plan_targeted_revise(
     RTL skip-regen fast path cannot reuse a pass measured against the old spec.
     Blocks outside the scope keep their completed result untouched.
     """
-    import shutil as _shutil
-
     named = _revise_named_blocks(response, block_names)
     edited = [b for b in block_names if b in set(edited_blocks)]
     scope = [b for b in block_names
@@ -5498,22 +5477,10 @@ def _plan_targeted_revise(
                 or review_summary.strip())
     spec_dir = Path(pr) / "arch" / "uarch_specs"
     plan: dict[str, bool] = {}
-    adopt_failed: set[str] = set()    # WP-58: a spec that failed to copy is not reusable
+    adoption = _adopt_reviewed_specs(pr, edited, reviewed_specs)
+    adopt_failed = set(edited) if not adoption.ok else set()
     for name in scope:
         canonical = spec_dir / f"{name}.md"
-        if name in edited:
-            src = reviewed_specs.get(name)
-            try:
-                if src and Path(src).exists() and Path(src).resolve() != canonical.resolve():
-                    canonical.parent.mkdir(parents=True, exist_ok=True)
-                    _shutil.copy2(src, canonical)
-                    os.utime(canonical, None)  # newer than RTL/TB -> they regenerate
-                    log(f"  [INTEGRATION REVIEW] {name}: adopted the reviewed spec "
-                        f"({src})", YELLOW)
-            except OSError as exc:
-                adopt_failed.add(name)
-                log(f"  [INTEGRATION REVIEW] {name}: could not adopt reviewed "
-                    f"spec: {exc} -- the block will re-spec, not reuse", RED)
         # A named block (or an unscoped whole-tier revise) re-specs with the
         # chip lead's findings; an edited-only block implements the reviewed
         # spec as-is; a failed-only block retries its RTL against its spec.
@@ -5530,10 +5497,7 @@ def _plan_targeted_revise(
             except OSError:
                 pass
         plan[name] = bool(canonical.exists()) and not needs_respec and name not in adopt_failed
-        try:
-            _db(pr).clear_result(name, "best")
-        except Exception:  # noqa: BLE001 - never block the revise on bookkeeping
-            pass
+        _db(pr).clear_result(name, "best")
     return plan
 
 
@@ -5566,23 +5530,33 @@ async def integration_review_node(state: OrchestratorState) -> dict:
         })
         return {}
 
-    # Under block-goldens the per-tier LLM integration review is REDUNDANT and
-    # actively harmful, so skip it in BOTH passes (defer all cross-block checking
-    # to the real gates):
-    #   - pass 1 ("uarch"): the uarch_integration_gate after all tiers validates
-    #     cross-block coherence on the composed Amaranth chip model (byte-exact vs
-    #     the reference) before any RTL.
-    #   - pass 2 ("rtl"): integration_check (chip_top assembly + lint/wiring),
-    #     integration_dv (RTL == composed chip model) and validation_dv (RTL ==
-    #     golden) are the authoritative RTL-level cross-block gates.
-    # Beyond redundancy, the reviewer EDITS uArch specs on every run; in pass 2
-    # that trips the "stale RTL after spec edit" guard below -> approve routes to
-    # advance_tier but the spec-edit/re-DV churn re-parks here -> an integration-
-    # review REVISE-LOOP that never reaches integration_dv. Skipping it removes
-    # the loop without weakening correctness (the gates above still run). Also
-    # avoids LangGraph re-running the reviewer LLM on every resume (slow / can
-    # hang). Flag off -> unchanged. CORESMITH_STRICT_INTEGRATION_REVIEW=1 forces
-    # the old per-tier review (and its auto-revise) back on for both passes.
+    pending = {k: v for k, v in (state.get("integration_approved_specs") or {}).items()
+               if k in block_names}
+    if pending:
+        import hashlib
+        try:
+            verified = all(
+                hashlib.sha256((Path(pr) / "arch/uarch_specs" / f"{name}.md").read_bytes()).hexdigest() == digest
+                and (_db(pr).result(name, "best") or {}).get("spec_sha256") == digest
+                and (_db(pr).result(name, "best") or {}).get("sim_passed") is True
+                for name, digest in pending.items())
+        except OSError:
+            verified = False
+        if verified:
+            return {"integration_review_action": "approve", "integration_review_failed": False,
+                    "integration_approved_specs": None,
+                    "revise_blocks": {k: v for k, v in (state.get("revise_blocks") or {}).items()
+                                      if k not in block_names} or None}
+        response = await _resolve_interrupt({
+            "type": "uarch_spec_reverification_failed", "tier": tier,
+            "reason": "Approved spec hashes do not have matching successful verification results",
+            "affected_blocks": list(pending), "supported_actions": ["retry", "abort"],
+        })
+        return {"integration_review_action": "revise" if response.get("action") == "retry" else "abort",
+                "integration_review_failed": True, "integration_approved_specs": pending,
+                "revise_blocks": {name: True for name in pending}}
+
+    # Review once; approved edits re-enter verification using their adopted hashes.
     try:
         from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL
         from orchestrator.langchain.agents.integration_review_agent import (
@@ -5627,17 +5601,6 @@ async def integration_review_node(state: OrchestratorState) -> dict:
         review_summary = f"{failure_note}\n\n{review_summary}"
         issues_found = int(issues_found or 0) + len(failed_tier_blocks)
         review_failed = True
-    if issues_fixed:
-        stale_artifact_note = (
-            "Blocking uArch edits: integration review modified current-tier "
-            "uArch specs after RTL/testbench artifacts were generated. The "
-            "affected blocks must be regenerated from uArch before this tier "
-            "can be approved; otherwise stale RTL can falsely pass against the "
-            "old contract."
-        )
-        review_summary = f"{stale_artifact_note}\n\n{review_summary}"
-        review_failed = True
-
     log(f"  [INTEGRATION REVIEW] {review_summary[:200]}", GREEN if issues_found == 0 else YELLOW)
 
     spec_paths = {
@@ -5702,38 +5665,6 @@ async def integration_review_node(state: OrchestratorState) -> dict:
             YELLOW,
         )
         action = "revise"
-    if action == "approve" and issues_fixed:
-        # NOTE: The integration_review agent edits specs on every run, even
-        # cosmetically, so this auto-revise creates an infinite loop:
-        # revise -> restart_block -> integration_review edits again -> revise...
-        # When the outer agent explicitly approves, trust that decision;
-        # the integration_check
-        # node at RTL level will catch any real cross-block lint/wiring
-        # mismatch and surface it as a normal failure. Setting
-        # CORESMITH_STRICT_INTEGRATION_REVIEW=1 restores the old auto-revise.
-        import os as _os
-        if _os.environ.get("CORESMITH_STRICT_INTEGRATION_REVIEW") == "1":
-            log(
-                "  [INTEGRATION REVIEW] Approval rejected because uArch specs "
-                "were edited after block artifacts were generated; treating as revise "
-                "(CORESMITH_STRICT_INTEGRATION_REVIEW=1)",
-                YELLOW,
-            )
-            action = "revise"
-        else:
-            # WP-58: the explicit approve stands (auto-revise looped: the review
-            # agent edits specs cosmetically on every pass), but the approved
-            # state must be the EDITED specs, not the old canonical copies:
-            # adopt every reviewed edit atomically and record which blocks now
-            # carry a spec newer than their RTL.
-            _adopted = _adopt_reviewed_specs(pr, edited_blocks, reviewed_specs)
-            log(
-                "  [INTEGRATION REVIEW] Spec edits were made; honoring explicit "
-                f"approve and adopting the reviewed specs as canonical ({_adopted}). "
-                "integration_check at RTL level catches real mismatches. "
-                "Export CORESMITH_STRICT_INTEGRATION_REVIEW=1 to force revise.",
-                YELLOW,
-            )
     if (action == "revise" and issues_found == 0 and not review_failed
             and _is_content_free_revise(response)):
         # Only downgrade CONTENT-FREE revises (the stale auto-revise churn
@@ -5752,11 +5683,36 @@ async def integration_review_node(state: OrchestratorState) -> dict:
     _carry = {k: v for k, v in (state.get("revise_blocks") or {}).items()
               if k not in block_names}
     revise_blocks: dict | None = _carry or None
+    approved_specs = None
+    if action == "approve":
+        try:
+            if review_failed:
+                raise ValueError(review_summary)
+            adoption = _adopt_reviewed_specs(pr, edited_blocks, reviewed_specs)
+            if not adoption.ok:
+                raise ValueError(adoption.error)
+            revise_blocks = {**_carry, **{name: True for name in adoption.reverify}} or None
+            approved_specs = {name: adoption.hashes[name] for name in adoption.reverify} or None
+        except Exception as exc:
+            review_failed = True
+            response = await _resolve_interrupt({
+                "type": "uarch_spec_adoption_failed", "tier": tier,
+                "affected_blocks": edited_blocks, "reason": str(exc),
+                "supported_actions": ["retry", "abort"],
+            })
+            action = "retry" if response.get("action") == "retry" else "abort"
+            revise_blocks = _carry or None
     if action == "revise":
-        revise_blocks = {**_carry, **_plan_targeted_revise(
-            pr, response, block_names, edited_blocks, reviewed_specs,
-            failed_tier_blocks, review_summary, tier,
-        )}
+        try:
+            revise_blocks = {**_carry, **_plan_targeted_revise(
+                pr, response, block_names, edited_blocks, reviewed_specs,
+                failed_tier_blocks, review_summary, tier,
+            )}
+        except Exception as exc:
+            review_failed = True
+            response = await _resolve_interrupt({"type": "uarch_spec_adoption_failed",
+                "reason": str(exc), "supported_actions": ["retry", "abort"]})
+            action = "retry" if response.get("action") == "retry" else "abort"
     write_graph_event(pr, "Integration Review", "graph_node_exit", {
         "action": action, "issues_found": issues_found,
         "review_failed": review_failed,
@@ -5774,6 +5730,7 @@ async def integration_review_node(state: OrchestratorState) -> dict:
     return {
         "integration_review_action": action,
         "integration_review_failed": review_failed,
+        "integration_approved_specs": approved_specs,
         "revise_blocks": revise_blocks,
     }
 
@@ -5832,14 +5789,19 @@ def route_after_integration_review(state: OrchestratorState) -> str:
               written as gate feedback by integration_review_node)
     """
     action = state.get("integration_review_action", "approve")
-    if action == "abort":
-        return END
+    if action == "retry":
+        return "integration_review"
     if action == "revise":
+        return "init_tier"
+    if action == "abort" or state.get("integration_review_failed"):
+        return END
+    if state.get("integration_approved_specs"):
         return "init_tier"
     return "advance_tier"
 
 
 route_after_integration_review.__edge_labels__ = {
+    "integration_review": "RETRY ADOPTION",
     "advance_tier": "APPROVED",
     "init_tier": "REVISE",
     END: "ABORT",

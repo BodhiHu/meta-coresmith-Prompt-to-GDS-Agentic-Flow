@@ -637,6 +637,11 @@ class ProjectDB:
         return _uj(row["value_json"], None) if row else None
 
     def set_result(self, block: str, kind: str, value: dict, report_path: str | None = None) -> None:
+        if kind == "best" and "spec_sha256" not in value:
+            import hashlib
+            spec = self.root / "arch/uarch_specs" / f"{block}.md"
+            if spec.is_file():
+                value = {**value, "spec_sha256": hashlib.sha256(spec.read_bytes()).hexdigest()}
         with self._tx() as db:
             db.execute(
                 "INSERT INTO results(block, kind, value_json, report_path, ts) VALUES (?, ?, ?, ?, ?) "
@@ -661,6 +666,26 @@ class ProjectDB:
             db.execute("DELETE FROM results WHERE block=? AND kind=?", (block, kind))
         if kind == "best":
             self.export_block_views(block)
+
+    def invalidate_results_for_specs(self, spec_hashes: dict[str, str]) -> list[str]:
+        """Archive and clear best results for different (or unrecorded) spec bytes."""
+        invalidated = []
+        with self._tx() as db:
+            for block, digest in spec_hashes.items():
+                row = db.execute("SELECT value_json FROM results WHERE block=? AND kind='best'",
+                                 (block,)).fetchone()
+                best = _uj(row["value_json"], {}) if row else None
+                if best is None or best.get("spec_sha256") == digest:
+                    continue
+                archived = {"previous_best": best, "adopted_spec_sha256": digest,
+                            "reason": "reviewed spec changed; verification required"}
+                db.execute("INSERT OR REPLACE INTO results(block,kind,value_json,ts) VALUES(?,?,?,?)",
+                           (block, "spec_invalidated", _j(archived), time.time()))
+                db.execute("DELETE FROM results WHERE block=? AND kind='best'", (block,))
+                invalidated.append(block)
+        for block in invalidated:
+            self.export_block_views(block)
+        return invalidated
 
     def results(self, block: str | None = None) -> list[dict]:
         with self._conn() as db:

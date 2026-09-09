@@ -166,7 +166,7 @@ class TestTargetedRevisePlan:
         assert out["revise_blocks"] == {"beta": False}
 
     @pytest.mark.asyncio
-    async def test_approve_clears_plan_and_payload_lists_edits(self, tmp_path, monkeypatch):
+    async def test_approve_missing_reviewed_source_parks_and_lists_edits(self, tmp_path, monkeypatch):
         names = ["alpha"]
         _seed_project(tmp_path, names)
         (tmp_path / "arch" / "uarch_specs" / "alpha.md").write_text("# alpha\n")
@@ -184,8 +184,9 @@ class TestTargetedRevisePlan:
         monkeypatch.delenv("CORESMITH_STRICT_INTEGRATION_REVIEW", raising=False)
         out = await pipeline_graph.integration_review_node(_orch_state(tmp_path, names))
         assert seen["edited_blocks"] == ["alpha"]
-        assert out["integration_review_action"] == "approve"
-        assert out["revise_blocks"] is None
+        assert out["integration_review_action"] == "abort"
+        assert out["integration_review_failed"]
+        assert pipeline_graph.route_after_integration_review(out) != "advance_tier"
 
     def test_revise_named_blocks_accepts_block_actions_json(self):
         resp = {"block_actions": json.dumps({"beta": "restart", "alpha": "approve"})}

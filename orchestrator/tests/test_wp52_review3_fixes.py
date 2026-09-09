@@ -227,7 +227,8 @@ def test_adoption_and_strict_review_defaults():
     assert "adopt_failed" in src and "name not in adopt_failed" in src
     src2 = open(pg.__file__, encoding="utf-8").read()
     assert "_adopt_reviewed_specs(pr, edited_blocks, reviewed_specs)" in src2
-    assert "os.replace(tmp, canonical)" in inspect.getsource(pg._adopt_reviewed_specs)
+    from orchestrator.state_store.spec_adoption import adopt_reviewed_specs
+    assert "os.replace" in inspect.getsource(adopt_reviewed_specs)
     from orchestrator.langgraph import pipeline_helpers as ph
     assert ".md.rejected-" in inspect.getsource(ph) and "quarantine" in inspect.getsource(ph).lower()
 
