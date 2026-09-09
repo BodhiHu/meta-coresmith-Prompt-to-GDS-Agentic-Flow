@@ -83,8 +83,10 @@ _ACCEPT_STIM = textwrap.dedent(
 
 def _make_run(tmp_path: Path, *, qspi: bool = True, with_stim: bool = True) -> Path:
     root = tmp_path / "run"
+    (root / "inputs").mkdir(parents=True, exist_ok=True)
+    (root / "inputs/task.yaml").write_text("chassis: caravel\n")
     (root / ".coresmith").mkdir(parents=True)
-    (root / "inputs").mkdir(parents=True)
+    (root / "inputs").mkdir(parents=True, exist_ok=True)
     proto = "custom QSPI slave over Caravel GPIO" if qspi else "AXI-Stream"
     (root / ".coresmith" / "prd_spec.json").write_text(
         '{"prd": {"dataflow": {"bus_protocol": "%s"}}}' % proto

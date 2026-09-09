@@ -151,6 +151,8 @@ def _make_run(tmp_path, *, qspi: bool = True, wrapper: str = "",
               top_src: str = _PREFIXED_PIN_TOP, top_name: str = "raster_top"):
     """A minimal run dir: spec + assembled top (+ optional wrapper file)."""
     root = tmp_path / "run"
+    (root / "inputs").mkdir(parents=True, exist_ok=True)
+    (root / "inputs/task.yaml").write_text("chassis: caravel\n")
     (root / ".coresmith").mkdir(parents=True, exist_ok=True)
     # The raster run's real shape: prd bus_protocol="custom", ERS naming QSPI.
     proto = (

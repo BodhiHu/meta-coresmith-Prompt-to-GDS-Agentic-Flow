@@ -62,11 +62,8 @@ from pathlib import Path
 #: the <channel>_<field> convention cannot apply to it.
 def _locked_boundary_ports(project_root) -> tuple[str, ...]:
     """WP-51: the task's chassis says which pad ports are locked."""
-    try:
-        from orchestrator.chassis.profile import locked_boundary_ports
-        return locked_boundary_ports(project_root)
-    except Exception:  # noqa: BLE001 - layering guard
-        return ("io_in", "io_out", "io_oeb")
+    from orchestrator.chassis.profile import locked_boundary_ports
+    return locked_boundary_ports(project_root)
 
 _logger = logging.getLogger(__name__)
 

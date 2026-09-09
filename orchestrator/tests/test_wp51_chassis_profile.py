@@ -17,15 +17,17 @@ def test_profile_from_task_yaml_and_env(tmp_path, monkeypatch):
     assert resolve_profile(tmp_path) is None and chassis_top(tmp_path) == ""
     (tmp_path / "inputs").mkdir()
     (tmp_path / "inputs" / "task.yaml").write_text("top: user_project_wrapper\nclock: wb_clk_i\n")
-    assert resolve_profile(tmp_path) == CARAVEL and chassis_top(tmp_path) == "user_project_wrapper"
+    assert resolve_profile(tmp_path) is None and chassis_top(tmp_path) == ""
     (tmp_path / "inputs" / "task.yaml").write_text("chassis: accel\ntop: something_else\n")
     assert resolve_profile(tmp_path) == CARAVEL
     monkeypatch.setenv("CORESMITH_CHASSIS", "none")
+    assert resolve_profile(tmp_path) == CARAVEL
+    (tmp_path / "inputs/task.yaml").write_text("chassis: none\n")
     assert resolve_profile(tmp_path) is None
     assert locked_boundary_ports(tmp_path) == ()           # WP-55: none means none
     monkeypatch.delenv("CORESMITH_CHASSIS", raising=False)
     (tmp_path / "inputs" / "task.yaml").write_text("title: plain\n")
-    assert locked_boundary_ports(tmp_path) == ("io_in", "io_out", "io_oeb")   # undeclared: built-in union
+    assert locked_boundary_ports(tmp_path) == ()
 
 
 def test_wrapper_block_is_matched_by_declared_name_only():

@@ -27,6 +27,10 @@ endmodule
 """
 
 
+MAPPING = {"payload": "data", "input_width": 8, "output_width": 8, "packing": "bytes",
+           "byte_order": "little", "sidebands": {"mode": "mode"}}
+
+
 def test_no_benchmark_shape_in_the_engine():
     src = open(ad.__file__, encoding="utf-8").read()
     for tok in ("stream_core", "_STREAM_TEMPLATE", "cfg_valid", "n_frames", "word_bytes"):
@@ -36,7 +40,7 @@ def test_no_benchmark_shape_in_the_engine():
 def test_axis_shape_maps_payload_and_sidebands():
     c = ad.classify_contract(ad.discover_ports(AXIS_TOP))
     assert c and c["kind"] == "axis" and "mode" in c["sidebands"]
-    m = ad.map_stimulus({"data": b"\x01\x02", "mode": 3}, c)
+    m = ad.map_stimulus({"data": b"\x01\x02", "mode": 3}, c, mapping=MAPPING)
     assert m["payload"] == [1, 2] and m["sidebands"] == {"mode": 3}
 
 
@@ -65,7 +69,7 @@ def _project(tmp_path, cases_src: str):
     (root / "rtl").mkdir()
     top = root / "rtl" / "s_top.v"
     top.write_text(AXIS_TOP)
-    (root / "inputs" / "acceptance_stimulus.py").write_text(cases_src)
+    (root / "inputs" / "acceptance_stimulus.py").write_text(cases_src + f"\nAXIS_MAPPING = {MAPPING!r}\n")
     (root / "inputs" / "golden.py").write_text("def run(stim):\n    return bytes(stim['data'])\n")
     (root / "inputs" / "accept.py").write_text("def accept(e, o):\n    return bytes(e) == bytes(o)\n")
     adopt(root, top, name="s_top")

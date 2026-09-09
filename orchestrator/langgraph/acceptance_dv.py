@@ -173,75 +173,53 @@ def classify_contract(ports: dict[str, dict]) -> dict | None:
     }
 
 
-def map_stimulus(stimulus: Any, contract: dict) -> dict | None:
-    """Map a stimulus (dict / flat sequence) onto (payload bytes, sideband
-    values) using the SAME conventions as the composed model's simulate():
-    the array-valued field is the beat stream; scalar fields map to sideband
-    ports by exact name, then substring, match. None when unmappable."""
-    sb_values: dict[str, int] = {}
-    payload = None
+def map_stimulus(stimulus: Any, contract: dict, mapping=None) -> dict | None:
+    """Apply task-owned AXIS_MAPPING, never infer payload or sideband meanings.
+
+    AXIS_MAPPING declares payload field, input_width, output_width, packing
+    (bytes or words), byte_order (little), and sidebands {port: stimulus_field}.
+    A case can supply its own axis_mapping. Values must be flat and in range;
+    owners explicitly flatten arrays and declare geometry as scalar sidebands.
+    """
     if isinstance(stimulus, dict):
-        for key, val in stimulus.items():
-            if isinstance(val, (list, tuple, bytes, bytearray)) or hasattr(val, "ravel"):
-                if payload is None and str(key).lower() != "cfg":
-                    payload = val
-                continue
-            if isinstance(val, dict):
-                continue
-            if not isinstance(val, (int, float)):
-                continue
-            k = str(key).lower()
-            port = None
-            if k in contract["sidebands"]:
-                port = k
-            else:
-                cands = [p for p in contract["sidebands"] if k in p or p in k]
-                if len(cands) == 1:
-                    port = cands[0]
-            if port is not None:
-                sb_values[port] = int(val)
-    elif isinstance(stimulus, (list, tuple)):
-        payload = stimulus
-    if payload is None:
+        mapping = stimulus.get("axis_mapping", mapping)
+    if not isinstance(mapping, dict):
         return None
-    # dv-hardening-24 (armD driver, defect #10): frame geometry is implicit in
-    # the payload's 2D shape (stimuli carry only frames+qp), but _pack_cases
-    # drives unmapped sidebands as 0 -> the chip waits forever for a 0x0 frame
-    # (all-cases watchdog with zero output). Derive *_width / *_height sideband
-    # values from the array shape when not explicitly given. Must run BEFORE
-    # flattening -- only the raw payload still carries the 2D shape.
     try:
-        import numpy as _np2
-
-        _arr = _np2.asarray(
-            stimulus.get("frames")
-            if isinstance(stimulus, dict) and "frames" in stimulus
-            else payload
-        )
-        if _arr.ndim >= 2:
-            _h, _w = int(_arr.shape[-2]), int(_arr.shape[-1])
-            for _p in contract["sidebands"]:
-                if _p in sb_values:
-                    continue
-                _pl = _p.lower()
-                if "width" in _pl:
-                    sb_values[_p] = _w
-                elif "height" in _pl:
-                    sb_values[_p] = _h
-    except Exception:  # noqa: BLE001
-        pass
-    try:
-        import numpy as _np
-
-        flat = [int(v) & 0xFF for v in _np.asarray(payload).ravel().tolist()]
-    except Exception:  # noqa: BLE001
-        try:
-            flat = [int(v) & 0xFF for v in payload]
-        except Exception:  # noqa: BLE001
+        iw, ow = mapping["input_width"], mapping["output_width"]
+        if (type(iw) is not int or type(ow) is not int or iw not in range(8, 65, 8)
+                or ow not in range(8, 65, 8) or iw != contract["s_axis"]["data_width"]
+                or ow != contract["m_axis"]["data_width"] or mapping["byte_order"] != "little"):
             return None
-    unmapped = [p for p in contract["sidebands"] if p not in sb_values]
-    mapped = {"payload": flat, "sidebands": sb_values, "unmapped": unmapped}
-    return mapped
+        packing = mapping["packing"]
+        if packing not in ("bytes", "words"):
+            return None
+        field = mapping["payload"]
+        payload = stimulus[field] if isinstance(stimulus, dict) else stimulus if field is None else None
+        if hasattr(payload, "tolist"):
+            payload = payload.tolist()
+        if not isinstance(payload, (list, tuple, bytes, bytearray)):
+            return None
+        bound = 256 if packing == "bytes" else 1 << iw
+        if any(type(v) is not int or not 0 <= v < bound for v in payload):
+            return None
+        flat = list(payload) if packing == "bytes" else list(b"".join(
+            v.to_bytes(iw // 8, "little") for v in payload))
+        if len(flat) % (iw // 8):
+            return None
+        ports = contract["sidebands"]
+        sb_map = mapping["sidebands"]
+        if not isinstance(sb_map, dict) or set(sb_map) != set(ports):
+            return None
+        sidebands = {}
+        for port, key in sb_map.items():
+            value = stimulus[key]
+            if type(value) is not int or not 0 <= value < (1 << min(ports[port], 32)):
+                return None
+            sidebands[port] = value
+        return {"payload": flat, "sidebands": sidebands, "unmapped": []}
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
 
 
 def _call_accept(accept_fn, expected, observed, name: str, stimulus: Any):
@@ -647,12 +625,12 @@ def run_acceptance_dv(project_root: str, top_rtl: str,
     sb_order = sorted(contract["sidebands"])
     mapped_cases: list[tuple[str, dict]] = []
     for name, stim in raw_cases:
-        m = map_stimulus(stim, contract)
+        m = map_stimulus(stim, contract, mapping=getattr(art_mod, "AXIS_MAPPING", None))
         if m is None:
-            _why = "no payload / sideband mapping"
+            _why = "missing or unsupported AXIS_MAPPING (payload, widths, packing, byte order, sidebands)"
             return _incomplete(f"acceptance case {name!r} not mappable onto the "
-                               f"chip contract (sidebands={sb_order}): {_why or 'unmappable'}",
-                               "adapter_defect")
+                               f"chip contract (sidebands={sb_order}): {_why}",
+                               "oracle_incomplete")
         mapped_cases.append((str(name), m))
 
     workdir = Path(tempfile.mkdtemp(prefix="cs_acceptance_dv_"))

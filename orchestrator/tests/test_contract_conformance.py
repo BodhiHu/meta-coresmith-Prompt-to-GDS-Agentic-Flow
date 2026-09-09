@@ -25,6 +25,8 @@ from orchestrator.langgraph.contract_conformance import check_block, declared_po
 
 
 def _project(tmp_path, edges):
+    (tmp_path / "inputs").mkdir(exist_ok=True)
+    (tmp_path / "inputs/task.yaml").write_text("chassis: caravel\n")
     (tmp_path / ".coresmith").mkdir(parents=True, exist_ok=True)
     (tmp_path / ".coresmith" / "interface_contracts.json").write_text(
         json.dumps({"contracts": edges}))

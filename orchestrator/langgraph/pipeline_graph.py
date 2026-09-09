@@ -6628,16 +6628,15 @@ async def integration_check_node(state: OrchestratorState) -> dict:
         # Lead LLM, which named the top after the design and treated the pad
         # adapter as a peer block -- so the daemon never delivered a gradeable
         # wired top and every chip-lead hand-assembled one.
-        from orchestrator.chassis.profile import chassis_top
-        from orchestrator.harness.top_module import declared_top as _declared_top_fn
+        from orchestrator.chassis.profile import CARAVEL, declared_chassis
         from orchestrator.langgraph.integration_helpers import (
             detect_wrapper_block,
             generate_caravel_wrapper_top,
             load_interface_contract_edges,
         )
         # WP-51: the wrapper block is the one named as the task's declared top.
-        _wrapper_block = detect_wrapper_block(
-            modules, _declared_top_fn(pr) or chassis_top(pr) or "")
+        _chassis = declared_chassis(pr)
+        _wrapper_block = detect_wrapper_block(modules, _chassis.top_module) if _chassis else None
         # WP-24: the generator may have written the wrapper block as the
         # COMPLETE graded top (pads + every core block instantiated). Re-wrapping
         # it produces wiring hazards and a nested top the QSPI pin-boundary gate
@@ -6651,7 +6650,7 @@ async def integration_check_node(state: OrchestratorState) -> dict:
             for _e in _pin_map.errors:
                 log(f"  [INTEGRATION] pin_map: {_e}", RED)
             _pin_map = None
-        if ((_wrapper_block is not None or _pin_map is not None)
+        if (_chassis == CARAVEL and (_wrapper_block is not None or _pin_map is not None)
                 and _deterministic_caravel_top_enabled()):
             if _pin_map is not None:
                 log(f"  [INTEGRATION] pin map declared ({len(_pin_map.entries)} "
