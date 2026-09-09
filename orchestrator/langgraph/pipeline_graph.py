@@ -5203,19 +5203,30 @@ async def _single_context_uarch_stage(
 
 
 def _retire_derived_integration_artifacts(project_root: str) -> list[str]:
-    """Move the engine-assembled integration top out of rtl/integration.
+    """Retire superseded assembler outputs when integration checking re-runs.
 
     Only files the deterministic assembler writes are moved: the assembled
     ``user_project_wrapper.v`` (when the persisted integration record says
     ``caravel_wrapper_assembled``) and ``user_project_wrapper_pads.v``. An
-    LLM-authored or self-assembled top is left alone. Returns the file names
+    LLM-authored or self-assembled top is left alone, as are all sources and
+    dependencies of the current validated candidate. Returns the file names
     moved. Never raises.
     """
     import time as _time
+
+    from orchestrator.harness.top_module import CandidateError, validated_candidate
+
     root = Path(project_root)
     int_dir = root / "rtl" / "integration"
     if not int_dir.is_dir():
         return []
+    protected = set()
+    try:
+        candidate = validated_candidate(root)
+        protected = {Path(p).resolve() for p in
+                     [*candidate["sources"], *candidate["dependencies"]]}
+    except CandidateError:
+        pass
     assembled = False
     try:
         rec = json.loads((root / ".coresmith" / "integration_result.json").read_text())
@@ -5227,7 +5238,7 @@ def _retire_derived_integration_artifacts(project_root: str) -> list[str]:
     dest = int_dir / "_stale" / _time.strftime("%Y%m%dT%H%M%S")
     for n in names:
         f = int_dir / n
-        if f.is_file():
+        if f.is_file() and f.resolve() not in protected:
             try:
                 dest.mkdir(parents=True, exist_ok=True)
                 f.rename(dest / n)
@@ -5289,18 +5300,6 @@ async def init_tier_node(state: OrchestratorState) -> dict:
             current_idx = tier_idx_update = _idx
             tier = tier_list[current_idx]
             tier_blocks = [b for b in block_queue if b.get("tier", 1) == tier]
-    if revise:
-        # WP-31: the assembler's outputs under rtl/integration are rebuilt by
-        # the next integration check; a stale copy misleads the review (the
-        # chip lead cited nets "missing" from a wrapper that had not been
-        # rebuilt, three revise rounds in a row on ax25_9600).
-        _retired = _retire_derived_integration_artifacts(pr)
-        if _retired:
-            log(f"  Targeted revise: retired stale derived artifact(s) "
-                f"{_retired} (rebuilt at the next integration check)", CYAN)
-            write_graph_event(pr, "Init Tier", "derived_artifacts_retired",
-                              {"files": _retired})
-
     # Section 7a: stamp the engine git SHA at run start + WARN in the daemon log
     # if it changes mid-run (a hot-swap that flipped behavior under the run).
     _stamp_engine_sha(pr)
@@ -6333,6 +6332,15 @@ async def integration_check_node(state: OrchestratorState) -> dict:
         log(f"  [INTEGRATION] Found {len(connections)} connections, "
             f"design: {design_name}", CYAN)
         span.set_attribute("connection_count", len(connections))
+
+        # WP-31/68: retire only superseded assembly artifacts, at the point
+        # integration will rebuild them. Tier re-entry and reporting must
+        # preserve the current validated candidate for downstream consumers.
+        retired = _retire_derived_integration_artifacts(pr)
+        if retired:
+            log(f"  [INTEGRATION] Retired superseded derived artifact(s): {retired}", CYAN)
+            write_graph_event(pr, "Integration Check", "derived_artifacts_retired",
+                              {"files": retired})
 
         rtl_paths = await asyncio.to_thread(
             discover_block_rtl, pr, passed_blocks
@@ -10065,9 +10073,8 @@ async def final_report_node(state: OrchestratorState) -> dict:
     artifact. Never raises: a report failure must not fail the pipeline.
     """
     pr = _pr(state)
-    for record in ("candidate.json", "integration_result.json"):
-        (Path(pr) / ".coresmith" / record).unlink(missing_ok=True)
-
+    # Candidate records belong to adoption/invalidation, and must survive
+    # reporting so both automatic and later explicit backend starts can read them.
     try:
         from orchestrator.langgraph.final_report import (
             build_final_report,

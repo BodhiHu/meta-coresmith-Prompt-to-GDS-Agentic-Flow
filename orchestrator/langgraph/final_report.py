@@ -452,12 +452,15 @@ def build_final_report(state: dict, project_root: str, *,
     valid = state.get("validation_dv_result") or {}
     design_name = (integ.get("design_name") or valid.get("design_name")
                    or state.get("design_name") or "chip_top")
-    from orchestrator.harness.top_module import CandidateError, resolve_top
+    from orchestrator.harness.top_module import CandidateError, validated_candidate
     try:
-        top_module, top_rtl_path = resolve_top(project_root)
+        candidate = validated_candidate(project_root)
+        top_module, top_rtl_path = candidate["top_module"], candidate["top_rtl_path"]
+        candidate_sha = candidate["candidate_sha"]
         candidate_error = ""
     except CandidateError as exc:
         top_module, top_rtl_path, candidate_error = None, None, str(exc)
+        candidate_sha = None
 
     integ_dv_row = _dv_one(sb, design_name, "chip")
     valid_dv_row = _dv_one(sb, design_name, "validation")
@@ -587,6 +590,7 @@ def build_final_report(state: dict, project_root: str, *,
         "design_name": design_name,
         "top_module": top_module,
         "top_rtl_path": top_rtl_path,
+        "candidate_sha": candidate_sha,
         "candidate_error": candidate_error,
         "target_clock_mhz": target_clock_mhz,
         "engine_sha": engine_prov.get("sha", ""),
@@ -738,6 +742,8 @@ def render_markdown(report: dict) -> str:
         lines.append(f"- Top module: `{report['top_module']}` (`{report['top_rtl_path']}`)")
     else:
         lines.append(f"- Top module: unknown ({report.get('candidate_error') or 'no validated candidate'})")
+    if report.get("candidate_sha"):
+        lines.append(f"- Candidate SHA: `{report['candidate_sha']}`")
     if report.get("engine_sha"):
         _chg = " ⚠️ CHANGED MID-RUN" if report.get("engine_sha_changed_mid_run") else ""
         lines.append(f"- Engine SHA: `{report.get('engine_sha')}`{_chg}")
