@@ -12,6 +12,8 @@ from orchestrator.tests.test_gate_sim import _BLOCK, _good_ref, _runner_for, _st
 
 
 def test_maximum_marker_is_scope_not_executed_evidence(tmp_path, monkeypatch):
+    (tmp_path/'inputs').mkdir()
+    (tmp_path/'inputs/task.yaml').write_text('max_geometry_cases:\n  depth_limit:\n    queue_depth: 64\n')
     tb = tmp_path / 'tb.py'
     tb.write_text('# MAXGEO: unrelated=64\n')
     monkeypatch.setattr(pg, '_maxgeo_gate_enabled', lambda: True)

@@ -211,6 +211,10 @@ def test_writer_reports_coverage_and_carries_the_contract(tmp_path):
 # The gate's scoped verdict
 # ---------------------------------------------------------------------------
 def _project(tmp_path, dims: dict) -> str:
+    (tmp_path / "inputs").mkdir(exist_ok=True)
+    (tmp_path / "inputs/task.yaml").write_text(json.dumps({
+        "max_geometry_cases": {"owner_max": dims},
+    }))
     cs = tmp_path / ".coresmith"
     cs.mkdir(parents=True, exist_ok=True)
     (cs / "ers_spec.json").write_text(json.dumps({"ers": {"constraints": [
@@ -477,6 +481,9 @@ def test_a_run_without_acceptance_cases_is_byte_identical(tmp_path):
 def test_the_generated_max_geometry_tb_requires_execution(tmp_path):
     """A generated testbench artifact alone is not execution evidence."""
     pr = _generic_run(tmp_path)
+    (Path(pr) / "inputs/task.yaml").write_text(json.dumps({
+        "max_geometry_cases": {"deterministic_qspi_dv_max_geometry": _GEN_DIMS},
+    }))
     tb, res = _write_integration_tb(pr)
     v = pipeline_graph._maxgeo_gate_verdict(pr, tb, res)
     assert v is not None and v["verdict"] == "unknown"

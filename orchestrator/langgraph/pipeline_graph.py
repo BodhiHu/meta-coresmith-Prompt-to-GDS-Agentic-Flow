@@ -7699,9 +7699,9 @@ def _format_dv_retry_context(previous_result: dict | None) -> str:
 # index/address/counter widths were never exercised at the declared maximum, so
 # a wrap at the 2^n boundary BELOW the max (e.g. a 7-bit column index wrapping
 # at 512 on a 640-wide frame) sailed through integration + validation DV. This
-# gate forces at least one MAX-GEOMETRY test case whenever the design declares
-# any dimensional maximum, and requires the generated testbench to advertise it
-# with a machine-checkable marker.
+# gate requires executed maximum cases only when the owner declares them in
+# inputs/task.yaml. Policy dimensions and testbench markers alone describe
+# scope; without owner cases they are explicitly not owner-certified.
 #
 # DOMAIN-GENERIC by construction: dimension NAMES are DATA read from the
 # design's own machine-readable declarations -- the engine NEVER greps for
@@ -7728,8 +7728,8 @@ _MAXGEO_EQUIV_NVEC_CAP = 4096    # bound the seeded chip-equiv stream length
 
 
 def _maxgeo_gate_enabled() -> bool:
-    """Require a MAX-GEOMETRY DV test when the design declares dimensional
-    maxima. Default ON; ``CORESMITH_MAXGEO_GATE=0`` disables (both branches
+    """Evaluate owner certification of the design's dimensional maxima.
+    Default ON; ``CORESMITH_MAXGEO_GATE=0`` disables (both branches
     tested). Env-gate convention (like :func:`_chip_equiv_enabled`)."""
     return (os.environ.get("CORESMITH_MAXGEO_GATE", "1") or "1") != "0"
 
@@ -8021,6 +8021,35 @@ def _maxgeo_conformance_scope(
     }
 
 
+def _tb_maxgeo_mentions(tb_path: str, dims: dict) -> dict:
+    """Cocotb cases mentioning each dimension, as scope only, never proof.
+
+    Inspect source without importing the testbench. Comments, strings and
+    identifiers inside a case can describe scope without exercising it.
+    """
+    import ast
+
+    try:
+        source = Path(tb_path).read_text(encoding="utf-8", errors="replace")
+        tree = ast.parse(source)
+    except (OSError, SyntaxError, ValueError):
+        return {}
+    lines = source.splitlines()
+    mentions = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        decorators = [d.func if isinstance(d, ast.Call) else d for d in node.decorator_list]
+        if not any((isinstance(d, ast.Attribute) and d.attr == "test")
+                   or (isinstance(d, ast.Name) and d.id == "test") for d in decorators):
+            continue
+        body = "\n".join(lines[node.lineno - 1:node.end_lineno])
+        found = [name for name in dims if re.search(r"(?<![\w./-])" + re.escape(name) + r"(?![\w./-])", body)]
+        if found:
+            mentions[node.name] = found
+    return mentions
+
+
 def _maxgeo_gate_verdict(
     project_root: str, tb_path: str, tb_result: dict | None = None,
     *, sim_result: dict | None = None,
@@ -8030,6 +8059,8 @@ def _maxgeo_gate_verdict(
     Owner task.yaml declares ``max_geometry_cases: {case_name: {dimension: max}}``.
     ``executed_cases`` comes from the simulator's fresh successful XML test rows,
     never from the generated testbench's own metadata or comments.
+    An absent declaration (or empty mapping) is non-blocking ``not_declared``;
+    policy-authored dimensions cannot impose an owner certification obligation.
     """
     if not _maxgeo_gate_enabled():
         return None
@@ -8038,14 +8069,30 @@ def _maxgeo_gate_verdict(
 
         from orchestrator.langgraph.bfm_lib.maxgeo import declared_dimensional_maxima
         dims = declared_dimensional_maxima(project_root)
-        if not dims:
-            return None
-        marker = _tb_maxgeo_pairs(tb_path)
         task_path = Path(project_root) / "inputs/task.yaml"
-        task = yaml.safe_load(task_path.read_text()) or {} if task_path.exists() else {}
-        declared = task.get("max_geometry_cases") or {}
+        task = yaml.safe_load(task_path.read_text()) if task_path.exists() else None
+        if task is None:
+            task = {}
+        if not isinstance(task, dict):
+            raise ValueError("inputs/task.yaml must be a mapping")
+        declared = task.get("max_geometry_cases", {})
         if not isinstance(declared, dict):
             raise ValueError("max_geometry_cases must map case names to dimension maxima")
+        for name, maxima in declared.items():
+            if (not isinstance(name, str) or not name.strip()
+                    or not isinstance(maxima, dict) or not maxima
+                    or any(not isinstance(key, str) or not key.strip()
+                           or type(value) is not int or value <= 0
+                           for key, value in maxima.items())):
+                raise ValueError(f"Malformed max_geometry_cases entry: {name!r}")
+        if not dims:
+            return None
+        scope = {"declared_dims": dims, "marker_pairs": _tb_maxgeo_pairs(tb_path),
+                 "testbench_case_mentions": _tb_maxgeo_mentions(tb_path, dims)}
+        if not declared:
+            return {**scope, "verdict": "not_declared",
+                    "reason": "maximum geometry not owner-certified (no max_geometry_cases declared)",
+                    "uncovered_dims": dims, "executed_maximum_cases": []}
         executed = (sim_result or {}).get("executed_cases") or []
         if not isinstance(executed, list) or any(not isinstance(name, str) for name in executed):
             raise ValueError("Executed case evidence must be a list of exact case names")
@@ -8054,7 +8101,7 @@ def _maxgeo_gate_verdict(
         covered = {}
         qualifying = []
         for name, maxima in declared.items():
-            if name not in executed or not isinstance(maxima, dict):
+            if name not in executed:
                 continue
             attained = {key: value for key, value in dims.items()
                         if type(maxima.get(key)) is int and maxima[key] == value}
@@ -8066,7 +8113,7 @@ def _maxgeo_gate_verdict(
                 "reason": ("MAX-GEOMETRY unknown: no successful executed owner-declared maximum case covers "
                            f"{missing}; markers describe declared scope only") if missing else
                           "Executed owner-declared maximum cases cover every declared dimension",
-                "declared_dims": dims, "marker_pairs": marker,
+                **scope,
                 "uncovered_dims": missing, "executed_maximum_cases": qualifying}
     except Exception as exc:  # malformed declaration/evidence cannot disable the gate
         return {"verdict": "unknown", "reason": f"Maximum-case evidence unavailable: {exc}"}
@@ -8553,10 +8600,8 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
         passed = sim_result.get("passed", False)
         sim_log = sim_result.get("log", "")
 
-        # MAX-GEOMETRY gate (rung3-fixes-2): a green sim is NOT sufficient when
-        # the design declares dimensional maxima but the TB never exercised
-        # them -- that is how a truncated index-width bug ships in a "verified"
-        # chip. Flip the DV to failed -> existing failure interrupt.
+        # Maximum certification is mandatory only for owner-declared cases.
+        # Policy-only dimensions remain explicitly not_declared and non-blocking.
         # run3-followups: the gate runs on EVERY passing cycle, including
         # operator-reused TBs (fix_tb/fix_rtl). "Trusted as-is" silently
         # DISARMED the gate on exactly the cycles that deserve more scrutiny --
@@ -8580,6 +8625,8 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
                     "gate": "maxgeo",
                     "executed_maximum_cases": _mg.get("executed_maximum_cases", []),
                 })
+            elif _mg is not None and _mg.get("verdict") == "not_declared":
+                log(f"  [INTEG-DV] MAX-GEOMETRY not_declared -- {_mg['reason']}", YELLOW)
             elif _mg is not None:
                 passed = False
                 sim_log = ((sim_log + "\n\n") if sim_log else "") + _mg["reason"]
@@ -9671,11 +9718,8 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
         passed = sim_result.get("passed", False)
         sim_log = sim_result.get("log", "")
 
-        # MAX-GEOMETRY gate (rung3-fixes-2): validation DV must exercise the
-        # declared dimensional maxima, not just a directed small-geometry prefix
-        # -- otherwise a geometry-dependent index/address-width truncation ships
-        # verified. Flip to failed -> existing failure interrupt. Operator-reused
-        # TBs are trusted.
+        # Same owner-certification contract as integration DV: not_declared is
+        # scope evidence only and never flips a passing simulation to failed.
         # run3-followups: same contract as integration_dv -- the gate runs on
         # EVERY passing cycle (operator-reused TBs get MORE scrutiny) and every
         # evaluated outcome logs a verdict; a pass returns a dict, never None.
@@ -9696,6 +9740,8 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
                     "gate": "maxgeo",
                     "executed_maximum_cases": _mg.get("executed_maximum_cases", []),
                 })
+            elif _mg is not None and _mg.get("verdict") == "not_declared":
+                log(f"  [VALIDATION-DV] MAX-GEOMETRY not_declared -- {_mg['reason']}", YELLOW)
             elif _mg is not None:
                 passed = False
                 sim_log = ((sim_log + "\n\n") if sim_log else "") + _mg["reason"]
@@ -9728,6 +9774,7 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
                         "passed": True,
                         "chip_top_synthesizable": False,
                         "synth_fail_reason": _synth_reason,
+                        "max_geometry": _mg,
                         "test_count": test_count,
                         "design_name": design_name,
                     },
@@ -9766,6 +9813,7 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
                         "passed": True,
                         "die_budget_ok": False,
                         "die_rollup_reason": _roll.reason,
+                        "max_geometry": _mg,
                         "die_total_mm2": round(_roll.total_um2 / 1e6, 4),
                         "die_budget_mm2": _roll.die_budget_mm2,
                         "test_count": test_count,

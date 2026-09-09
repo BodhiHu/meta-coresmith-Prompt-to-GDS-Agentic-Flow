@@ -293,7 +293,7 @@ class TestDeclaredDimensionsFromSchema:
 # 5. maxgeo deterministic path fires END-TO-END on a schema fixture ERS
 # ===========================================================================
 class TestMaxgeoEndToEndFromSchema:
-    def test_video_schema_missing_marker_rejected(self, tmp_path):
+    def test_video_schema_missing_marker_is_uncertified(self, tmp_path):
         _write_ers(tmp_path, _VIDEO_PARAMS)
         tb = _write_tb(tmp_path / "tb" / "t.py", "import cocotb\n# no marker\n")
         v = pipeline_graph._maxgeo_gate_verdict(str(tmp_path), tb)
@@ -307,7 +307,7 @@ class TestMaxgeoEndToEndFromSchema:
             "import cocotb\n# MAXGEO: frame_width=640 frame_height=352\n")
         # Declared marker coverage is not execution evidence.
         v = pipeline_graph._maxgeo_gate_verdict(str(tmp_path), tb)
-        assert v is not None and v.get("verdict") == "unknown"
+        assert v is not None and v.get("verdict") == "not_declared"
 
     def test_aes_nonvideo_schema_end_to_end(self, tmp_path):
         # NON-video two-domain proof: the deterministic gate fires identically
@@ -319,7 +319,7 @@ class TestMaxgeoEndToEndFromSchema:
             tmp_path / "tb" / "g.py",
             "import cocotb\n# MAXGEO: max_message_blocks=1024\n")
         v_ok = pipeline_graph._maxgeo_gate_verdict(str(tmp_path), tb_ok)
-        assert v_ok is not None and v_ok.get("verdict") == "unknown"
+        assert v_ok is not None and v_ok.get("verdict") == "not_declared"
 
     def test_legacy_prose_ers_still_noops(self, tmp_path):
         _write_ers(tmp_path, _LEGACY_PROSE)

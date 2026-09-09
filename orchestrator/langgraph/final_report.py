@@ -479,6 +479,7 @@ def build_final_report(state: dict, project_root: str, *,
             "action_taken": result.get("action_taken", ""),
             "skipped": bool(result.get("skipped_by_user")),
             "aborted": bool(result.get("aborted")),
+            "max_geometry": result.get("max_geometry"),
         }
         if kind == "validation":
             out["requirement_count"] = _int(result.get("requirement_count"))
@@ -762,6 +763,19 @@ def render_markdown(report: dict) -> str:
         f"- Integration DV: **{s.get('integration_dv')}** · "
         f"Validation DV: **{s.get('validation_dv')}**"
     )
+    for stage in ("integration", "validation"):
+        geometry = report.get("chip", {}).get(f"{stage}_dv", {}).get("max_geometry") or {}
+        lines.append(
+            f"- Maximum geometry ({stage}): **{geometry.get('verdict', 'not evaluated')}**"
+            f" — {geometry.get('reason', 'no maximum-geometry gate record')}"
+        )
+        if geometry:
+            lines.append(
+                f"  Policy-declared dimensions: `{geometry.get('declared_dims', {})}`; "
+                f"Marker pairs: `{geometry.get('marker_pairs', {})}`; "
+                f"Testbench case mentions (scope only): `{geometry.get('testbench_case_mentions', {})}`; "
+                f"Executed owner maximum cases: `{geometry.get('executed_maximum_cases', [])}`."
+            )
     _tg_gated = s.get("throughput_blocks_gated")
     if _tg_gated:
         lines.append(

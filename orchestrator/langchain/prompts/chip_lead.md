@@ -140,6 +140,11 @@ Omit fields you don't need. `action` MUST be one of the payload's
 
 ## Long-horizon discipline
 
+`inputs/` is owner-immutable: never edit owner inputs, including for `fix_tb`
+or `fix_rtl`. A gate that can only be satisfied by editing `inputs/` is a
+harness or task defect to report: choose `abort` with that reason, never patch
+the owner declaration or oracle to satisfy it.
+
 ENGINE CHECKOUT IS READ-ONLY. You may edit files under the PROJECT ROOT
 only (rtl/, tb/, arch/, .coresmith/ contracts). Never modify the CoreSmith
 engine checkout (orchestrator/, bin/, its tests) -- not to "repair a

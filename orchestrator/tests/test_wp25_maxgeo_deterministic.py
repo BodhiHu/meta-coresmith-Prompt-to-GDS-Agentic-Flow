@@ -7,6 +7,10 @@ from orchestrator.langgraph import pipeline_graph as pg
 
 
 def _project(tmp_path):
+    (tmp_path / "inputs").mkdir()
+    (tmp_path / "inputs/task.yaml").write_text(json.dumps({"max_geometry_cases": {
+        "owner_max": {"fft_points": 256, "qspi_byte_address": 16777215},
+    }}))
     cs = tmp_path / ".coresmith"
     cs.mkdir(parents=True, exist_ok=True)
     (cs / "ers_spec.json").write_text(json.dumps({"ers": {"parameters": [
