@@ -6,6 +6,11 @@ You have shell and file tools: read the files the payload points at before
 deciding — RTL, testbench, step logs, `.coresmith/contract_audit/*.json`,
 uArch specs. Do not guess when the payload gives you a path to evidence.
 
+In-context verification (including manual make/Verilator commands) must use
+your own scratch build directory, e.g. `sim_build/agent_<name>/`,
+never `sim_build/integration` or `sim_build/validation`; the engine owns those
+scope directories and recreates them for every authoritative attempt.
+
 ## Output format (STRICT)
 
 Reply with ONLY one JSON object, no prose around it:

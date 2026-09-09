@@ -1554,26 +1554,26 @@ def _build_products_present(sim_dir: Path) -> bool:
 
 
 def clear_build_products(sim_dir: Path) -> bool:
-    """Wipe cocotb/Verilator BUILD products under ``sim_dir`` (obj dir + outputs).
+    """Wipe nested and top-level cocotb/Verilator build products.
 
-    Removes the ``sim_build/`` obj dir and the ``dump.vcd`` / ``dump.fst`` /
-    ``results.xml`` outputs, leaving config inputs (Makefile, TB, fingerprint)
-    intact so the next ``make`` does a clean rebuild with the current flags.
+    Top-level objects can be reused through VPATH by a nested cocotb make.
+    Leave Makefile, TB, staged inputs, fingerprint and timeout state intact;
+    never traverse staged directories or follow product symlinks.
     Best-effort; returns True when it removed something."""
     removed = False
-    try:
-        obj = sim_dir / "sim_build"
-        if obj.is_dir():
-            shutil.rmtree(obj, ignore_errors=True)
-            removed = True
-        for out in ("dump.vcd", "dump.fst", "results.xml"):
+    for pattern in (
+        "sim_build", "obj_dir", "*.o", "*.a", "*.d", "*.mk", "V*",
+        "verilator.*", "dump.*", "results.xml",
+    ):
+        for product in sim_dir.glob(pattern):
             try:
-                (sim_dir / out).unlink()
+                if product.is_dir() and not product.is_symlink():
+                    shutil.rmtree(product)
+                else:
+                    product.unlink()
                 removed = True
             except OSError:
                 pass
-    except Exception:  # noqa: BLE001
-        pass
     return removed
 
 
@@ -1596,8 +1596,8 @@ def apply_build_fingerprint(
     We fingerprint the build inputs -- the full Makefile text (which embeds
     ``EXTRA_ARGS``, ``WAVES``, ``TOPLEVEL`` and the ``VERILOG_SOURCES`` list) plus
     the bytes of every source file -- into ``<sim_dir>/.build_fingerprint``. On a
-    mismatch we wipe the stale build products (cocotb's ``sim_build/`` obj dir and
-    the ``dump.vcd`` / ``results.xml`` outputs) so the next ``make`` does a clean
+    mismatch we wipe the stale build products (including scope-level objects
+    visible through VPATH) so the next ``make`` does a clean
     rebuild with the new flags. Returns True when a stale build was cleared.
     Best-effort: any error leaves the tree untouched (make's own mtime logic still
     applies) so this can never wedge a build.

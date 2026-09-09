@@ -30,7 +30,6 @@ from orchestrator.langgraph.pipeline_helpers import (
     _write_step_log,
     _write_step_log_error,
     apply_build_fingerprint,
-    clear_build_products,
     log,
 )
 
@@ -2389,6 +2388,33 @@ bounded_waveform: $(SIM_BUILD)/Vtop
 
 
 
+def _recreate_sim_dir(sim_dir: Path) -> None:
+    """Start an authoritative build with only engine retry bookkeeping.
+
+    A partial clean leaves objects visible to the nested make through VPATH.
+    Read the small state files first, then recreate the entire directory;
+    cleanup errors must stop the build, never fall back to a contaminated tree.
+    Step logs/attempt numbers and the verifier's flock live outside this tree.
+    """
+    import shutil
+
+    bookkeeping = {}
+    if sim_dir.is_dir() and not sim_dir.is_symlink():
+        for name in (".build_fingerprint", "sim_timeout_state.json"):
+            path = sim_dir / name
+            if path.is_file() and not path.is_symlink():
+                bookkeeping[name] = path.read_bytes()
+        prior = sorted(p.name for p in sim_dir.iterdir() if p.name not in bookkeeping)
+        if prior:
+            log(f"  [SIM] Recreating {sim_dir}: discarding prior contents: {', '.join(prior)}")
+        shutil.rmtree(sim_dir)
+    elif sim_dir.is_symlink() or sim_dir.exists():
+        sim_dir.unlink()
+    sim_dir.mkdir(parents=True)
+    for name, content in bookkeeping.items():
+        (sim_dir / name).write_bytes(content)
+
+
 def _stage_project_inputs(sim_dir: Path, root: Path) -> None:
     """Expose ``<root>/inputs`` inside the simulation directory.
 
@@ -2439,11 +2465,11 @@ def run_integration_simulation(
 
     ``sim_scope`` namespaces the sim build dir and the step log so the
     integration_dv and validation_dv runs (both driven by this function) do not
-    clobber each other. It defaults to ``"integration"`` (byte-identical to the
-    historical behavior); validation_dv passes ``"validation"`` so it gets
+    clobber each other. It defaults to ``"integration"``;
+    validation_dv passes ``"validation"`` so it gets
     ``sim_build/validation`` + ``step_logs/integration/validation_sim_attempt<N>.log``
-    -- preserving the integration run's raw sim log for forensics and avoiding
-    build-fingerprint churn between the two runs.
+    -- preserving the integration run's raw sim log for forensics. Each attempt
+    recreates its scope directory, retaining only engine retry bookkeeping.
 
     ``project_root`` anchors ``sim_build/<scope>`` (and the sim PYTHONPATH) at
     the RUN directory; it defaults to the module-level ``PROJECT_ROOT``
@@ -2462,13 +2488,9 @@ def run_integration_simulation(
         _parse_cocotb_summary,
     )
 
-    # Distinct sim build dir per scope (avoids fingerprint churn: the two runs
-    # differ only in MODULE, which would otherwise trigger a full rebuild on
-    # every integration<->validation switch through a shared dir).
+    # Each scope owns its build tree and artifacts independently.
     root = Path(project_root) if project_root else PROJECT_ROOT
     sim_dir = root / "sim_build" / sim_scope
-    sim_dir.mkdir(parents=True, exist_ok=True)
-    _stage_project_inputs(sim_dir, root)
     # Distinct step-log name per scope (validation -> validation_sim_attempt<N>.log)
     # so validation_dv never overwrites integration_dv's raw sim log.
     _log_step = f"{sim_scope}_sim"
@@ -2503,18 +2525,11 @@ def run_integration_simulation(
     makefile_content = _compose_dv_makefile(
         sim_scope, _tb_source, sources_str, safe_name, Path(tb_path).stem,
     )
-    # Pre-run hygiene: the INTEGRATION/VALIDATION sims are engine-authoritative,
-    # rare, and correctness-critical (their PASS verdict hard-requires a WaveKit
-    # VCD audit). Unconditionally wipe any pre-existing build products in this dir
-    # before writing our traced Makefile: an agent's in-context `verify` (or an
-    # earlier aborted run) may have left a stale/traceless Vtop here, and cocotb's
-    # make would REUSE it (its mtime predates our fresh Makefile), emit no
-    # dump.vcd, and fail-close the mandatory audit on a phantom-missing VCD
-    # (2026-07-02 integration-DV failure). Per-block sims (run_simulation) keep the
-    # fingerprint fast-path -- they are frequent and cheap; only this path forces a
-    # clean rebuild.
-    clear_build_products(sim_dir)
-    (sim_dir / "results.xml").unlink(missing_ok=True)
+    # No prior object, generated source or binary may reach make, including
+    # through the nested obj dir's parent VPATH. Block DV retains fingerprint
+    # reuse; these authoritative scopes always start fresh before staging inputs.
+    _recreate_sim_dir(sim_dir)
+    _stage_project_inputs(sim_dir, root)
     # Fingerprint the (now clean) build inputs so a later flag/source change is
     # still caught by the mismatch path (and so the fingerprint file stays current).
     apply_build_fingerprint(sim_dir, makefile_content, all_sources)

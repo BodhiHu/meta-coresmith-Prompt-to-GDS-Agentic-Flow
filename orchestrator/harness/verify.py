@@ -406,8 +406,8 @@ def verify_chip(
     """Integrated chip_top DV via run_integration_simulation.
 
     Inputs come from ``.coresmith/integration_result.json`` (persisted by
-    integration_check). A flock on ``sim_build/integration/.lock`` serializes
-    concurrent chip sims.
+    integration_check). A flock on ``sim_build/.<scope>.lock`` serializes
+    concurrent chip sims and survives recreation of the scope build directory.
     """
     t0 = time.monotonic()
     root = Path(pr)
@@ -467,7 +467,7 @@ def verify_chip(
     sim_scope = "agent_integration" if record_source == "agent" else "integration"
     lock_dir = root / "sim_build" / sim_scope
     lock_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = lock_dir / ".lock"
+    lock_path = lock_dir.parent / f".{sim_scope}.lock"
     # Pin the seed for the sim (run_integration_simulation inherits os.environ),
     # else --seed only decorated the scoreboard row while the TB drew its own
     # seed and the reported failure did not reproduce. Unlike the block path

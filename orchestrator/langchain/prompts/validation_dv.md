@@ -11,6 +11,11 @@ top-level RTL, block RTL files, ERS, and any referenced golden model files
 from disk. Write the validation testbench to the path specified in the user
 message.
 
+In-context verification (including manual make/Verilator commands) must use
+your own scratch build directory, e.g. `sim_build/agent_<name>/`,
+never `sim_build/integration` or `sim_build/validation`; the engine owns those
+scope directories and recreates them for every authoritative attempt.
+
 CONTEXT:
 You will receive:
 1. The top-level Verilog source and path
