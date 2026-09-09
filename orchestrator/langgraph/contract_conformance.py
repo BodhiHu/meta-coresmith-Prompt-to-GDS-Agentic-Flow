@@ -56,6 +56,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+
 #: A block whose module declares the full Caravel pad boundary has externally
 #: MANDATED port names (io_in/io_out/io_oeb[37:0] are fixed by the shuttle), so
 #: the <channel>_<field> convention cannot apply to it.
