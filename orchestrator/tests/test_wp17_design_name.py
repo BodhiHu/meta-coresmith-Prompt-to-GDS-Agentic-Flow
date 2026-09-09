@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from orchestrator.harness.top_module import write_candidate_receipt
 from orchestrator.langgraph.integration_helpers import (
     _existing_top_module,
@@ -50,3 +52,10 @@ def test_load_architecture_connections_uses_the_receipt(tmp_path):
     write_candidate_receipt(tmp_path, TOP, str(p), {})
     conns, name = load_architecture_connections(str(tmp_path))
     assert name == TOP
+
+
+@pytest.fixture(autouse=True)
+def _fixture_elaborator(monkeypatch, request):
+    if request.node.name == "test_hierarchy_starts_at_the_selected_top_and_sees_the_preprocessor":
+        return
+    monkeypatch.setattr("orchestrator.harness.hierarchy.elaborate_hierarchy", lambda *a, **k: {"leaf", "syntax_adapter", "rom_arbiter"})

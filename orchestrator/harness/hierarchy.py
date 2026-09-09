@@ -42,6 +42,34 @@ def _reachable_hierarchy(design: dict, top_module: str) -> set[str]:
     return instantiated
 
 
+def _stage_sources(paths, stage: Path, project_root=None):
+    """Resolve literal file references against each original source and task inputs.
+
+    Yosys resolves readmem from its cwd. Only path literals are rewritten in
+    scratch; the HDL and the bound asset bytes remain the same.
+    """
+    root = Path(project_root or paths[0].parent).resolve()
+    staged = {}
+    def rewrite(path):
+        if path in staged:
+            return staged[path]
+        dst = stage / f"input_{len(staged)}.v"
+        staged[path] = dst
+        def reference(match):
+            prefix, name = match.group(1), match.group(2)
+            choices = {p.resolve() for p in (path.parent / name, root / name, root / "inputs" / name)
+                       if p.is_file()}
+            if len(choices) != 1:
+                raise ValueError(f"Unresolved or ambiguous asset {name!r} in {path}")
+            dep = choices.pop()
+            target = rewrite(dep) if prefix.lstrip().startswith("`include") else dep
+            return prefix + json.dumps(str(target))
+        text = re.sub(r'(`include\s+|\$readmem\w*\s*\(\s*)"([^"\n]+)"', reference, path.read_text())
+        dst.write_text(text)
+        return dst
+    return [rewrite(path) for path in paths]
+
+
 def elaborate_hierarchy(source_paths, top_module: str, *, defines=(), parameters=None,
                         project_root=None) -> set[str] | HierarchyFailure:
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", top_module or ""):
@@ -70,7 +98,8 @@ def elaborate_hierarchy(source_paths, top_module: str, *, defines=(), parameters
                 include_dirs.append(str(Path(project_root).resolve() / "inputs"))
             opts = " ".join([*("-D" + d for d in defines),
                              *("-I" + json.dumps(d) for d in include_dirs)])
-            commands = [f"read_verilog -sv {opts} " + " ".join(json.dumps(str(p)) for p in paths)]
+            staged = _stage_sources(paths, Path(td), project_root)
+            commands = [f"read_verilog -sv -nosynthesis {opts} " + " ".join(json.dumps(str(p)) for p in staged)]
             for key, value in sorted(parameters.items()):
                 commands.append(f"chparam -set {key} {value} {top_module}")
             commands += [f"hierarchy -check -top {top_module}", "proc", f"write_json {json.dumps(str(output))}"]

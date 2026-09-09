@@ -22,4 +22,4 @@ def test_caravel_assembled_result_is_persisted():
     src = inspect.getsource(pg.integration_check_node)
     i = src.find('"caravel_wrapper_assembled": True,')
     assert i > 0
-    assert "integration_result.json" in src[i:i + 3000]
+    assert "integration_result=integration_result" in src[i:i + 3000]

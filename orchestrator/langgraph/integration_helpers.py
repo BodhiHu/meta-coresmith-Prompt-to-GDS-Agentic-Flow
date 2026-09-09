@@ -2259,81 +2259,17 @@ def _dedup_module_sources(
 
 
 def chip_rtl_sources(
-    top_rtl_path: str,
-    block_rtl_paths: dict[str, str],
-    dedup_dir=None,
-    top_module: str = "",
+    top_rtl_path: str, block_rtl_paths: dict[str, str], dedup_dir=None,
+    top_module: str = "", *, project_root=None,
 ) -> list[str]:
-    """Every Verilog source needed to elaborate the ASSEMBLED chip, top first.
-
-    Single definition on purpose. The integration/validation DV sims and the
-    chip_top gate-sim's REFERENCE run must elaborate the identical source set:
-    the gate compares the flat netlist against that reference, so a reference
-    built from a different source list is not a reference at all -- it is a
-    second design, and any verdict against it is meaningless.
-
-    Top-first ordering matters: callers resolve the Verilator TOPLEVEL from the
-    first entry.
-    """
-    sources = [top_rtl_path]
-    # A block file that RE-DECLARES the top's own module is an alias-carrier:
-    # the generated pad block ships a thin `module user_project_wrapper` alias
-    # plus stub declarations of its sibling blocks. Include it and the MODDUP
-    # dedup keeps the stubs (they sort first) and strips the real logic -- the
-    # reference then elaborates a hollow chip and honestly fails, so the gate
-    # reports not_run on a design that is fine. The top provides its own
-    # module; a file re-declaring it leaves the list, stubs and all.
-    _top_mod = top_module        # WP-54: the recorded top, never the first `module`
-    if not _top_mod:
-        try:
-            _top_text = Path(top_rtl_path).read_text(errors="replace")
-            _m = re.search(r"\bmodule\s+([A-Za-z_]\w*)", _top_text)
-            _top_mod = _m.group(1) if _m else ""
-        except OSError:
-            pass
-    for bp in block_rtl_paths.values():
-        if not Path(bp).exists() or bp == top_rtl_path:
-            continue
-        if _top_mod:
-            try:
-                if re.search(r"\bmodule\s+" + re.escape(_top_mod) + r"\b",
-                             Path(bp).read_text(errors="replace")):
-                    continue
-            except OSError:
-                pass
-        sources.append(bp)
-    # Include the generic SRAM wrapper lib if any block instantiates cs_sram, so
-    # the chip-level Verilator build can resolve cs_sram_1rw/1rw1r (without it
-    # the sim hard-fails with "Cannot find module cs_sram_1rw1r"). Best-effort.
-    try:
-        from orchestrator.langgraph.sram_wrapper import (
-            uses_wrapper as _uses_wrapper,
-        )
-        from orchestrator.langgraph.sram_wrapper import (
-            wrapper_lib_path as _wrapper_lib_path,
-        )
-        _all_rtl = "".join(
-            Path(p).read_text(errors="replace")
-            for p in sources if Path(p).exists()
-        )
-        _wlib = _wrapper_lib_path()
-        if _uses_wrapper(_all_rtl) and _wlib not in sources:
-            sources.append(_wlib)
-    except Exception:
-        pass
-    # A deterministically-assembled Caravel top and the pad-adapter BLOCK it was
-    # built from both declare `module user_project_wrapper`, and blocks commonly
-    # each bundle the same shared macro. Two compilation units defining one
-    # module is a Verilator MODDUP abort before any transaction runs, so a caller
-    # that hands this list straight to a simulator must dedup. Pass a scratch dir
-    # to get an elaborable list back; omit it to get raw paths.
-    if dedup_dir is not None:
-        # _dedup_module_sources WRITES the stripped copies and does not create
-        # its own output dir, so a caller passing a fresh scratch path would get
-        # back paths to files that do not exist.
-        Path(dedup_dir).mkdir(parents=True, exist_ok=True)
-        sources = _dedup_module_sources(sources, dedup_dir)
-    return sources
+    """Return the adopted sources verbatim; never deduplicate or discover RTL."""
+    from orchestrator.harness.top_module import CandidateError, candidate_for_inputs
+    if project_root is None:
+        raise CandidateError("A project manifest and explicit top are required")
+    rec = candidate_for_inputs(project_root, top_rtl_path, block_rtl_paths)
+    if not top_module or top_module != rec["top_module"]:
+        raise CandidateError("An explicit top matching the candidate manifest is required")
+    return list(rec["sources"])
 
 
 _DV_SPECIAL_TESTS = (
@@ -2521,32 +2457,16 @@ def run_integration_simulation(
     # so validation_dv never overwrites integration_dv's raw sim log.
     _log_step = f"{sim_scope}_sim"
 
-    all_sources = chip_rtl_sources(top_rtl_path, block_rtl_paths)
-    # Dedup shared macro modules (e.g. SRAM) bundled by multiple blocks, else
-    # Verilator MODDUP-aborts elaboration before any transaction.
-    all_sources = _dedup_module_sources(all_sources, sim_dir)
-    sources_str = " ".join(all_sources)
-
-    # The integration file may deliberately contain more than one wrapper
-    # module (for example a 44-pad OpenFrame parent and the graded Caravel
-    # user_project_wrapper).  A filename-derived TOPLEVEL always selects the
-    # first/file-stem wrapper even when the pipeline explicitly chose the real
-    # graded module. Honor design_name when that module is declared in the file;
-    # retain the historical file-stem fallback for ordinary generated tops.
-    safe_name = Path(top_rtl_path).stem
-    # WP-54: the recorded candidate top first; the design name only when the
-    # file declares it; the file stem last.
+    from orchestrator.harness.top_module import CandidateError, candidate_for_inputs
     try:
-        from orchestrator.harness.top_module import resolve_top as _resolve_top
-        _rt_mod, _rt_path = _resolve_top(project_root) if project_root else ("", "")
-        if _rt_mod and _rt_path and Path(_rt_path).resolve() == Path(top_rtl_path).resolve():
-            safe_name = _rt_mod
-        else:
-            _top_source = Path(top_rtl_path).read_text(encoding="utf-8", errors="replace")
-            if re.search(rf"^\s*module\s+{re.escape(design_name)}\b", _top_source, re.MULTILINE):
-                safe_name = design_name
-    except OSError:
-        pass
+        rec = candidate_for_inputs(root, top_rtl_path, block_rtl_paths)
+        if rec["defines"] != "none" or rec["parameters"] != "none":
+            raise CandidateError("Integration simulator does not support the declared candidate configuration")
+    except CandidateError as exc:
+        return {"passed": False, "returncode": -1, "log": str(exc), "kind": exc.kind}
+    all_sources = rec["sources"]
+    sources_str = " ".join(all_sources)
+    safe_name = rec["top_module"]
 
     # TRACE stays on for the integration/validation sim path: the VCD is the
     # debug agent's and the chip lead's evidence. (WP-10a removed the WaveKit

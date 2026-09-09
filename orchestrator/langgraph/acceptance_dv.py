@@ -39,7 +39,6 @@ Env:
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
@@ -619,25 +618,19 @@ def run_acceptance_dv(project_root: str, top_rtl: str,
     if entry_callable is None:
         return _skip("no callable reference entry")
 
-    top_p = Path(top_rtl)
-    if not top_p.exists():
-        return _skip(f"chip top RTL not found: {top_rtl}")
-    rtl_text = top_p.read_text(encoding="utf-8", errors="replace")
-    mname = re.search(r"\bmodule\s+([A-Za-z_][A-Za-z0-9_]*)", rtl_text)
-    if not mname:
-        return _skip("no module declaration in chip top")
-    top_module = mname.group(1)
+    from orchestrator.harness.top_module import CandidateError, candidate_for_inputs
     try:
-        # WP-49: the recorded candidate top wins over the first `module` in the file.
-        from orchestrator.harness.top_module import resolve_top as _resolve_top
-        _rt_mod, _rt_path = _resolve_top(project_root)
-        if _rt_mod and _rt_path and Path(_rt_path).resolve() == top_p.resolve():
-            top_module = _rt_mod
-            _bm = re.search(rf"\bmodule\s+{re.escape(top_module)}\b", rtl_text)
-            if _bm:
-                mname = _bm
-    except Exception:  # noqa: BLE001
-        pass
+        rec = candidate_for_inputs(project_root, top_rtl, block_rtls)
+        if rec["defines"] != "none" or rec["parameters"] != "none":
+            raise CandidateError("Native acceptance does not support the candidate configuration")
+    except CandidateError as exc:
+        return _incomplete(str(exc), exc.kind)
+    top_p = Path(rec["top_rtl_path"])
+    rtl_text = top_p.read_text(encoding="utf-8")
+    top_module = rec["top_module"]
+    mname = re.search(rf"\bmodule\s+{re.escape(top_module)}\b", rtl_text)
+    if mname is None:
+        return _incomplete("Recorded top is missing", "candidate_mismatch")
     # dv-hardening-23 (armD driver-found, defect #9): scope port discovery to
     # the TOP module span. Integration chip-tops carry helper modules in the
     # same file (e.g. rst_sync_2ff); their inputs leaked into the sideband map
@@ -666,44 +659,8 @@ def run_acceptance_dv(project_root: str, top_rtl: str,
     harness = workdir / "sim_main.cpp"
     harness.write_text(generate_harness(contract, top_module, sb_order))
 
-    if isinstance(block_rtls, dict):
-        block_paths = [str(p) for p in block_rtls.values() if p]
-    else:
-        block_paths = [str(p) for p in (block_rtls or []) if p]
-    sources = [str(top_p.resolve())] + [
-        str(Path(p).resolve()) for p in block_paths if Path(p).exists()
-    ]
-    # armD live (first Acceptance DV engagement): blocks instantiating the
-    # shared cs_sram wrapper library MODMISSING'd because only top+blocks
-    # were passed to verilator. Include the engine RTL lib exactly like the
-    # block-sim Makefile does when any source references it.
-    try:
-        from orchestrator.langgraph.sram_wrapper import (
-            uses_wrapper,
-            wrapper_lib_path,
-        )
-
-        _any_wrapper = False
-        for s in sources:
-            try:
-                if uses_wrapper(Path(s).read_text(encoding="utf-8",
-                                                  errors="replace")):
-                    _any_wrapper = True
-                    break
-            except OSError:
-                continue
-        if _any_wrapper:
-            _lib = str(wrapper_lib_path())
-            if _lib and Path(_lib).exists() and _lib not in sources:
-                sources.append(_lib)
-    except Exception:  # noqa: BLE001 - lib resolution is best-effort
-        pass
-    # WP-38: candidate identity = every source the harness elaborates.
-    try:
-        candidate_sha = hashlib.sha256(
-            b"".join(Path(_s).read_bytes() for _s in sources)).hexdigest()
-    except OSError as exc:
-        return _incomplete(f"candidate source unreadable: {exc}", "infrastructure_error")
+    sources = rec["sources"]
+    candidate_sha = rec["candidate_sha"]
     binp = _build(workdir, top_module, sources, harness)
     if not binp:
         return _incomplete("native harness build failed (see log)", "infrastructure_error")

@@ -4,6 +4,8 @@ from __future__ import annotations
 import inspect
 import json
 
+import pytest
+
 from orchestrator.harness import top_module as tm
 from orchestrator.langgraph import pipeline_graph as pg
 from orchestrator.langgraph.integration_helpers import lint_top_level  # noqa: F401
@@ -45,17 +47,19 @@ def test_receipt_roundtrip_and_resolution(tmp_path):
         pass
 
 
-def test_resolve_top_falls_back_to_a_verified_integration_record(tmp_path):
+def test_resolve_top_refuses_an_independent_integration_record(tmp_path):
     (tmp_path / ".coresmith").mkdir()
     (tmp_path / "rtl").mkdir()
     top = tmp_path / "rtl" / "t.v"
     top.write_text("module real_one(); endmodule\n")
     (tmp_path / ".coresmith" / "integration_result.json").write_text(json.dumps(
         {"top_module": "wrong_name", "top_rtl_path": str(top)}))
-    assert tm.resolve_top(tmp_path) == ("", "")
+    with pytest.raises(tm.CandidateError):
+        tm.resolve_top(tmp_path)
     (tmp_path / ".coresmith" / "integration_result.json").write_text(json.dumps(
         {"top_module": "real_one", "top_rtl_path": str(top)}))
-    assert tm.resolve_top(tmp_path) == ("real_one", str(top))
+    with pytest.raises(tm.CandidateError):
+        tm.resolve_top(tmp_path)
 
 
 def test_integration_check_records_and_enforces_the_top():
@@ -68,3 +72,10 @@ def test_integration_check_records_and_enforces_the_top():
 def test_lint_uses_an_explicit_top():
     src = inspect.getsource(lint_top_level)
     assert 'top_module or Path(top_rtl_path).stem' in src
+
+
+@pytest.fixture(autouse=True)
+def _fixture_elaborator(monkeypatch, request):
+    if request.node.name == "test_hierarchy_starts_at_the_selected_top_and_sees_the_preprocessor":
+        return
+    monkeypatch.setattr("orchestrator.harness.hierarchy.elaborate_hierarchy", lambda *a, **k: {"leaf", "syntax_adapter", "rom_arbiter"})

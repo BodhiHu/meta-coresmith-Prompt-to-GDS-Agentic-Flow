@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from orchestrator.harness import task_adapter as ta
+from orchestrator.tests.candidate_fixtures import adopt
 
 TOP_RTL = "module chip_top(input wire clk, input wire rst_n, output wire y);\n  assign y = 1'b1;\nendmodule\n"
 BLOCK_RTL = "module leaf(input wire a, output wire b);\n  assign b = a;\nendmodule\n"
@@ -21,6 +22,7 @@ def _project(tmp_path, adapter_src: str):
     blk = root / "rtl" / "leaf.v"
     blk.write_text(BLOCK_RTL)
     (root / "inputs" / "task_adapter.py").write_text(adapter_src)
+    adopt(root, top, {"leaf": str(blk)})
     return root, top, blk
 
 
@@ -59,6 +61,7 @@ def test_complete_passing_receipt(tmp_path, monkeypatch):
     assert json.loads((root / ".coresmith" / "acceptance_dv.json").read_text())["passed"] is True
     # identity changes with the RTL
     blk.write_text(BLOCK_RTL.replace("assign b = a", "assign b = ~a"))
+    adopt(root, top, {"leaf": str(blk)})
     res2 = ta.run_task_adapter(str(root), str(top), {"leaf": str(blk)})
     assert res2["candidate_sha"] != res["candidate_sha"]
 
@@ -152,12 +155,13 @@ def grade(candidate, workdir):
     assert res["kind"] == "adapter_defect" and "interpreter not found" in res["reason"]
 
 
-def test_candidate_includes_pads_and_hashes_content(tmp_path):
+def test_candidate_includes_only_explicitly_adopted_pads(tmp_path):
     root = tmp_path / "p"
     (root / "rtl" / "integration").mkdir(parents=True)
     top = root / "rtl" / "integration" / "user_project_wrapper.v"
     top.write_text("module user_project_wrapper(); endmodule\n")
     (root / "rtl" / "integration" / "user_project_wrapper_pads.v").write_text("module pads(); endmodule\n")
+    adopt(root, top, {"pads": str(top.with_name("user_project_wrapper_pads.v"))}, name="user_project_wrapper")
     c = ta.assemble_candidate(str(root), str(top), {})
     assert c["top"] == "user_project_wrapper"
     assert [Path(s).name for s in c["sources"]] == ["user_project_wrapper.v", "user_project_wrapper_pads.v"]

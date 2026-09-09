@@ -18,6 +18,7 @@ from orchestrator.langgraph.integration_helpers import (
     load_interface_contract_edges,
     parse_verilog_ports,
 )
+from orchestrator.tests.candidate_fixtures import adopt
 
 TOP = "module chip_top(input wire clk, output wire y);\n  assign y = clk;\nendmodule\n"
 
@@ -30,6 +31,7 @@ def _proj(tmp_path, adapter_src=None):
     top.write_text(TOP)
     if adapter_src is not None:
         (root / "inputs" / "task_adapter.py").write_text(adapter_src)
+    adopt(root, top)
     return root, top
 
 
@@ -128,10 +130,11 @@ def test_stale_receipt_is_not_resolved(tmp_path, monkeypatch):
     root, top = _proj(tmp_path)
     leaf = root / "rtl" / "leaf.v"
     leaf.write_text("module leaf(); endmodule\n")
-    tm.write_candidate_receipt(root, "chip_top", str(top), {"leaf": str(leaf)})
+    adopt(root, top, {"leaf": str(leaf)})
     assert tm.resolve_top(root) == ("chip_top", str(top.resolve()))
     leaf.write_text("module leaf(); wire changed; endmodule\n")
-    assert tm.resolve_top(root) == ("", "")
+    with pytest.raises(tm.CandidateError):
+        tm.resolve_top(root)
 
 
 def test_receipt_refuses_a_declared_top_mismatch(tmp_path, monkeypatch):
@@ -155,8 +158,10 @@ def test_adapter_refuses_a_candidate_that_is_not_the_recorded_one(tmp_path, monk
 def test_synth_probe_takes_the_recorded_top_and_never_a_chassis_name(tmp_path, monkeypatch):
     monkeypatch.delenv("CORESMITH_TOP_MODULE", raising=False)
     txt = "module chip_top(); endmodule\nmodule user_project_wrapper(); endmodule\n"
-    assert pg._resolve_probe_top("chip_top", txt) == "chip_top"
-    assert pg._resolve_probe_top("nothing", "module a(); endmodule\nmodule b(); endmodule\n") == "nothing"
+    with pytest.raises(tm.CandidateError):
+        pg._resolve_probe_top("chip_top", txt)
+    with pytest.raises(tm.CandidateError):
+        pg._resolve_probe_top("nothing", "module a(); endmodule\nmodule b(); endmodule\n")
     root, top = _proj(tmp_path)
     top.write_text(txt)
     tm.write_candidate_receipt(root, "chip_top", str(top), {})
@@ -185,7 +190,7 @@ def test_qspi_skill_needs_a_declared_bus_and_an_edge_to_the_top(tmp_path, monkey
     root, _ = _proj(tmp_path)
     assert _is_qspi_frontend_block("qspi_regmap_frontend", "", str(root)) is False   # nothing declared
     (root / "inputs" / "task.yaml").write_text("top: user_project_wrapper\ninterface:\n  bus: qspi_slave\n")
-    (root / ".coresmith").mkdir()
+    (root / ".coresmith").mkdir(exist_ok=True)
     (root / ".coresmith" / "interface_contracts.json").write_text(json.dumps({"contracts": [
         {"edge_id": "e", "producer_block": "user_project_wrapper", "producer_port": "pads",
          "consumer_block": "bus_frontend", "consumer_port": "pads", "fields": [{"name": "csn"}]}]}))
@@ -225,3 +230,10 @@ def test_adoption_and_strict_review_defaults():
     assert "os.replace(tmp, canonical)" in inspect.getsource(pg._adopt_reviewed_specs)
     from orchestrator.langgraph import pipeline_helpers as ph
     assert ".md.rejected-" in inspect.getsource(ph) and "quarantine" in inspect.getsource(ph).lower()
+
+
+@pytest.fixture(autouse=True)
+def _fixture_elaborator(monkeypatch, request):
+    if request.node.name == "test_hierarchy_starts_at_the_selected_top_and_sees_the_preprocessor":
+        return
+    monkeypatch.setattr("orchestrator.harness.hierarchy.elaborate_hierarchy", lambda *a, **k: {"leaf", "syntax_adapter", "rom_arbiter"})

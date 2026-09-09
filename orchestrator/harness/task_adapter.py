@@ -51,7 +51,6 @@ Validation DV node's park payload (WP-19/WP-38) is unchanged, plus
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
@@ -106,59 +105,15 @@ def _incomplete(reason: str, kind: str, **extra) -> dict:
     return out
 
 
-def assemble_candidate(project_root: str, top_rtl: str, block_rtls: Any) -> dict | None:
-    """The exact source list the adapter elaborates, with its identity."""
-    top_p = Path(top_rtl)
-    if not top_rtl or not top_p.exists():
-        return None
-    from orchestrator.harness.top_module import read_candidate_receipt, resolve_top
-    _rt_mod, _rt_path = resolve_top(project_root)
-    _receipt_sources: list[str] = []
-    if _rt_mod and _rt_path and Path(_rt_path).resolve() == top_p.resolve():
-        top_module = _rt_mod                      # WP-49: the recorded candidate top
-        _rec = read_candidate_receipt(project_root) or {}
-        if str(_rec.get("top_module") or "") == _rt_mod:
-            _receipt_sources = [str(x) for x in (_rec.get("sources") or [])
-                                if Path(str(x)).exists()]
-    else:
-        text = top_p.read_text(encoding="utf-8", errors="replace")
-        m = re.search(r"\bmodule\s+([A-Za-z_][A-Za-z0-9_]*)", text)
-        top_module = m.group(1) if m else top_p.stem
-    if isinstance(block_rtls, dict):
-        blocks = [str(p) for p in block_rtls.values() if p]
-    else:
-        blocks = [str(p) for p in (block_rtls or []) if p]
-    sources: list[str] = [str(top_p.resolve())]
-    # WP-54: a matching receipt supplies the EXACT recorded source list.
-    for rs in _receipt_sources:
-        if rs not in sources:
-            sources.append(rs)
-    for b in blocks:
-        rb = str(Path(b).resolve())
-        if Path(rb).exists() and rb not in sources:
-            sources.append(rb)
-    # a deterministically assembled chassis top carries its pad adapter beside it
-    pads = top_p.with_name(top_p.stem + "_pads.v")
-    if pads.exists() and str(pads.resolve()) not in sources:
-        sources.append(str(pads.resolve()))
-    try:
-        from orchestrator.langgraph.sram_wrapper import uses_wrapper, wrapper_lib_path
-
-        if any(uses_wrapper(Path(s).read_text(encoding="utf-8", errors="replace"))
-               for s in sources):
-            lib = str(wrapper_lib_path())
-            if lib and Path(lib).exists() and lib not in sources:
-                sources.append(lib)
-    except Exception:  # noqa: BLE001 - lib resolution is best-effort
-        pass
-    h = hashlib.sha256()
-    h.update(top_module.encode())
-    for s in sources:
-        h.update(b"\0" + Path(s).name.encode() + b"\0")
-        h.update(Path(s).read_bytes())
-    return {"top": top_module, "sources": sources, "project_root": str(project_root),
-            "inputs_dir": str(Path(project_root) / "inputs"),
-            "candidate_sha": h.hexdigest()}
+def assemble_candidate(project_root: str, top_rtl: str, block_rtls: Any) -> dict:
+    """Grade precisely the adopted manifest, including its configuration."""
+    from orchestrator.harness.top_module import candidate_for_inputs
+    rec = candidate_for_inputs(project_root, top_rtl, block_rtls)
+    return {"top": rec["top_module"], "sources": rec["sources"],
+            "project_root": str(Path(project_root).resolve()),
+            "inputs_dir": str(Path(project_root).resolve() / "inputs"),
+            "candidate_sha": rec["candidate_sha"], "dependencies": rec["dependencies"],
+            "defines": rec["defines"], "parameters": rec["parameters"]}
 
 
 def _rows_and_violations(receipt: dict, declared: list[str]) -> tuple[list, list, dict]:
@@ -205,16 +160,13 @@ def run_task_adapter(project_root: str, top_rtl: str, block_rtls: Any = None) ->
     if apath.startswith("MISSING:"):
         return _incomplete(f"declared task adapter not found: {apath[8:]}",
                            "adapter_defect", adapter=apath[8:])
-    cand = assemble_candidate(project_root, top_rtl, block_rtls)
-    if cand is None:
-        return _incomplete(f"chip top RTL not found: {top_rtl}", "infrastructure_error",
-                           adapter=apath)
-    # WP-54: the candidate must be the recorded one when a record exists.
-    from orchestrator.harness.top_module import resolve_top as _resolve_top
-    _rt_mod, _rt_path = _resolve_top(project_root)
-    if _rt_path and Path(_rt_path).resolve() != Path(top_rtl).resolve():
-        return _incomplete(f"the candidate top file {top_rtl!r} is not the recorded "
-                           f"candidate {_rt_path!r}", "oracle_incomplete", adapter=apath)
+    from orchestrator.harness.top_module import CandidateError, validated_candidate
+    try:
+        cand = assemble_candidate(project_root, top_rtl, block_rtls)
+        if cand["candidate_sha"] != validated_candidate(project_root)["candidate_sha"]:
+            raise CandidateError("Candidate changed before adapter invocation")
+    except CandidateError as exc:
+        return _incomplete(str(exc), exc.kind, adapter=apath)
     hdr = read_header(apath)
     python = (os.environ.get("CORESMITH_TASK_ADAPTER_PYTHON", "") or
               hdr.get("python") or sys.executable)
@@ -250,6 +202,11 @@ def run_task_adapter(project_root: str, top_rtl: str, block_rtls: Any = None) ->
         return _incomplete(f"task adapter could not start: {exc}", "infrastructure_error",
                            adapter=apath, candidate_sha=cand["candidate_sha"],
                            captured_dir=str(keep))
+    try:
+        if validated_candidate(project_root)["candidate_sha"] != cand["candidate_sha"]:
+            raise CandidateError("Candidate changed during adapter evaluation")
+    except CandidateError as exc:
+        return _incomplete(str(exc), exc.kind, adapter=apath, candidate_sha=cand["candidate_sha"])
     if not receipt_json.exists():
         tail = ""
         try:

@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from orchestrator.langgraph import acceptance_dv as ad
+from orchestrator.tests.candidate_fixtures import adopt
 
 AXIS_TOP = """
 module s_top(
@@ -67,6 +68,7 @@ def _project(tmp_path, cases_src: str):
     (root / "inputs" / "acceptance_stimulus.py").write_text(cases_src)
     (root / "inputs" / "golden.py").write_text("def run(stim):\n    return bytes(stim['data'])\n")
     (root / "inputs" / "accept.py").write_text("def accept(e, o):\n    return bytes(e) == bytes(o)\n")
+    adopt(root, top, name="s_top")
     return root, top
 
 

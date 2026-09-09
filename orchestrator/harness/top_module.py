@@ -1,180 +1,225 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
-"""WP-49: ONE declared top module and ONE candidate receipt.
-
-Before this, five places guessed the chip top independently: the first
-``module`` keyword in a file, the file stem, the module nobody instantiates,
-the module matching the design name, and a pad-boundary heuristic. They
-disagreed (review round 2), and the backend once synthesized a different
-candidate than the frontend verified.
-
-Now:
-
-* ``declared_top(project_root)`` is what the TASK says the graded top is
-  (``CORESMITH_TOP_MODULE``, else ``inputs/task.yaml: top``), or "".
-* The integration check writes ``.coresmith/candidate.json`` -- the top
-  module, the file that declares it, the exact source list and a sha256 over
-  their bytes -- and refuses a top that contradicts the declared one.
-* Every later consumer (acceptance, task adapter, backend synthesis, lint)
-  reads the receipt through ``resolve_top`` and never guesses.
-"""
+"""One validated candidate manifest: explicit top, sources, assets and configuration."""
 from __future__ import annotations
 
 import hashlib
 import json
-import logging
 import os
 import re
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
 
 RECEIPT_REL = Path(".coresmith") / "candidate.json"
-_log = logging.getLogger(__name__)
+
+
+class CandidateError(ValueError):
+    def __init__(self, reason: str, kind: str = "candidate_mismatch"):
+        super().__init__(reason)
+        self.kind = kind
 
 
 def declared_top(project_root) -> str:
-    """The top module the task declares, or "" when it declares none."""
-    env = (os.environ.get("CORESMITH_TOP_MODULE", "") or "").strip()
+    env = os.environ.get("CORESMITH_TOP_MODULE", "").strip()
     if env:
         return env
-    ty = Path(project_root) / "inputs" / "task.yaml"
-    if ty.exists():
-        try:
-            for line in ty.read_text(encoding="utf-8", errors="replace").splitlines():
-                m = re.match(r"^\s*top\s*:\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)", line)
-                if m:
-                    return m.group(1)
-        except OSError:
-            pass
-    return ""
-
-
-def _code(text: str) -> str:
+    import yaml
+    path = Path(project_root) / "inputs/task.yaml"
+    if not path.exists():
+        return ""
     try:
-        from orchestrator.langgraph.contract_conformance import strip_preprocessor
-        text = strip_preprocessor(text)
-    except Exception:  # noqa: BLE001 - layering guard
-        pass
+        data = yaml.safe_load(path.read_text()) or {}
+        return str(data.get("top") or "")
+    except (OSError, ValueError, AttributeError, yaml.YAMLError) as exc:
+        raise CandidateError(f"Cannot read task top declaration: {exc}", "infrastructure_error") from exc
+
+
+def _code(text: str, defines=()) -> str:
+    from orchestrator.langgraph.contract_conformance import strip_preprocessor
+    text = strip_preprocessor(text, defines=[d.split("=", 1)[0] for d in defines])
     return re.sub(r"//[^\n]*", " ", re.sub(r"/\*.*?\*/", " ", text, flags=re.S))
 
 
-def module_declared_in(path, name: str) -> bool:
-    """True when the file declares ``module <name>`` outside comments and
-    outside preprocessor branches that lint/sim do not see."""
+def module_declared_in(path, name: str, defines=()) -> bool:
     if not path or not name:
         return False
     try:
-        text = Path(path).read_text(encoding="utf-8", errors="replace")
+        text = Path(path).read_text(encoding="utf-8")
     except OSError:
         return False
-    return re.search(rf"\bmodule\s+{re.escape(name)}\b", _code(text)) is not None
+    return re.search(rf"\bmodule\s+{re.escape(name)}\b", _code(text, defines)) is not None
 
 
 def candidate_sources(project_root, top_rtl: str, block_rtls: Any) -> list[str]:
-    """The exact source list a candidate elaborates: top, blocks, the pad
-    adapter beside a deterministically assembled top, the SRAM library."""
-    top_p = Path(top_rtl)
-    if isinstance(block_rtls, dict):
-        blocks = [str(p) for p in block_rtls.values() if p]
-    else:
-        blocks = [str(p) for p in (block_rtls or []) if p]
-    sources: list[str] = [str(top_p.resolve())] if top_p.exists() else []
-    for b in blocks:
-        rb = str(Path(b).resolve())
-        if Path(rb).exists() and rb not in sources:
-            sources.append(rb)
-    pads = top_p.with_name(top_p.stem + "_pads.v")
-    if pads.exists() and str(pads.resolve()) not in sources:
-        sources.append(str(pads.resolve()))
-    try:
-        from orchestrator.langgraph.sram_wrapper import uses_wrapper, wrapper_lib_path
-
-        if any(uses_wrapper(Path(s).read_text(encoding="utf-8", errors="replace"))
-               for s in sources):
-            lib = str(wrapper_lib_path())
-            if lib and Path(lib).exists() and lib not in sources:
-                sources.append(lib)
-    except Exception:  # noqa: BLE001 - lib resolution is best-effort
-        pass
-    return sources
+    """Select sources at adoption only. Missing inputs are never filtered away."""
+    blocks = block_rtls.values() if isinstance(block_rtls, dict) else (block_rtls or [])
+    paths = list(dict.fromkeys(str(Path(p).resolve()) for p in [top_rtl, *blocks] if p))
+    if not top_rtl or any(not Path(p).is_file() for p in paths):
+        raise CandidateError("Candidate source is missing", "infrastructure_error")
+    from orchestrator.langgraph.sram_wrapper import uses_wrapper, wrapper_lib_path
+    if any(uses_wrapper(Path(p).read_text()) for p in paths):
+        lib = str(Path(wrapper_lib_path()).resolve())
+        if not Path(lib).is_file():
+            raise CandidateError("Candidate SRAM library is missing", "infrastructure_error")
+        if lib not in paths:
+            paths.append(lib)
+    return paths
 
 
-def candidate_sha(top_module: str, sources: list[str]) -> str:
-    h = hashlib.sha256()
-    h.update(str(top_module).encode())
-    for s in sources:
-        h.update(b"\0" + Path(s).name.encode() + b"\0")
-        h.update(Path(s).read_bytes())
+def _dependencies(sources: list[str], project_root) -> list[str]:
+    """Conservative include/data closure. Nonliteral or ambiguous assets park."""
+    root = Path(project_root).resolve()
+    found, visited = set(), set()
+
+    def resolve(owner: Path, name: str) -> Path:
+        choices = {p.resolve() for p in (owner.parent / name, root / name, root / "inputs" / name)
+                   if p.is_file()}
+        if len(choices) != 1:
+            raise CandidateError(f"Dependency {name!r} from {owner} is "
+                                 + ("missing" if not choices else "ambiguous"), "infrastructure_error")
+        return choices.pop()
+
+    def visit(path: Path):
+        if path in visited:
+            return
+        visited.add(path)
+        text = re.sub(r"//[^\n]*|/\*.*?\*/", " ", path.read_text(), flags=re.S)
+        for match in re.finditer(r'`include\s+([^\n]+)', text):
+            literal = re.fullmatch(r'"([^"\n]+)"\s*', match.group(1))
+            if not literal:
+                raise CandidateError(f"Nonliteral include in {path}; dependency cannot be bound")
+            dep = resolve(path, literal.group(1))
+            found.add(str(dep))
+            visit(dep)
+        for match in re.finditer(r'\$readmem\w*\s*\(\s*([^,]+)', text):
+            literal = re.fullmatch(r'"([^"\n]+)"\s*', match.group(1))
+            if not literal:
+                raise CandidateError(f"Nonliteral readmem asset in {path}; dependency cannot be bound")
+            found.add(str(resolve(path, literal.group(1))))
+
+    for source in sources:
+        visit(Path(source))
+    return sorted(found - set(sources))
+
+
+def candidate_sha(top_module: str, sources: list[str], *, dependencies=(), defines="none",
+                  parameters="none") -> str:
+    h = hashlib.sha256(json.dumps({"top": top_module, "sources": sources,
+        "dependencies": list(dependencies), "defines": defines, "parameters": parameters},
+        sort_keys=True, separators=(",", ":")).encode())
+    for path in [*sources, *dependencies]:
+        data = Path(path).read_bytes()
+        h.update(len(data).to_bytes(8, "big"))
+        h.update(data)
     return h.hexdigest()
 
 
+def _atomic_json(path: Path, data: dict):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".candidate-")
+    try:
+        with os.fdopen(fd, "w") as stream:
+            json.dump(data, stream, indent=2)
+        os.replace(tmp, path)
+    finally:
+        Path(tmp).unlink(missing_ok=True)
+
+
 def write_candidate_receipt(project_root, top_module: str, top_rtl_path: str,
-                            block_rtls: Any, note: str = "") -> dict:
-    """Record the candidate. Raises ValueError when ``top_rtl_path`` does not
-    declare ``top_module`` -- a receipt never lies about its top."""
-    if not module_declared_in(top_rtl_path, top_module):
-        raise ValueError(f"{top_rtl_path} does not declare module {top_module!r}")
-    _declared = declared_top(project_root)
-    if _declared and top_module != _declared:
-        raise ValueError(f"the task declares top {_declared!r} but the candidate top is "
-                         f"{top_module!r}")
-    sources = candidate_sources(project_root, top_rtl_path, block_rtls)
-    receipt = {
-        "top_module": top_module,
-        "top_rtl_path": str(Path(top_rtl_path).resolve()),
-        "sources": sources,
-        "candidate_sha": candidate_sha(top_module, sources),
-        "written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "note": note,
-    }
-    p = Path(project_root) / RECEIPT_REL
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(receipt, indent=1))
-    return receipt
+                            block_rtls: Any, note: str = "", *, defines=(), parameters=None,
+                            expected_blocks=None, integration_result=None) -> dict:
+    """The sole adoption operation; publish success only after every check passes."""
+    from orchestrator.harness.hierarchy import HierarchyFailure, elaborate_hierarchy, missing_blocks
+    root = Path(project_root).resolve()
+    receipt_path = root / RECEIPT_REL
+    record_path = root / ".coresmith/integration_result.json"
+    # A rejected replacement must not leave an older success discoverable.
+    receipt_path.unlink(missing_ok=True)
+    record_path.unlink(missing_ok=True)
+    defines, parameters = sorted(defines or []), dict(parameters or {})
+    declared = declared_top(root)
+    if declared and top_module != declared:
+        raise CandidateError(f"the task declares top {declared!r} but candidate top is {top_module!r}")
+    if not module_declared_in(top_rtl_path, top_module, defines):
+        raise CandidateError(f"{top_rtl_path} does not declare module {top_module!r}")
+    sources = candidate_sources(root, top_rtl_path, block_rtls)
+    dependencies = _dependencies(sources, root)
+    before_sha = candidate_sha(top_module, sources, dependencies=dependencies,
+                               defines=defines or "none", parameters=parameters or "none")
+    expected = sorted(expected_blocks if expected_blocks is not None else
+                      (block_rtls.keys() if isinstance(block_rtls, dict) else []))
+    cells = elaborate_hierarchy(sources, top_module, defines=defines, parameters=parameters, project_root=root)
+    failure = cells if isinstance(cells, HierarchyFailure) else missing_blocks(cells, expected, top_module)
+    if failure:
+        raise CandidateError(str(failure), failure.kind)
+    rec = {"version": 2, "project_root": str(root), "top_module": top_module,
+           "top_rtl_path": str(Path(top_rtl_path).resolve()), "sources": sources,
+           "dependencies": dependencies, "defines": defines or "none", "parameters": parameters or "none",
+           "expected_blocks": expected, "elaborated_cells": sorted(cells),
+           "written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "note": note}
+    rec["candidate_sha"] = candidate_sha(top_module, sources, dependencies=dependencies,
+                                         defines=rec["defines"], parameters=rec["parameters"])
+    if rec["candidate_sha"] != before_sha or _dependencies(sources, root) != dependencies:
+        raise CandidateError("Candidate changed during hierarchy elaboration")
+    _atomic_json(receipt_path, rec)
+    if integration_result is not None:
+        try:
+            _atomic_json(record_path, {**integration_result, "candidate_sha": rec["candidate_sha"]})
+        except OSError:
+            receipt_path.unlink(missing_ok=True)
+            raise
+    return rec
 
 
 def receipt_is_current(rec: dict) -> bool:
-    """True when every recorded source still exists and hashes to the recorded
-    candidate sha (WP-54): a receipt whose sources changed is stale."""
     try:
-        sources = [str(x) for x in (rec.get("sources") or [])]
-        if not sources or any(not Path(s).exists() for s in sources):
+        if rec.get("version") != 2 or not rec.get("sources"):
             return False
-        return candidate_sha(str(rec.get("top_module") or ""), sources) == \
-            str(rec.get("candidate_sha") or "")
-    except OSError:
+        dependencies = _dependencies(rec["sources"], rec["project_root"])
+        return dependencies == rec["dependencies"] and candidate_sha(
+            rec["top_module"], rec["sources"], dependencies=dependencies,
+            defines=rec["defines"], parameters=rec["parameters"]) == rec["candidate_sha"]
+    except (OSError, ValueError, KeyError, TypeError):
         return False
 
 
 def read_candidate_receipt(project_root) -> dict | None:
-    p = Path(project_root) / RECEIPT_REL
     try:
-        d = json.loads(p.read_text(encoding="utf-8"))
+        rec = json.loads((Path(project_root) / RECEIPT_REL).read_text())
+        return rec if isinstance(rec, dict) else None
     except (OSError, ValueError):
         return None
-    return d if isinstance(d, dict) else None
+
+
+def validated_candidate(project_root) -> dict:
+    rec = read_candidate_receipt(project_root)
+    if not rec:
+        raise CandidateError("Validated candidate manifest is missing", "infrastructure_error")
+    sources = rec.get("sources") or []
+    if any(not Path(p).is_file() for p in [*sources, *rec.get("dependencies", [])]):
+        raise CandidateError("Recorded candidate file is missing", "infrastructure_error")
+    declared = declared_top(project_root)
+    if declared and declared != rec.get("top_module"):
+        raise CandidateError(f"task declares top {declared!r}, contradicting recorded candidate")
+    if (not receipt_is_current(rec) or rec.get("top_rtl_path") not in sources
+            or str(Path(project_root).resolve()) != rec.get("project_root")):
+        raise CandidateError("Candidate manifest is stale or inconsistent")
+    return rec
+
+
+def candidate_for_inputs(project_root, top_rtl: str, block_rtls=None) -> dict:
+    rec = validated_candidate(project_root)
+    blocks = block_rtls.values() if isinstance(block_rtls, dict) else (block_rtls or [])
+    supplied = {str(Path(p).resolve()) for p in [top_rtl, *blocks] if p}
+    if (not top_rtl or str(Path(top_rtl).resolve()) != rec["top_rtl_path"]
+            or not supplied.issubset(set(rec["sources"]))):
+        raise CandidateError("Supplied sources are not the recorded candidate (extra source or different top)")
+    return rec
 
 
 def resolve_top(project_root) -> tuple[str, str]:
-    """``(top_module, top_rtl_path)`` from the candidate receipt, else from the
-    integration record; ("", "") when neither names a top that its file
-    declares. Never a guess from file contents."""
-    rec = read_candidate_receipt(project_root)
-    if rec:
-        mod, path = str(rec.get("top_module") or ""), str(rec.get("top_rtl_path") or "")
-        if mod and path and module_declared_in(path, mod) and receipt_is_current(rec):
-            return mod, path
-        if rec:
-            _log.warning("candidate receipt is stale or inconsistent (%s); ignoring it",
-                         path or "?")
-    try:
-        ir = json.loads((Path(project_root) / ".coresmith" / "integration_result.json")
-                        .read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return "", ""
-    mod, path = str(ir.get("top_module") or ""), str(ir.get("top_rtl_path") or "")
-    if mod and path and module_declared_in(path, mod):
-        return mod, path
-    return "", ""
+    rec = validated_candidate(project_root)
+    return rec["top_module"], rec["top_rtl_path"]

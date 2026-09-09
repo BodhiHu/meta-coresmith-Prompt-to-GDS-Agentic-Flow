@@ -3191,28 +3191,11 @@ def _evaluate_ppa_gate(
 
 
 def _resolve_probe_top(design_name: str, top_txt: str, project_root: str = "") -> str:
-    """The module the chip-top synthesizability probe targets (WP-54).
-
-    The recorded candidate top (receipt / integration record) wins; else the
-    design name when the file declares it; else the file's only module; else
-    the design name verbatim. No chassis-name preference and no "the module
-    nobody instantiates" guess (review round 3 showed both overriding an
-    explicit top).
-    """
-    if project_root:
-        try:
-            from orchestrator.harness.top_module import resolve_top as _resolve_top
-            _mod, _ = _resolve_top(project_root)
-            if _mod:
-                return _mod
-        except Exception:  # noqa: BLE001
-            pass
-    mods = re.findall(r"^\s*module\s+([A-Za-z_]\w*)", top_txt or "", re.M)
-    if design_name in mods:
-        return design_name
-    if len(mods) == 1:
-        return mods[0]
-    return design_name
+    """Resolve a chip probe only from the validated project manifest."""
+    from orchestrator.harness.top_module import CandidateError, resolve_top
+    if not project_root:
+        raise CandidateError("Chip probe requires a project candidate manifest")
+    return resolve_top(project_root)[0]
 
 
 def _chip_top_synth_ok(
@@ -3231,6 +3214,7 @@ def _chip_top_synth_ok(
     disabled, yosys is absent, or sources are missing -- "cannot judge" never
     fails the chip.
     """
+    from orchestrator.harness.top_module import CandidateError, candidate_for_inputs
     from orchestrator.langgraph.ppa_check import (
         chip_top_min_cells as _cell_floor,
     )
@@ -3243,120 +3227,16 @@ def _chip_top_synth_ok(
     from orchestrator.langgraph.ppa_check import (
         synth_cell_gate_enabled as _cell_gate_on,
     )
-    if not _cell_gate_on() or not top_rtl_path or not Path(top_rtl_path).exists():
+    try:
+        rec = candidate_for_inputs(project_root, top_rtl_path, block_rtl_paths)
+        if rec["defines"] != "none" or rec["parameters"] != "none":
+            raise CandidateError("Cell probe does not support the candidate configuration")
+    except CandidateError as exc:
+        return False, str(exc)
+    if not _cell_gate_on():
         return True, ""
-    sources = [top_rtl_path] + [p for p in (block_rtl_paths or {}).values() if p]
-    try:
-        _all_rtl = "\n".join(
-            Path(p).read_text() for p in sources if p and Path(p).exists()
-        )
-        from orchestrator.langgraph.sram_wrapper import (
-            uses_wrapper as _uses_wrapper,
-        )
-        from orchestrator.langgraph.sram_wrapper import (
-            wrapper_lib_path as _wrapper_lib_path,
-        )
-        if _uses_wrapper(_all_rtl):
-            sources.append(_wrapper_lib_path())
-    except Exception:  # noqa: BLE001 - best effort
-        pass
-    import tempfile as _tf
-    _synth_timeout = int(
-        os.environ.get("CORESMITH_SYNTH_TIMEOUT_S", "300") or "300"
-    )
-    try:
-        from orchestrator.langgraph.integration_helpers import (
-            _dedup_module_sources,
-            _drop_include_provided_sources,
-        )
-        # SYNTH-SCOPED include-provision dedup: yosys EXPANDS `include`s at
-        # read time, so a listed file that another source `include`s
-        # double-defines its modules -> MODDUP. Scoped HERE (not inside
-        # _dedup_module_sources) because the sim assembly must keep the
-        # explicit files: a legacy top may reference block modules directly
-        # while a non-top source carries preprocessor-guarded `include`s the
-        # sim never expands -- dropping the files there MODMISSINGs the sim.
-        _synth_srcs = _drop_include_provided_sources(sources)
-        _dd = Path(_tf.mkdtemp(prefix="chiptop_synth_"))
-        deduped = _dedup_module_sources(_synth_srcs, _dd)
-    except Exception:  # noqa: BLE001 - fall back to raw sources
-        deduped = sources
-    # F1 (canonical chip_top filelist): publish the deduped one-file-per-
-    # module source set the gate actually synthesizes, so downstream tooling
-    # (backend P&R, external graders) consumes an authoritative list instead
-    # of globbing rtl/**/*.v -- the run tree can carry DUPLICATE module copies
-    # (a top/ vs integration/ wrapper variant, an inline vs standalone block),
-    # and a naive glob then MODDUP-collides or picks a stale/stub copy.
-    try:
-        _flist = Path(project_root) / ".coresmith" / "chip_top_sources.f"
-        _flist.parent.mkdir(parents=True, exist_ok=True)
-        _flist.write_text("\n".join(str(_p) for _p in deduped) + "\n")
-    except OSError:
-        pass
-    # C24: yosys `hierarchy -top` needs the ACTUAL top module of the assembled
-    # chip_top, NOT the DESIGN NAME. The deterministic Caravel assembly's top
-    # module is `user_project_wrapper` (or openframe_project_wrapper); passing
-    # design_name (e.g. a `<design>_qspi_rom_top`) made yosys fail "Module <design>
-    # not found" and falsely report EVERY chip as un-synthesizable at the final
-    # gate. Resolve the real top from the assembled RTL: prefer a Caravel
-    # wrapper module, else the last module declared (the top is conventionally
-    # last), else the parsed first module, else fall back to design_name.
-    try:
-        _top_txt = Path(top_rtl_path).read_text(errors="ignore")
-    except OSError:
-        _top_txt = ""
-    _top_name = _resolve_probe_top(design_name, _top_txt, project_root=project_root)
-    # F3 (audit): a run may DELIVER a separate locked-ABI top at
-    # rtl/chip_top.v (e.g. the ppab_dut chassis contract) that is NOT part of
-    # the assembled manifest -- two near-equivalent tops that silently drift
-    # apart (the reference codec encoder shipped `ppab_dut` while chip_top_sources.f
-    # rooted at `reference_codec_enc_top`). When such a file exists outside the deduped
-    # set and its module names are all novel, co-elaborate it, publish it in
-    # the canonical filelist, and probe it as a SECOND top below so the gate
-    # covers the artifact that actually gets graded. Either way record a
-    # carried-forward defect naming the dual-top drift risk.
-    _delivered_top = None
-    try:
-        import re as _re3
-        _dpath = Path(project_root) / "rtl" / "chip_top.v"
-        _dedup_resolved = {str(Path(_p).resolve()) for _p in deduped}
-        if _dpath.exists() and str(_dpath.resolve()) not in _dedup_resolved:
-            _mod_re = _re3.compile(r"^\s*module\s+([A-Za-z_]\w*)", _re3.MULTILINE)
-            _d_mods = _mod_re.findall(_dpath.read_text(errors="ignore"))
-            _defined: set = set()
-            for _p in deduped:
-                try:
-                    _defined.update(
-                        _mod_re.findall(Path(_p).read_text(errors="ignore")))
-                except OSError:
-                    continue
-            _collisions = [m for m in _d_mods if m in _defined]
-            if _d_mods and not _collisions:
-                deduped = list(deduped) + [str(_dpath)]
-                try:
-                    _flist.write_text(
-                        "\n".join(str(_p) for _p in deduped) + "\n")
-                except (OSError, NameError):
-                    pass
-                _delivered_top = _d_mods[-1]
-                _drift_detail = (
-                    f"delivered ABI top `{_delivered_top}` ({_dpath}) is not "
-                    "part of the assembled manifest -- co-elaborated + probed "
-                    "as a second top; unify on ONE canonical top (a locked-ABI "
-                    "wrapper around the integration module)")
-            else:
-                _drift_detail = (
-                    f"delivered top file {_dpath} redefines manifest modules "
-                    f"{_collisions[:4]} -- cannot co-elaborate, so its drift "
-                    "vs the assembled manifest is UNCHECKED")
-            record_carried_forward_defect(project_root, {
-                "gate": "chip_top_synth",
-                "kind": "canonical_top_drift",
-                "unmodeled": str(_dpath),
-                "detail": _drift_detail,
-            })
-    except Exception:  # noqa: BLE001 - detection is best-effort
-        _delivered_top = None
+    deduped, _top_name = rec["sources"], rec["top_module"]
+    _synth_timeout = int(os.environ.get("CORESMITH_SYNTH_TIMEOUT_S", "300") or "300")
     # C27: probe from the PROJECT ROOT so project-relative $readmemh init
     # files (cs_sram/cs_rom INIT_FILE="inputs/...") resolve; the deduped
     # source copies live in a temp dir but yosys resolves $readmemh against
@@ -3386,31 +3266,6 @@ def _chip_top_synth_ok(
             f"wrapper won assembly dedup). A synthesizable-but-empty top "
             f"is not a working chip_top."
         )
-    # F3: the DELIVERED ABI top (rtl/chip_top.v) must synthesize too -- it is
-    # the artifact that gets graded, and it can drift from the assembled
-    # manifest independently.
-    if _delivered_top and _delivered_top != _top_name:
-        probe2 = _probe_multi(
-            deduped, _delivered_top, timeout_s=_synth_timeout,
-            cwd=project_root,
-        )
-        if probe2 is not None:
-            if probe2.get("elaborated") is False:
-                return False, (
-                    f"delivered ABI top `{_delivered_top}` (rtl/chip_top.v) "
-                    f"did not techmap: {probe2.get('reason', '')} -- the "
-                    "delivered top drifted from the assembled manifest")
-            _cc2 = probe2.get("cell_count")
-            if _cc2 is not None and _cc2 > _ceil:
-                return False, (
-                    f"delivered ABI top `{_delivered_top}` cell count "
-                    f"{_cc2:,} exceeds the max-cell ceiling {_ceil:,}")
-            if _cc2 is not None and _floor > 0 and _cc2 < _floor:
-                return False, (
-                    f"delivered ABI top `{_delivered_top}` collapsed to "
-                    f"{_cc2:,} gate cells (< floor {_floor:,}) -- a "
-                    "synthesizable-but-empty delivered top is not a working "
-                    "chip_top")
     return True, ""
 
 
@@ -6751,31 +6606,19 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                 "single_block_wrapper": True,
             }
 
-            write_graph_event(pr, "Integration Check", "graph_node_exit", {
-                "success": True,
-                "top_module": top_name,
-                "block_count": 1,
-                "single_block_wrapper": True,
-            })
-            # WP-49: the single-block path records the candidate too -- the
-            # backend reads the record and never discovers a top from files.
-            try:
-                _ir_path = Path(pr) / ".coresmith" / "integration_result.json"
-                _ir_path.parent.mkdir(parents=True, exist_ok=True)
-                _ir_path.write_text(json.dumps(integration_result, indent=2, default=str))
-            except OSError:
-                pass
             try:
                 from orchestrator.harness.top_module import write_candidate_receipt
+                if not lint_clean:
+                    raise ValueError("Single-block wrapper did not lint cleanly")
                 write_candidate_receipt(pr, top_name, output_path, rtl_paths,
-                                        note="single-block passthrough")
-            except ValueError as _exc:
-                # WP-54: a single-block top that contradicts the declared top parks
+                                        note="single-block passthrough", integration_result=integration_result)
+            except (ValueError, OSError) as exc:
                 return {"integration_result": await _park_caravel_assembly_failure(
-                    pr, design_name, rtl_paths, "top module mismatch", [str(_exc)],
-                    output_path)}
-            except OSError as _exc:
-                log(f"  [INTEGRATION] candidate receipt skipped: {_exc}", YELLOW)
+                    pr, design_name, rtl_paths, "top module mismatch", [str(exc)], output_path)}
+            write_graph_event(pr, "Integration Check", "graph_node_exit", {
+                "success": True, "top_module": top_name, "block_count": 1,
+                "single_block_wrapper": True,
+            })
             return {"integration_result": integration_result}
 
         # ---- Defect 4: deterministic Caravel user_project_wrapper assembly ----
@@ -6920,20 +6763,13 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                     from orchestrator.harness.top_module import write_candidate_receipt
                     try:   # WP-49/54: the receipt (declared-top check) BEFORE the record
                         write_candidate_receipt(pr, "user_project_wrapper", top_rtl_path,
-                                                asm["lint_block_paths"], note="caravel assembly")
-                    except ValueError as _exc:
+                                                asm["lint_block_paths"], note="caravel assembly",
+                                                expected_blocks=set(modules) - {_dropped},
+                                                integration_result=integration_result)
+                    except (ValueError, OSError) as _exc:
                         return {"integration_result": await _park_caravel_assembly_failure(
                             pr, design_name, rtl_paths, "top module mismatch",
                             [str(_exc)], top_rtl_path)}
-                    # WP-27: persist the record the backend (WP-17b) and the
-                    # graders read; this branch never wrote it, so a stale
-                    # Integration-Lead result named the wrong top.
-                    try:
-                        _ir_path = Path(pr) / ".coresmith" / "integration_result.json"
-                        _ir_path.parent.mkdir(parents=True, exist_ok=True)
-                        _ir_path.write_text(json.dumps(integration_result, indent=2, default=str))
-                    except OSError:
-                        pass
                     return {"integration_result": integration_result}
                 _errs = [ln for ln in str(lint_result.get("errors", "")).splitlines()
                          if ln.strip()][:20]
@@ -7043,11 +6879,10 @@ async def integration_check_node(state: OrchestratorState) -> dict:
         if not chip_top_text:
             chip_top_text = agent_result.get("verilog", "")
 
-        from orchestrator.harness.top_module import candidate_sources
         from orchestrator.langchain.agents.integration_lead import (
             assert_blocks_instantiated,
         )
-        _hier_sources = candidate_sources(pr, top_rtl_path, rtl_paths)
+        _hier_sources = [top_rtl_path, *rtl_paths.values()]
         postcond = assert_blocks_instantiated(
             chip_top_text, set(block_rtl_sources.keys()), source_paths=_hier_sources,
             top_module=module_name, project_root=pr,
@@ -7171,36 +7006,15 @@ async def integration_check_node(state: OrchestratorState) -> dict:
             },
         }
 
-        # WP-49: the produced top must be the task's declared top, and the
-        # candidate is recorded once (top, file, exact sources, sha).
-        from orchestrator.harness.top_module import declared_top, write_candidate_receipt
-        _declared = declared_top(pr)
-        if _declared and module_name != _declared:
-            return {"integration_result": await _park_caravel_assembly_failure(
-                pr, design_name, rtl_paths, "top module mismatch",
-                [f"the task declares top {_declared!r}; the integration produced "
-                 f"{module_name!r} -- the graded boundary was not produced"],
-                top_rtl_path)}
-        if top_rtl_path and Path(top_rtl_path).exists():
+        async def adopt_result():
+            from orchestrator.harness.top_module import write_candidate_receipt
             try:
                 write_candidate_receipt(pr, module_name, top_rtl_path, rtl_paths,
-                                        note="integration lead")
-            except ValueError as _exc:
-                return {"integration_result": await _park_caravel_assembly_failure(
-                    pr, design_name, rtl_paths, "top module not declared",
-                    [str(_exc)], top_rtl_path)}
-        else:
-            log(f"  [INTEGRATION] no top file on disk ({top_rtl_path!r}); "
-                "candidate receipt skipped", YELLOW)
-        # B3: persist the assembled integration result so the harness
-        # (`coresmith verify chip`) can resolve top_rtl_path + block_rtl_paths
-        # after the daemon parks. Best-effort -- never fails the node.
-        try:
-            _ir_path = Path(pr) / ".coresmith" / "integration_result.json"
-            _ir_path.parent.mkdir(parents=True, exist_ok=True)
-            _ir_path.write_text(json.dumps(integration_result, indent=2, default=str))
-        except Exception:  # noqa: BLE001
-            pass
+                                        note="integration lead", integration_result=integration_result)
+                return integration_result
+            except (ValueError, OSError) as exc:
+                return await _park_caravel_assembly_failure(
+                    pr, design_name, rtl_paths, "top module mismatch", [str(exc)], top_rtl_path)
 
         has_issues = len(errors) > 0 or not lint_clean
         if has_issues:
@@ -7423,6 +7237,8 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                     integration_result["aborted"] = True
                     log("  [INTEGRATION] Aborted at re-park", RED)
 
+            if lint_clean and not integration_result.get("aborted") and not integration_result.get("skipped_by_user"):
+                integration_result = await adopt_result()
             return {"integration_result": integration_result}
 
         if (
@@ -7521,8 +7337,13 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                     "  [INTEGRATION] Aborted on warning triage", RED
                 )
 
+            if lint_clean and not integration_result.get("aborted") and not integration_result.get("skipped_by_user"):
+                integration_result = await adopt_result()
             return {"integration_result": integration_result}
 
+        integration_result = await adopt_result()
+        if not integration_result.get("lint_clean") or integration_result.get("aborted"):
+            return {"integration_result": integration_result}
         log(f"\n{'='*60}", GREEN)
         log("  INTEGRATION CHECK PASSED", GREEN)
         log(f"  Top module: {module_name}", GREEN)
@@ -10267,6 +10088,9 @@ async def final_report_node(state: OrchestratorState) -> dict:
     artifact. Never raises: a report failure must not fail the pipeline.
     """
     pr = _pr(state)
+    for record in ("candidate.json", "integration_result.json"):
+        (Path(pr) / ".coresmith" / record).unlink(missing_ok=True)
+
     try:
         from orchestrator.langgraph.final_report import (
             build_final_report,

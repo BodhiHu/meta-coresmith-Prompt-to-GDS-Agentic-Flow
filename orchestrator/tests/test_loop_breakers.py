@@ -84,6 +84,9 @@ class TestChipLeadUnsupportedActionRetry:
     @pytest.fixture(autouse=True)
     def _reset(self, monkeypatch, tmp_path):
         monkeypatch.setattr(pipeline_graph, "_CHIP_LEAD_TRIPPED", False)
+        # Provider retry decisions are independent of the developer checkout.
+        # The checkout guard has dedicated tests using controlled git output.
+        monkeypatch.setattr(pipeline_graph, "_engine_checkout_guard", lambda: [])
         monkeypatch.setenv("CORESMITH_PROJECT_ROOT", str(tmp_path))
         monkeypatch.setenv("CORESMITH_ENABLE_CHIP_LEAD", "1")
 
@@ -264,26 +267,10 @@ class TestResolveProbeTop:
         "endmodule\n"
     )
 
-    def test_design_name_match_wins_over_last_declared(self):
-        assert pipeline_graph._resolve_probe_top(
-            "h264_encoder_core_top", self.REAL) == "h264_encoder_core_top"
-
-    def test_ambiguous_file_without_a_record_returns_the_design_name(self):
-        """WP-54: no 'uninstantiated module wins' and no last-declared guess. Without a
-        candidate receipt the probe targets the design name and lets elaboration fail
-        loudly if the file does not declare it."""
-        assert pipeline_graph._resolve_probe_top(
-            "some_other_design", self.REAL) == "some_other_design"
-        txt = ("module top_a (input clk);\nendmodule\n"
-               "module top_b (input clk);\nendmodule\n")
-        assert pipeline_graph._resolve_probe_top("neither", txt) == "neither"
-
-    def test_no_chassis_name_preference(self):
-        """WP-54: a chassis-named module in the file does not override the design name."""
-        txt = ("module user_project_wrapper (input clk);\nendmodule\n"
-               + self.REAL)
-        assert pipeline_graph._resolve_probe_top(
-            "h264_encoder_core_top", txt) == "h264_encoder_core_top"
+    def test_probe_without_manifest_refuses_even_an_unambiguous_name(self):
+        from orchestrator.harness.top_module import CandidateError
+        with pytest.raises(CandidateError):
+            pipeline_graph._resolve_probe_top("h264_encoder_core_top", self.REAL)
 
     def test_recorded_candidate_wins(self, tmp_path):
         from orchestrator.harness.top_module import write_candidate_receipt
@@ -294,12 +281,6 @@ class TestResolveProbeTop:
         assert pipeline_graph._resolve_probe_top(
             "h264_encoder_core_top", self.REAL, project_root=str(tmp_path)) == "syntax_adapter"
 
-    def test_single_module_file(self):
-        txt = "module only_top (input clk);\nendmodule\n"
-        assert pipeline_graph._resolve_probe_top("neither", txt) == "only_top"
-
-    def test_empty_file_falls_back_to_design_name(self):
-        assert pipeline_graph._resolve_probe_top("dsn", "") == "dsn"
 
 
 class TestBoundedValidationMakefile:
@@ -478,6 +459,9 @@ class TestChipLeadFailureRetry:
     @pytest.fixture(autouse=True)
     def _reset(self, monkeypatch, tmp_path):
         monkeypatch.setattr(pipeline_graph, "_CHIP_LEAD_TRIPPED", False)
+        # Provider retry decisions are independent of the developer checkout.
+        # The checkout guard has dedicated tests using controlled git output.
+        monkeypatch.setattr(pipeline_graph, "_engine_checkout_guard", lambda: [])
         monkeypatch.setenv("CORESMITH_PROJECT_ROOT", str(tmp_path))
         monkeypatch.setenv("CORESMITH_ENABLE_CHIP_LEAD", "1")
 
@@ -524,3 +508,10 @@ class TestChipLeadFailureRetry:
         assert out == {"action": "abort"}
         assert len(parked) == 1
         assert pipeline_graph._CHIP_LEAD_TRIPPED is True
+
+
+@pytest.fixture(autouse=True)
+def _fixture_elaborator(monkeypatch, request):
+    if request.node.name == "test_hierarchy_starts_at_the_selected_top_and_sees_the_preprocessor":
+        return
+    monkeypatch.setattr("orchestrator.harness.hierarchy.elaborate_hierarchy", lambda *a, **k: {"leaf", "syntax_adapter", "rom_arbiter"})

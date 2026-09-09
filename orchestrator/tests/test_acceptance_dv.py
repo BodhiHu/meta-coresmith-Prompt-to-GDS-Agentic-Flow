@@ -22,6 +22,7 @@ from orchestrator.langgraph.acceptance_dv import (
     map_stimulus,
     run_acceptance_dv,
 )
+from orchestrator.tests.candidate_fixtures import adopt
 
 FRAMED_HEADER = """
 module toy_top (
@@ -319,6 +320,7 @@ class TestAcceptanceDVEndToEnd:
     def test_correct_dut_passes(self, tmp_path, monkeypatch):
         _env(monkeypatch)
         root, top = _project(tmp_path)
+        adopt(root, top, name="toy_top")
         res = run_acceptance_dv(str(root), str(top))
         assert not res["skipped"], res["reason"]
         assert res["passed"], res
@@ -329,6 +331,7 @@ class TestAcceptanceDVEndToEnd:
     def test_wrong_dut_diverges_with_offset(self, tmp_path, monkeypatch):
         _env(monkeypatch)
         root, top = _project(tmp_path, bug="+ 8'd1")
+        adopt(root, top, name="toy_top")
         res = run_acceptance_dv(str(root), str(top))
         assert not res["skipped"], res["reason"]
         assert not res["passed"]
@@ -340,6 +343,7 @@ class TestAcceptanceDVEndToEnd:
         _env(monkeypatch)
         root, top = _project(tmp_path)
         (root / "inputs" / "acceptance_stimulus.py").unlink()
+        adopt(root, top, name="toy_top")
         res = run_acceptance_dv(str(root), str(top))
         assert res["skipped"]
         assert "acceptance stimulus" in res["reason"]
@@ -352,6 +356,7 @@ class TestAcceptanceDVEndToEnd:
         root, top = _project(tmp_path)
         _write(root / "inputs" / "toy_golden.py",
                'def run(stim):\n    raise ValueError("boom")\n')
+        adopt(root, top, name="toy_top")
         res = run_acceptance_dv(str(root), str(top))
         assert res["skipped"], res
         assert not res["passed"]
@@ -367,6 +372,7 @@ class TestAcceptanceDVEndToEnd:
                '    off = stim.get("offset", 0)\n'
                '    return np.asarray([(v + off) & 0xFF for v in stim["pixels"]],\n'
                '                      dtype=np.uint8)\n')
+        adopt(root, top, name="toy_top")
         res = run_acceptance_dv(str(root), str(top))
         assert not res["skipped"], res["reason"]
         assert res["passed"], res
@@ -381,6 +387,7 @@ class TestAcceptanceDVEndToEnd:
         _write(top, NO_TLAST_DUT)
         _write(root / "inputs" / "toy_golden.py", REFERENCE)
         _write(root / "inputs" / "acceptance_stimulus.py", ACCEPTANCE)
+        adopt(root, top, name="toy_top")
         res = run_acceptance_dv(str(root), str(top))
         assert not res["skipped"], res["reason"]
         assert res["passed"], res
@@ -390,6 +397,7 @@ class TestAcceptanceDVEndToEnd:
         _env(monkeypatch)
         monkeypatch.setenv("CORESMITH_ACCEPTANCE_DV", "0")
         root, top = _project(tmp_path)
+        adopt(root, top, name="toy_top")
         res = run_acceptance_dv(str(root), str(top))
         assert res["skipped"]
 
@@ -402,6 +410,7 @@ class TestAcceptanceDVEndToEnd:
         _write(top, DROP_DUT)
         _write(root / "inputs" / "toy_golden.py", REFERENCE)
         _write(root / "inputs" / "acceptance_stimulus.py", ACCEPTANCE)
+        adopt(root, top, name="toy_top")
         res = run_acceptance_dv(str(root), str(top))
         assert not res["skipped"], res["reason"]
         assert not res["passed"], "backpressure must expose the dropped beat"
@@ -416,6 +425,7 @@ class TestAcceptanceDVEndToEnd:
         _write(top, DROP_DUT)
         _write(root / "inputs" / "toy_golden.py", REFERENCE)
         _write(root / "inputs" / "acceptance_stimulus.py", ACCEPTANCE)
+        adopt(root, top, name="toy_top")
         res = run_acceptance_dv(str(root), str(top))
         assert not res["skipped"], res["reason"]
         assert res["passed"], "no-backpressure harness misses the drop (blind spot)"
@@ -430,6 +440,7 @@ class TestAcceptanceDVEndToEnd:
         _write(top, WORD_DUT)
         _write(root / "inputs" / "toy_golden.py", WORD_REFERENCE)
         _write(root / "inputs" / "acceptance_stimulus.py", WORD_ACCEPTANCE)
+        adopt(root, top, name="toy_top")
         res = run_acceptance_dv(str(root), str(top))
         assert not res["skipped"], res["reason"]
         assert res["passed"], res
@@ -444,6 +455,7 @@ class TestAcceptanceDVEndToEnd:
                                      "s_axis_tdata + cfg_offset + 32'h100"))
         _write(root / "inputs" / "toy_golden.py", WORD_REFERENCE)
         _write(root / "inputs" / "acceptance_stimulus.py", WORD_ACCEPTANCE)
+        adopt(root, top, name="toy_top")
         res = run_acceptance_dv(str(root), str(top))
         assert not res["skipped"], res["reason"]
         assert not res["passed"], "wrong upper-byte offset must be caught"

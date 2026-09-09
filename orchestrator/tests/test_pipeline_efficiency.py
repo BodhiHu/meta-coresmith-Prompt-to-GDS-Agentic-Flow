@@ -26,6 +26,8 @@ from pathlib import Path
 
 import pytest
 
+from orchestrator.tests.candidate_fixtures import adopt
+
 # ═══════════════════════════════════════════════════════════════════════════
 # R1a: validate_rtl_ports removed
 # ═══════════════════════════════════════════════════════════════════════════
@@ -239,6 +241,7 @@ class TestBackendSingleBlock:
             "tier_list": [1],
         }
 
+        adopt(tmp_path, integ_top, {block_name: str(rtl_dir / f"{block_name}.v")}, name="adder_8bit_top")
         result = await init_design_node(state)
 
         assert result["integration_top_path"] == str(integ_top)
