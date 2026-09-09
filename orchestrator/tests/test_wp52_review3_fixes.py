@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import shutil
 
 import pytest
 
@@ -162,6 +163,7 @@ def test_synth_probe_takes_the_recorded_top_and_never_a_chassis_name(tmp_path, m
     assert pg._resolve_probe_top("user_project_wrapper", txt, project_root=str(root)) == "chip_top"
 
 
+@pytest.mark.skipif(not shutil.which("yosys"), reason="requires yosys")
 def test_hierarchy_starts_at_the_selected_top_and_sees_the_preprocessor():
     orphan = "module chip_top(); endmodule\nmodule orphan(); required_leaf u(); endmodule\n"
     assert assert_blocks_instantiated(orphan, {"required_leaf"}, sources=["module required_leaf(); endmodule\n"],

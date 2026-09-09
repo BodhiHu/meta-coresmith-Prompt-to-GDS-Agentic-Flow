@@ -7043,27 +7043,14 @@ async def integration_check_node(state: OrchestratorState) -> dict:
         if not chip_top_text:
             chip_top_text = agent_result.get("verilog", "")
 
+        from orchestrator.harness.top_module import candidate_sources
         from orchestrator.langchain.agents.integration_lead import (
             assert_blocks_instantiated,
         )
-        # WP-22: a Caravel-style top is a HIERARCHY (chip top -> wrapper ->
-        # blocks); the assembled wrapper lives next to the top under
-        # rtl/integration. Judge instantiation over the whole hierarchy.
-        # WP-49: judged over the ELABORATED hierarchy rooted at the top (a
-        # block instantiated only inside an unreferenced module does not count).
-        _hier_sources: list[str] = []
-        try:
-            _int_dir = Path(top_rtl_path).parent if top_rtl_path else None
-            if _int_dir and _int_dir.is_dir():
-                for _vf in sorted(_int_dir.glob("*.v")):
-                    if top_rtl_path and _vf.resolve() == Path(top_rtl_path).resolve():
-                        continue
-                    _hier_sources.append(_vf.read_text(encoding="utf-8", errors="replace"))
-        except OSError:
-            pass
+        _hier_sources = candidate_sources(pr, top_rtl_path, rtl_paths)
         postcond = assert_blocks_instantiated(
-            chip_top_text, set(block_rtl_sources.keys()), sources=_hier_sources,
-            top_module=module_name,
+            chip_top_text, set(block_rtl_sources.keys()), source_paths=_hier_sources,
+            top_module=module_name, project_root=pr,
         )
         if postcond:
             log(f"  [INTEGRATION] Postcondition failed: {postcond}", RED)

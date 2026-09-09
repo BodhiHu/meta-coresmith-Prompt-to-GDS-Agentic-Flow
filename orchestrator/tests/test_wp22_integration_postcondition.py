@@ -2,17 +2,21 @@
 from __future__ import annotations
 
 import inspect
+import shutil
+
+import pytest
 
 from orchestrator.langchain.agents.integration_lead import assert_blocks_instantiated
 from orchestrator.langgraph import pipeline_graph as pg
 
 
+@pytest.mark.skipif(not shutil.which("yosys"), reason="requires yosys")
 def test_nested_hierarchy_counts_only_what_the_top_reaches():
     top = "module chip_top(); outer_shell u_o(); endmodule\n"
     wrapper = ("module pad_wrapper(); fft_engine u_f(); twiddle_rom u_t(); endmodule\n"
                "module outer_shell(); pad_wrapper u_w(); endmodule\n")
     assert assert_blocks_instantiated(top, {"fft_engine", "twiddle_rom"})  # top alone: missing
-    assert assert_blocks_instantiated(top, {"fft_engine", "twiddle_rom"}, sources=[wrapper]) is None
+    assert assert_blocks_instantiated(top, {"fft_engine", "twiddle_rom"}, sources=[wrapper, "module fft_engine(); endmodule module twiddle_rom(); endmodule"], top_module="chip_top") is None
     # WP-49: an instance inside a module the top never reaches does not count
     orphan = "module unused_holder(); fft_engine u_f(); twiddle_rom u_t(); endmodule\n"
     assert assert_blocks_instantiated(top, {"fft_engine", "twiddle_rom"}, sources=[orphan])
