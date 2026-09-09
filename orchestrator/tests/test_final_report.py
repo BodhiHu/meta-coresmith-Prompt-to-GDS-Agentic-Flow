@@ -176,7 +176,8 @@ class TestBuildReportPassing:
 
         # totals / aggregates
         assert sign["coverage_min_pct"] == 85.0
-        assert sign["top_fmax_mhz"] == pytest.approx(86.96, abs=0.05)
+        assert sign["top_fmax_mhz"] == pytest.approx(92.59, abs=0.05)
+        assert sign["leaf_estimate_fmax_mhz"] == pytest.approx(86.96, abs=0.05)
         # aggregate block area = 850.5 + 3200.0
         assert r["chip"]["aggregate_area_um2"] == pytest.approx(4050.5, abs=0.1)
 

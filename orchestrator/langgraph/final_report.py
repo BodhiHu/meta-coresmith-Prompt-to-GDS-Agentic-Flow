@@ -491,8 +491,10 @@ def build_final_report(state: dict, project_root: str, *,
     cov_aggregate = (round(100.0 * cov_hit_sum / cov_total_sum, 2)
                      if cov_total_sum else None)
     cov_min = round(min(cov_pcts), 2) if cov_pcts else None
-    top_fmax = round(min(fmax_vals), 2) if fmax_vals else None
-    top_wns = round(min(wns_vals), 4) if wns_vals else None
+    top_fmax = top_ppa.get("fmax_mhz")
+    top_wns = top_ppa.get("wns_ns")
+    leaf_fmax = round(min(fmax_vals), 2) if fmax_vals else None
+    leaf_wns = round(min(wns_vals), 4) if wns_vals else None
 
     # ---- signoff verdict ----------------------------------------------
     integ_ok = integ_stage["passed"]
@@ -594,6 +596,8 @@ def build_final_report(state: dict, project_root: str, *,
             "coverage_floor": _num(_floor_from_blocks(blocks_out)),
             "top_fmax_mhz": top_fmax,
             "top_wns_ns": top_wns,
+            "leaf_estimate_fmax_mhz": leaf_fmax,
+            "leaf_estimate_wns_ns": leaf_wns,
             "integration_dv": _verdict_word(integ_ok, integ_stage["ran"]),
             "validation_dv": _verdict_word(valid_ok, valid_stage["ran"]),
             "carried_forward_defect_count": len(carried_defects),
@@ -658,6 +662,10 @@ def _fmt(x: Any, suffix: str = "", nd: int = 2) -> str:
     if isinstance(x, int):
         return f"{x:,}{suffix}"
     return f"{x}{suffix}"
+
+
+def _timing(x: Any, suffix: str, nd: int = 2) -> str:
+    return "unknown" if x is None else _fmt(x, suffix, nd)
 
 
 def _cov_cell(cov: dict) -> str:
@@ -730,8 +738,12 @@ def render_markdown(report: dict) -> str:
         f"(floor {_fmt(s.get('coverage_floor'), '%', 0)})"
     )
     lines.append(
-        f"- Top Fmax: {_fmt(s.get('top_fmax_mhz'), ' MHz')} "
-        f"(worst WNS {_fmt(s.get('top_wns_ns'), ' ns', 4)})"
+        f"- Top Fmax: {_timing(s.get('top_fmax_mhz'), ' MHz')} "
+        f"(worst WNS {_timing(s.get('top_wns_ns'), ' ns', 4)})"
+    )
+    lines.append(
+        f"- Leaf estimate Fmax: {_fmt(s.get('leaf_estimate_fmax_mhz'), ' MHz')} "
+        f"(worst leaf WNS {_fmt(s.get('leaf_estimate_wns_ns'), ' ns', 4)})"
     )
     lines.append(
         f"- Integration DV: **{s.get('integration_dv')}** · "
@@ -904,8 +916,8 @@ def render_markdown(report: dict) -> str:
         f"aggregate block area {_fmt(chip.get('aggregate_area_um2'), ' µm²')}"
     )
     lines.append(
-        f"- Top-level Fmax {_fmt(report.get('signoff', {}).get('top_fmax_mhz'), ' MHz')}, "
-        f"WNS {_fmt(top_ppa.get('wns_ns'), ' ns', 4)}"
+        f"- Top-level Fmax {_timing(report.get('signoff', {}).get('top_fmax_mhz'), ' MHz')}, "
+        f"WNS {_timing(top_ppa.get('wns_ns'), ' ns', 4)}"
     )
     lines.append("")
     lines.append(

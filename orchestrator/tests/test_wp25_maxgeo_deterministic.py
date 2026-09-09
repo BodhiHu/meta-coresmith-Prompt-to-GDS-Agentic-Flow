@@ -1,4 +1,4 @@
-"""WP-25: MAX-GEOMETRY is advisory for the engine's deterministic BFM testbench."""
+"""WP-25: MAX-GEOMETRY requires executed owner cases even for deterministic testbenches."""
 from __future__ import annotations
 
 import json
@@ -17,11 +17,11 @@ def _project(tmp_path):
     return tmp_path, tb
 
 
-def test_deterministic_bfm_gets_advisory(tmp_path, monkeypatch):
+def test_deterministic_bfm_scope_is_unexecuted(tmp_path, monkeypatch):
     monkeypatch.delenv("CORESMITH_MAXGEO_GATE", raising=False)
     root, tb = _project(tmp_path)
     v = pg._maxgeo_gate_verdict(str(root), str(tb), {"deterministic_bfm": True, "contract": {"bus": "qspi"}})
-    assert v is not None and v.get("advisory") is True and v.get("scope") == "deterministic-bfm"
+    assert v is not None and v["verdict"] == "unknown"
     assert set(v["uncovered_dims"]) == {"fft_points", "qspi_byte_address"}
 
 

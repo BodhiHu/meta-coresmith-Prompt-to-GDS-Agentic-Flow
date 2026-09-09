@@ -3708,7 +3708,7 @@ def _run_gate_sim_gate(
             f"({res.output_bits_compared:,} output bits)", GREEN)
         return (True, res.status, res.reason)
 
-    if res.status == _gs.STATUS_FAIL:
+    if res.status in (_gs.STATUS_FAIL, _gs.STATUS_BOUNDED):
         log(f"  [GATE-SIM] FAIL -- {res.reason}", RED)
         try:
             block_dir = Path(_pr(state)) / ".coresmith" / "blocks" / block_name
@@ -4340,6 +4340,23 @@ async def diagnose_node(state: BlockState) -> dict:
 # Node: decide (deterministic -- no LLM call)
 # ---------------------------------------------------------------------------
 
+def _infrastructure_streak(history: list[dict]) -> int:
+    count = 0
+    for row in reversed(history):
+        category = row.get("category") or (row.get("diagnosis") or {}).get("category")
+        if category != "INFRASTRUCTURE_ERROR":
+            break
+        count += 1
+    return count
+
+
+def _infrastructure_retry_cap() -> int:
+    try:
+        return max(1, int(os.environ.get("CORESMITH_INFRA_MAX_RETRIES", "6") or 6))
+    except ValueError:
+        return 6
+
+
 def _route_decision(debug_result: dict, attempt_history: list[dict],
                     attempt: int, max_attempts: int, phase: str) -> str:
     """Deterministic failure routing based on debug agent output."""
@@ -4402,11 +4419,7 @@ def _route_decision(debug_result: dict, attempt_history: list[dict],
     # meant calling the chip lead (also an LLM) during the same outage,
     # and once it answered it skipped a block over 3 'attempts'.
     if category == "INFRASTRUCTURE_ERROR":
-        try:
-            _infra_max = int(os.environ.get("CORESMITH_INFRA_MAX_RETRIES", "6") or 6)
-        except ValueError:
-            _infra_max = 6
-        if category_counts.get("INFRASTRUCTURE_ERROR", 0) >= _infra_max:
+        if _infrastructure_streak(attempt_history) >= _infrastructure_retry_cap():
             return "ask_human"
         return "retry_rtl"
 
@@ -4491,16 +4504,15 @@ async def decide_node(state: BlockState) -> dict:
                 # after a real backoff. Budget is for design failures.
                 _infra_n = 0
                 try:
-                    _infra_n = sum(
-                        1 for a in (_db(_pr(state)).attempt_history(block_name) or [])
-                        if (a.get("diagnosis") or {}).get("category") == "INFRASTRUCTURE_ERROR"
-                        or a.get("category") == "INFRASTRUCTURE_ERROR")
-                except Exception:  # noqa: BLE001
-                    _infra_n = 1
+                    _infra_n = _infrastructure_streak(_db(_pr(state)).attempt_history(block_name) or [])
+                except Exception:  # unreadable history cannot reset the retry cap
+                    return {"debug_action": "ask_human"}
+                if _infra_n >= _infrastructure_retry_cap():
+                    return {"debug_action": "ask_human"}
                 backoff_s = min(60 * (2 ** max(_infra_n - 1, 0)), 900)
                 log(f"  [RETRY] INFRASTRUCTURE_ERROR -- re-running attempt "
                     f"{state['attempt']} after {backoff_s}s backoff (budget not "
-                    f"consumed; infra failures so far: {_infra_n})", YELLOW)
+                    f"consumed; consecutive infra failures: {_infra_n})", YELLOW)
                 write_graph_event(_pr(state), "Route Decision", "graph_node_exit", {
                     "block": block_name, "decision": action,
                     "infra_retry": True, "backoff_s": backoff_s,
@@ -7932,133 +7944,54 @@ def _maxgeo_conformance_scope(
 
 
 def _maxgeo_gate_verdict(
-    project_root: str, tb_path: str, tb_result: dict | None = None
+    project_root: str, tb_path: str, tb_result: dict | None = None,
+    *, sim_result: dict | None = None,
 ) -> dict | None:
-    """``None`` -> gate disabled or no declared dims (a true no-op).
-    ``{"verdict": "pass", ...}`` -> evaluated and fully covered (callers LOG
-    it). ``{"advisory": True, ...}`` -> covered in scope with a loud recorded
-    gap. Anything else -> violation dict: the design declares dimensional
-    maxima but the testbench's ``# MAXGEO`` marker does not prove a
-    max-geometry case for every declared dimension.
+    """Markers describe scope. Only an executed owner-declared case proves it.
 
-    NAME-AGNOSTIC: each declared dimension's max VALUE must appear as a marker
-    ``key=value`` pair (the key name is free-form data). Testing at the declared
-    maximum inherently crosses every 2^n index boundary below it -- exactly
-    where a truncated index/address width wraps. NEVER raises (a parse hiccup is
-    non-blocking; the prompt requirement is the primary defense).
-
-    ``tb_result`` is the generator's own record for this testbench. When it
-    identifies the ENGINE'S deterministic, compute-lane-independent QSPI
-    conformance TB, :func:`_maxgeo_conformance_scope` may return an ADVISORY
-    verdict (``advisory: True``) instead of a failure -- see that function for
-    why that is a scope, not a weakening. Callers MUST treat ``advisory`` as
-    "passed, with a loud recorded gap", and anything else as a failure."""
+    Owner task.yaml declares ``max_geometry_cases: {case_name: {dimension: max}}``.
+    ``executed_cases`` comes from the simulator's fresh successful XML test rows,
+    never from the generated testbench's own metadata or comments.
+    """
+    if not _maxgeo_gate_enabled():
+        return None
     try:
-        if not _maxgeo_gate_enabled():
-            return None
-        # run3-followups: single-sourced declared table (byte-equality with
-        # the legacy _declared_dimensions is pinned by test).
-        from orchestrator.langgraph.bfm_lib import maxgeo as _maxgeo_lib
-        dims = _maxgeo_lib.declared_dimensional_maxima(project_root)
+        import yaml
+
+        from orchestrator.langgraph.bfm_lib.maxgeo import declared_dimensional_maxima
+        dims = declared_dimensional_maxima(project_root)
         if not dims:
             return None
         marker = _tb_maxgeo_pairs(tb_path)
-        # run3-followups: single-sourced demand partition (bfm_lib.maxgeo).
-        # `missing` is provably identical to the old value-set computation;
-        # `value_only` newly NAMES the dims whose only evidence is a value
-        # collision with another marker pair, so the gate's number and the
-        # TB's confession finally agree.
-        _demand = _maxgeo_lib.maxgeo_demand(dims, marker)
-        missing = _demand.missing
-        value_only = _demand.value_only
-        if not missing:
-            # run3-followups: an evaluated PASS is a verdict, not a silence --
-            # the caller logs it so a suppressed gate can never read as green.
-            return {"verdict": "pass", "declared_dims": dims,
-                    "marker_pairs": marker,
-                    "value_only_dims": value_only}
-        scoped = _maxgeo_conformance_scope(
-            project_root, tb_path, tb_result, dims, marker, missing)
-        if scoped is not None:
-            return scoped
-        # WP-25: the engine's own deterministic BFM is DUT-blind and cannot
-        # co-tune around the declared maxima (the co-tuning this gate exists
-        # to catch). A fixed-geometry design (N=256 FFT) attains its maximum on
-        # every case yet never matches the value heuristic. Advisory, loudly.
-        if ((tb_result or {}).get("deterministic_bfm")
-                and (tb_result or {}).get("contract")
-                and not (tb_result or {}).get("conformance_only")):
-            return {
-                "advisory": True,
-                "scope": "deterministic-bfm",
-                "uncovered_dims": missing,
-                "value_only_dims": value_only,
-                "declared_dims": dims,
-                "marker_pairs": marker,
-                "reason": (
-                    "MAX-GEOMETRY gate: the engine's deterministic, DUT-blind "
-                    f"BFM drove this run; declared maxima {sorted(missing)} are "
-                    "not individually proven by marker value -- recorded as a "
-                    "loud advisory gap, not a hard failure."
-                ),
-            }
-        # run3-followups: a functional MAXIMUM-CONFIGURATION case (baked by the
-        # deterministic codegen, advertised via # MAXGEO_CASE) drives the max
-        # config register value and the full IN/OUT payload extents end-to-end
-        # against the golden -- the 2^n index/address wrap class this gate
-        # exists to catch IS exercised. Remaining per-dimension attainment is
-        # downgraded to a LOUD advisory gap (carried-forward defect), the same
-        # treatment as the bus-scoped conformance path. The gate stays HARD
-        # when no such case exists or its extents miss the declared maxima.
-        case = _tb_maxgeo_case(tb_path)
-        if case:
-            dim_values = set(dims.values())
-            attained = all(
-                isinstance(case.get(k), int) and case[k] in dim_values
-                for k in ("cfg0", "in_bytes", "out_bytes")
-            )
+        task_path = Path(project_root) / "inputs/task.yaml"
+        task = yaml.safe_load(task_path.read_text()) or {} if task_path.exists() else {}
+        declared = task.get("max_geometry_cases") or {}
+        if not isinstance(declared, dict):
+            raise ValueError("max_geometry_cases must map case names to dimension maxima")
+        executed = (sim_result or {}).get("executed_cases") or []
+        if not isinstance(executed, list) or any(not isinstance(name, str) for name in executed):
+            raise ValueError("Executed case evidence must be a list of exact case names")
+        if (sim_result or {}).get("passed") is not True:
+            executed = []
+        covered = {}
+        qualifying = []
+        for name, maxima in declared.items():
+            if name not in executed or not isinstance(maxima, dict):
+                continue
+            attained = {key: value for key, value in dims.items()
+                        if type(maxima.get(key)) is int and maxima[key] == value}
             if attained:
-                return {
-                    "advisory": True,
-                    "scope": "functional-max-case",
-                    "uncovered_dims": missing,
-                    "value_only_dims": value_only,
-                    "declared_dims": dims,
-                    "marker_pairs": marker,
-                    "functional_max_case": case,
-                    "reason": (
-                        "MAX-GEOMETRY gate: functional max-configuration case "
-                        f"{case} drives the maximum configuration and full "
-                        "payload extents end-to-end against the golden "
-                        "reference, exercising the 2^n index/address wrap "
-                        "class. Per-dimension attainment for "
-                        f"{sorted(missing)} is not individually proven -- "
-                        "recorded as a loud advisory gap, not a hard failure."
-                    ),
-                }
-        reason = (
-            "MAX-GEOMETRY DV GATE FAILED: the design declares dimensional "
-            "maxima but the testbench does not exercise them. A chip can pass "
-            "every fixed-small-geometry test yet ship a truncated index/address/"
-            "counter width that wraps at a 2^n boundary BELOW the declared "
-            "maximum (the class killer). The testbench MUST include at least one "
-            "MAX-GEOMETRY test case and advertise it with a "
-            "`# MAXGEO: <dim_name>=<value>` marker covering EVERY declared "
-            "dimension at its maximum.\n"
-            f"  declared maxima : {dims}\n"
-            f"  marker pairs    : {marker or '(no # MAXGEO marker found)'}\n"
-            f"  uncovered dims  : {missing}\n"
-            f"  value-collision-only (not individually proven): {value_only}\n"
-            "Fix: regenerate/edit the testbench to drive a max-geometry case "
-            "(sparse/short content at the maximum dimensions is acceptable if a "
-            "full workload is too slow -- the point is to exercise the index/"
-            "address widths at maximum extent) and emit the marker."
-        )
-        return {"reason": reason, "declared_dims": dims,
-                "marker_pairs": marker, "uncovered_dims": missing,
-                "value_only_dims": value_only}
-    except Exception:  # noqa: BLE001
-        return None
+                qualifying.append(name)
+                covered.update(attained)
+        missing = {key: value for key, value in dims.items() if key not in covered}
+        return {"verdict": "unknown" if missing else "pass",
+                "reason": ("MAX-GEOMETRY unknown: no successful executed owner-declared maximum case covers "
+                           f"{missing}; markers describe declared scope only") if missing else
+                          "Executed owner-declared maximum cases cover every declared dimension",
+                "declared_dims": dims, "marker_pairs": marker,
+                "uncovered_dims": missing, "executed_maximum_cases": qualifying}
+    except Exception as exc:  # malformed declaration/evidence cannot disable the gate
+        return {"verdict": "unknown", "reason": f"Maximum-case evidence unavailable: {exc}"}
 
 
 async def integration_dv_node(state: OrchestratorState) -> dict:
@@ -8276,9 +8209,9 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
                             )
                             if tb_result.get("maxgeo_covered"):
                                 log(
-                                    "  [INTEG-DV] MAX-EXTENT bus coverage: "
-                                    f"{tb_result['maxgeo_covered']} driven at "
-                                    "maximum; NOT covered (no compute oracle): "
+                                    "  [INTEG-DV] Declared MAX-EXTENT bus stimulus scope: "
+                                    f"{tb_result['maxgeo_covered']}; "
+                                    "outside scope (no compute oracle): "
                                     f"{tb_result.get('maxgeo_uncovered', {})}",
                                     YELLOW,
                                 )
@@ -8552,58 +8485,29 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
         # proven live when a clobbered 2-test TB passed DV with no MAXGEO line
         # at all. Every evaluated outcome logs a verdict; silence now means
         # only "gate disabled or no declared dims".
+        _mg = None
         if passed:
-            _mg = _maxgeo_gate_verdict(pr, tb_path, tb_result)
+            _mg = _maxgeo_gate_verdict(pr, tb_path, tb_result, sim_result=sim_result)
+            if _mg is not None:
+                write_graph_event(pr, "Maximum Geometry", "maxgeo_verdict", _mg)
             if reuse_existing_tb and _mg is not None:
                 log("  [INTEG-DV] MAX-GEOMETRY gate: evaluating an OPERATOR-"
                     "REUSED testbench (fix_tb/fix_rtl) -- operator edits get "
                     "more scrutiny, not less.", YELLOW)
             if _mg is not None and _mg.get("verdict") == "pass":
                 log("  [INTEG-DV] MAX-GEOMETRY gate PASS -- every declared "
-                    f"maximum appears in the TB markers: "
-                    f"{_mg.get('marker_pairs', {})}", GREEN)
+                    f"maximum was covered by executed owner cases: "
+                    f"{_mg.get('executed_maximum_cases', [])}", GREEN)
                 write_graph_event(pr, "Integration DV", "maxgeo_gate_pass", {
                     "gate": "maxgeo",
-                    "marker_pairs": _mg.get("marker_pairs", {}),
+                    "executed_maximum_cases": _mg.get("executed_maximum_cases", []),
                 })
-            elif _mg is not None and _mg.get("advisory"):
-                # SCOPED, not silent. Either the engine's compute-lane-
-                # independent conformance TB drove every BUS maximum and cannot
-                # drive the compute lane, or a functional max-configuration
-                # case covered the wrap class without per-dimension proof; the
-                # gap is logged RED, written to the event stream, and carried
-                # forward as a defect so the final report and validation DV
-                # both see it.
-                _mg_scope = _mg.get("scope", "bus-contract-only")
-                log("  [INTEG-DV] MAX-GEOMETRY gate ADVISORY "
-                    f"(scope={_mg_scope}) -- this is NOT full max-geometry "
-                    f"coverage. NOT COVERED: {_mg['uncovered_dims']}", RED)
-                write_graph_event(pr, "Integration DV", "maxgeo_gate_scoped", {
-                    "gate": "maxgeo",
-                    "scope": _mg_scope,
-                    "bus_covered": _mg.get("bus_covered", {}),
-                    "functional_max_case": _mg.get("functional_max_case", {}),
-                    "uncovered_dims": _mg.get("uncovered_dims", {}),
-                })
-                record_carried_forward_defect(pr, {
-                    "gate": "maxgeo",
-                    "kind": "max_geometry_not_covered",
-                    "advisory": True,
-                    "unmodeled": (
-                        "dimensional maxima never individually driven at "
-                        f"maximum extent: {_mg.get('uncovered_dims', {})} "
-                        f"(scope={_mg_scope})"
-                    ),
-                    "first_divergence_block": "",
-                    "note": _mg["reason"],
-                })
-                sim_log = ((sim_log + "\n\n") if sim_log else "") + _mg["reason"]
             elif _mg is not None:
                 passed = False
                 sim_log = ((sim_log + "\n\n") if sim_log else "") + _mg["reason"]
                 span.set_attribute("maxgeo_gate_failed", True)
                 log("  [INTEG-DV] MAX-GEOMETRY gate FAILED -- flipping DV to "
-                    f"failed: uncovered={_mg['uncovered_dims']}", RED)
+                    f"failed: uncovered={_mg.get('uncovered_dims', {})}", RED)
 
         # v3 Section 2: CHIP-LEVEL measured throughput. The deterministic-BFM TB
         # wrote integration_throughput.json (op window START-committed -> DONE
@@ -8659,6 +8563,7 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
                     "test_count": test_count,
                     "testbench_path": tb_path,
                     "sim_log_path": sim_result.get("log_path", ""),
+                    "max_geometry": _mg,
                     "design_name": design_name,
                     "measured_cyc_per_op_chip": (chip_tput or {}).get(
                         "measured_cyc_per_op_chip"),
@@ -8701,6 +8606,7 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
             "test_count": test_count,
             "sim_log": sim_log[-3000:],
             "sim_log_path": sim_result.get("log_path", ""),
+            "max_geometry": _mg,
             "block_rtl_paths": block_rtl_paths,
             "contract_audit": contract_audit,
             "contract_audit_path": contract_audit.get("audit_path", ""),
@@ -8786,6 +8692,7 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
                 "testbench_path": tb_path,
                 "tb_writer_flags": _tb_writer_flags(tb_result),
                 "sim_log_path": sim_result.get("log_path", ""),
+                "max_geometry": _mg,
                 "design_name": design_name,
                 "contract_audit": contract_audit,
                 "contract_audit_path": contract_audit.get("audit_path", ""),
@@ -9694,49 +9601,29 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
         # run3-followups: same contract as integration_dv -- the gate runs on
         # EVERY passing cycle (operator-reused TBs get MORE scrutiny) and every
         # evaluated outcome logs a verdict; a pass returns a dict, never None.
+        _mg = None
         if passed:
-            _mg = _maxgeo_gate_verdict(pr, tb_path, tb_result)
+            _mg = _maxgeo_gate_verdict(pr, tb_path, tb_result, sim_result=sim_result)
+            if _mg is not None:
+                write_graph_event(pr, "Maximum Geometry", "maxgeo_verdict", _mg)
             if reuse_existing_tb and _mg is not None:
                 log("  [VALIDATION-DV] MAX-GEOMETRY gate: evaluating an "
                     "OPERATOR-REUSED testbench (fix_tb/fix_rtl) -- operator "
                     "edits get more scrutiny, not less.", YELLOW)
             if _mg is not None and _mg.get("verdict") == "pass":
                 log("  [VALIDATION-DV] MAX-GEOMETRY gate PASS -- every "
-                    f"declared maximum appears in the TB markers: "
-                    f"{_mg.get('marker_pairs', {})}", GREEN)
+                    f"declared maximum was covered by executed owner cases: "
+                    f"{_mg.get('executed_maximum_cases', [])}", GREEN)
                 write_graph_event(pr, "Validation DV", "maxgeo_gate_pass", {
                     "gate": "maxgeo",
-                    "marker_pairs": _mg.get("marker_pairs", {}),
+                    "executed_maximum_cases": _mg.get("executed_maximum_cases", []),
                 })
-            elif _mg is not None and _mg.get("advisory"):
-                _mg_scope = _mg.get("scope", "bus-contract-only")
-                log("  [VALIDATION-DV] MAX-GEOMETRY gate ADVISORY "
-                    f"(scope={_mg_scope}) -- NOT full max-geometry coverage. "
-                    f"NOT COVERED: {_mg['uncovered_dims']}", RED)
-                write_graph_event(pr, "Validation DV", "maxgeo_gate_scoped", {
-                    "gate": "maxgeo",
-                    "scope": _mg_scope,
-                    "uncovered_dims": _mg.get("uncovered_dims", {}),
-                })
-                record_carried_forward_defect(pr, {
-                    "gate": "maxgeo",
-                    "kind": "max_geometry_not_covered",
-                    "advisory": True,
-                    "unmodeled": (
-                        "dimensional maxima never individually driven at "
-                        f"maximum extent: {_mg.get('uncovered_dims', {})} "
-                        f"(scope={_mg_scope})"
-                    ),
-                    "first_divergence_block": "",
-                    "note": _mg["reason"],
-                })
-                sim_log = ((sim_log + "\n\n") if sim_log else "") + _mg["reason"]
             elif _mg is not None:
                 passed = False
                 sim_log = ((sim_log + "\n\n") if sim_log else "") + _mg["reason"]
                 span.set_attribute("maxgeo_gate_failed", True)
                 log("  [VALIDATION-DV] MAX-GEOMETRY gate FAILED -- flipping DV "
-                    f"to failed: uncovered={_mg['uncovered_dims']}", RED)
+                    f"to failed: uncovered={_mg.get('uncovered_dims', {})}", RED)
 
         if passed:
             # Chip-top synthesizability gate (fix #5 + #2): pipeline_done is
@@ -9833,6 +9720,7 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
                     "requirement_count": requirement_count,
                     "testbench_path": tb_path,
                     "sim_log_path": sim_result.get("log_path", ""),
+                    "max_geometry": _mg,
                     "design_name": design_name,
                     "chip_top_synthesizable": True,
                 },
@@ -9873,6 +9761,7 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
             "requirement_count": requirement_count,
             "sim_log": sim_log[-3000:],
             "sim_log_path": sim_result.get("log_path", ""),
+            "max_geometry": _mg,
             "block_rtl_paths": block_rtl_paths,
             "contract_audit": contract_audit,
             "contract_audit_path": contract_audit.get("audit_path", ""),
@@ -9928,6 +9817,7 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
                 "testbench_path": tb_path,
                 "tb_writer_flags": _tb_writer_flags(tb_result),
                 "sim_log_path": sim_result.get("log_path", ""),
+                "max_geometry": _mg,
                 "design_name": design_name,
                 "contract_audit": contract_audit,
                 "contract_audit_path": contract_audit.get("audit_path", ""),

@@ -2407,6 +2407,22 @@ def _stage_project_inputs(sim_dir: Path, root: Path) -> None:
     except OSError:
         pass
 
+
+def _successful_sim_cases(path: Path) -> list[str]:
+    """Read only freshly emitted executed test cases, excluding skipped/failures."""
+    import xml.etree.ElementTree as ET
+    try:
+        root = ET.parse(path).getroot()
+    except (OSError, ET.ParseError):
+        return []
+    rows = list(root.iter("testcase"))
+    # Duplicate names with any failing/skipped instance do not certify that case.
+    names = {row.get("name") for row in rows if row.get("name")}
+    return sorted(name for name in names if all(
+        not any(row.find(tag) is not None for tag in ("failure", "error", "skipped"))
+        for row in rows if row.get("name") == name))
+
+
 def run_integration_simulation(
     design_name: str,
     top_rtl_path: str,
@@ -2498,6 +2514,7 @@ def run_integration_simulation(
     # fingerprint fast-path -- they are frequent and cheap; only this path forces a
     # clean rebuild.
     clear_build_products(sim_dir)
+    (sim_dir / "results.xml").unlink(missing_ok=True)
     # Fingerprint the (now clean) build inputs so a later flag/source change is
     # still caught by the mismatch path (and so the fingerprint file stays current).
     apply_build_fingerprint(sim_dir, makefile_content, all_sources)
@@ -2605,7 +2622,15 @@ def run_integration_simulation(
                 or (summary["tests_total"] > 0 and summary["tests_failed"] == 0)
             )
         )
+        from orchestrator.harness.top_module import validated_candidate
+        try:
+            if validated_candidate(root)["candidate_sha"] != rec["candidate_sha"]:
+                raise CandidateError("Candidate changed during simulation")
+        except CandidateError as exc:
+            return {"passed": False, "kind": exc.kind, "log": str(exc), "executed_cases": []}
         return {
+            "candidate_sha": rec["candidate_sha"],
+            "executed_cases": _successful_sim_cases(sim_dir / "results.xml") if passed else [],
             "passed": passed,
             "log": output,
             "returncode": result.returncode,

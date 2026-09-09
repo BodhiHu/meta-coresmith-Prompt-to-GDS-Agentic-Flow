@@ -621,7 +621,7 @@ def _run_chip_top_gate_sim(state: "BackendState", netlist: str) -> tuple:
             f"chip RTL ({res.cycles_compared} cycles, "
             f"{res.output_bits_compared} output bits)", GREEN)
         return (True, res.status, res.reason)
-    if res.status == _gs.STATUS_FAIL:
+    if res.status in (_gs.STATUS_FAIL, _gs.STATUS_BOUNDED):
         log(f"  [CHIP-GATE-SIM] FAIL -- {res.reason}", RED)
         return (False, res.status, res.reason)
     log(f"  [CHIP-GATE-SIM] not run -- {res.reason}", YELLOW)

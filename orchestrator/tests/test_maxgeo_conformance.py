@@ -230,12 +230,9 @@ def test_gate_scopes_the_deterministic_conformance_tb(tmp_path):
     pr = _project(tmp_path, RASTER_DIMS)
     tb, res = _conformance_tb(tmp_path, RASTER_DIMS)
     v = pipeline_graph._maxgeo_gate_verdict(pr, tb, res)
-    assert v is not None and v["advisory"] is True
-    assert v["bus_covered"] == BUS_DIMS
-    # the compute-lane remainder is REPORTED, not dropped
-    assert "frame_width" in v["uncovered_dims"]
-    assert "NOT COVERED" in v["reason"]
-    assert "no compute oracle" in v["reason"].lower()
+    assert v["verdict"] == "unknown"
+    assert v["uncovered_dims"] == RASTER_DIMS
+    assert "executed owner-declared" in v["reason"]
 
 
 def test_gate_still_bites_when_the_generator_skips_a_bus_maximum(tmp_path):
@@ -248,7 +245,7 @@ def test_gate_still_bites_when_the_generator_skips_a_bus_maximum(tmp_path):
     open(tb, "w").write(text)
     v = pipeline_graph._maxgeo_gate_verdict(pr, tb, res)
     assert v is not None and v.get("advisory") is not True
-    assert v["bus_skipped"] == {"out_read_length": 4096}
+    assert v["uncovered_dims"]["out_read_length"] == 4096
 
 
 def test_gate_does_not_scope_an_llm_authored_tb(tmp_path):
@@ -275,21 +272,19 @@ def test_gate_does_not_scope_without_the_scope_marker_in_the_artifact(tmp_path):
 def test_scope_can_be_switched_off(tmp_path, monkeypatch):
     pr = _project(tmp_path, RASTER_DIMS)
     tb, res = _conformance_tb(tmp_path, RASTER_DIMS)
-    assert pipeline_graph._maxgeo_gate_verdict(pr, tb, res)["advisory"] is True
+    assert pipeline_graph._maxgeo_gate_verdict(pr, tb, res)["verdict"] == "unknown"
     monkeypatch.setenv("CORESMITH_MAXGEO_CONFORMANCE_SCOPE", "0")
     v = pipeline_graph._maxgeo_gate_verdict(pr, tb, res)
     assert v is not None and v.get("advisory") is not True
 
 
-def test_a_bus_only_design_gets_a_clean_pass_not_an_advisory(tmp_path):
-    """When every declared maximum IS a bus maximum, the conformance TB covers
-    them all and the gate returns a plain pass -- the scope path is not
-    involved."""
+def test_a_bus_only_design_still_requires_executed_evidence(tmp_path):
+    """Even a complete declared bus scope needs successful case execution."""
     pr = _project(tmp_path, BUS_DIMS)
     tb, res = _conformance_tb(tmp_path, BUS_DIMS)
     v = pipeline_graph._maxgeo_gate_verdict(pr, tb, res)
-    # run3-followups: full coverage is an explicit PASS verdict, not None.
-    assert v is not None and v.get("verdict") == "pass"
+    # No successful owner-declared case was executed.
+    assert v is not None and v.get("verdict") == "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -479,13 +474,12 @@ def test_a_run_without_acceptance_cases_is_byte_identical(tmp_path):
         c, "chip_top", plan)
 
 
-def test_the_generated_max_geometry_tb_satisfies_the_gate(tmp_path):
-    """End-to-end through the PRODUCTION gate: the artifact the writer produces
-    is one the MAX-GEOMETRY gate accepts (pass or advisory), not a hard fail."""
+def test_the_generated_max_geometry_tb_requires_execution(tmp_path):
+    """A generated testbench artifact alone is not execution evidence."""
     pr = _generic_run(tmp_path)
     tb, res = _write_integration_tb(pr)
     v = pipeline_graph._maxgeo_gate_verdict(pr, tb, res)
-    assert v is None or v.get("verdict") == "pass" or v.get("advisory") is True, v
+    assert v is not None and v["verdict"] == "unknown"
 
 
 # ---------------------------------------------------------------------------
