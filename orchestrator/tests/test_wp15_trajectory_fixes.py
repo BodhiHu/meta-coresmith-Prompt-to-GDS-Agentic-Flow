@@ -33,6 +33,7 @@ def test_codex_agent_message_wins_over_error_event():
 
 def test_infra_markers_include_usage_limit():
     import inspect
+
     from orchestrator.langgraph import pipeline_graph as pg
     src = inspect.getsource(pg.diagnose_node)
     assert "usage limit" in src and "[ClaudeLLM error:" in src
