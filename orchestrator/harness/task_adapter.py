@@ -71,7 +71,8 @@ def adapter_path(project_root: str) -> str:
     """The task adapter for this project, or "" when none is declared."""
     envp = (os.environ.get("CORESMITH_TASK_ADAPTER", "") or "").strip()
     if envp:
-        return envp if Path(envp).exists() else ""
+        # WP-52: a DECLARED adapter that is missing is a defect, not "no adapter".
+        return envp if Path(envp).exists() else f"MISSING:{envp}"
     p = Path(project_root) / "inputs" / "task_adapter.py"
     return str(p) if p.exists() else ""
 
@@ -110,10 +111,15 @@ def assemble_candidate(project_root: str, top_rtl: str, block_rtls: Any) -> dict
     top_p = Path(top_rtl)
     if not top_rtl or not top_p.exists():
         return None
-    from orchestrator.harness.top_module import resolve_top
+    from orchestrator.harness.top_module import read_candidate_receipt, resolve_top
     _rt_mod, _rt_path = resolve_top(project_root)
+    _receipt_sources: list[str] = []
     if _rt_mod and _rt_path and Path(_rt_path).resolve() == top_p.resolve():
         top_module = _rt_mod                      # WP-49: the recorded candidate top
+        _rec = read_candidate_receipt(project_root) or {}
+        if str(_rec.get("top_module") or "") == _rt_mod:
+            _receipt_sources = [str(x) for x in (_rec.get("sources") or [])
+                                if Path(str(x)).exists()]
     else:
         text = top_p.read_text(encoding="utf-8", errors="replace")
         m = re.search(r"\bmodule\s+([A-Za-z_][A-Za-z0-9_]*)", text)
@@ -123,11 +129,15 @@ def assemble_candidate(project_root: str, top_rtl: str, block_rtls: Any) -> dict
     else:
         blocks = [str(p) for p in (block_rtls or []) if p]
     sources: list[str] = [str(top_p.resolve())]
+    # WP-54: a matching receipt supplies the EXACT recorded source list.
+    for rs in _receipt_sources:
+        if rs not in sources:
+            sources.append(rs)
     for b in blocks:
         rb = str(Path(b).resolve())
         if Path(rb).exists() and rb not in sources:
             sources.append(rb)
-    # a deterministically assembled Caravel top carries its pad adapter beside it
+    # a deterministically assembled chassis top carries its pad adapter beside it
     pads = top_p.with_name(top_p.stem + "_pads.v")
     if pads.exists() and str(pads.resolve()) not in sources:
         sources.append(str(pads.resolve()))
@@ -174,7 +184,7 @@ def _rows_and_violations(receipt: dict, declared: list[str]) -> tuple[list, list
             })
     budgets = receipt.get("budgets") or {}
     for bname, b in budgets.items():
-        if isinstance(b, dict) and b.get("ok") is False:
+        if not (isinstance(b, dict) and b.get("ok") is True):
             violations.append({
                 "type": "acceptance_dv_failure",
                 "criterion": "task_adapter_budget",
@@ -192,10 +202,19 @@ def run_task_adapter(project_root: str, top_rtl: str, block_rtls: Any = None) ->
     apath = adapter_path(project_root)
     if not apath:
         return None
+    if apath.startswith("MISSING:"):
+        return _incomplete(f"declared task adapter not found: {apath[8:]}",
+                           "adapter_defect", adapter=apath[8:])
     cand = assemble_candidate(project_root, top_rtl, block_rtls)
     if cand is None:
         return _incomplete(f"chip top RTL not found: {top_rtl}", "infrastructure_error",
                            adapter=apath)
+    # WP-54: the candidate must be the recorded one when a record exists.
+    from orchestrator.harness.top_module import resolve_top as _resolve_top
+    _rt_mod, _rt_path = _resolve_top(project_root)
+    if _rt_path and Path(_rt_path).resolve() != Path(top_rtl).resolve():
+        return _incomplete(f"the candidate top file {top_rtl!r} is not the recorded "
+                           f"candidate {_rt_path!r}", "oracle_incomplete", adapter=apath)
     hdr = read_header(apath)
     python = (os.environ.get("CORESMITH_TASK_ADAPTER_PYTHON", "") or
               hdr.get("python") or sys.executable)
@@ -241,6 +260,12 @@ def run_task_adapter(project_root: str, top_rtl: str, block_rtls: Any = None) ->
                            "adapter_defect" if r.returncode == 3 else "infrastructure_error",
                            adapter=apath, candidate_sha=cand["candidate_sha"],
                            captured_dir=str(keep), adapter_log=str(log_path))
+    if r.returncode != 0:
+        # WP-52: a receipt from a process that then failed is not a receipt.
+        return _incomplete(f"task adapter exited rc={r.returncode} after writing a receipt",
+                           "infrastructure_error", adapter=apath,
+                           candidate_sha=cand["candidate_sha"], captured_dir=str(keep),
+                           adapter_log=str(log_path))
     try:
         receipt = json.loads(receipt_json.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
@@ -281,7 +306,8 @@ def run_task_adapter(project_root: str, top_rtl: str, block_rtls: Any = None) ->
         return _incomplete("receipt has no cases dict", "oracle_incomplete", **common)
     missing = [n for n in declared if n not in cases]
     extra = [n for n in cases if n not in declared]
-    bad = [n for n in declared if n in cases and not isinstance((cases[n] or {}).get("ok"), bool)]
+    bad = [n for n in declared if n in cases and (not isinstance(cases[n], dict)
+                                                  or not isinstance(cases[n].get("ok"), bool))]
     if missing or extra or bad:
         return _incomplete(
             "receipt is incomplete: " + "; ".join(
@@ -290,6 +316,15 @@ def run_task_adapter(project_root: str, top_rtl: str, block_rtls: Any = None) ->
                             f"non-boolean ok {bad}" if bad else "") if s),
             "oracle_incomplete", **common, requested_cases=len(declared),
             completed_cases=len(declared) - len(missing) - len(bad))
+    # WP-52: budgets are validated like cases -- a dict per budget with a boolean ok.
+    _budgets = receipt.get("budgets")
+    if _budgets is not None and not isinstance(_budgets, dict):
+        return _incomplete("receipt budgets is not a dict", "oracle_incomplete", **common)
+    _bad_b = [k for k, v in (_budgets or {}).items()
+              if not isinstance(v, dict) or not isinstance(v.get("ok"), bool)]
+    if _bad_b:
+        return _incomplete(f"budget(s) without a boolean ok: {_bad_b}", "oracle_incomplete",
+                           **common)
     rows, violations, budgets = _rows_and_violations(receipt, declared)
     passed = all(r["ok"] for r in rows) and not violations
     kind = None

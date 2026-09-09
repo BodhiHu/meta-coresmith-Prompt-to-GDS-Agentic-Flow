@@ -168,17 +168,47 @@ SYSTEM_PROMPT = (
 # per design. Match such a block by name/description so the protocol-completeness
 # skill is injected ONLY for the block that owns the bus boundary, not every DSP
 # block.
-_QSPI_FRONTEND_TOKENS = (
-    "qspi", "frontend", "front_end", "io_subsystem", "io_sub", "iosub",
-    "io_ctrl", "io_bridge", "host_if", "hostif", "host_interface", "bus_if",
-    "gpio_ctrl", "io_frontend", "spi_slave", "regmap", "reg_map",
-)
+def _declared_bus(project_root: str) -> str:
+    """The host bus the task DECLARES (``inputs/task.yaml`` ``bus:`` under
+    ``interface``, or ``CORESMITH_BUS``), lower-cased; "" when none."""
+    import os as _os
+    env = (_os.environ.get("CORESMITH_BUS", "") or "").strip().lower()
+    if env:
+        return env
+    if not project_root:
+        return ""
+    ty = Path(project_root) / "inputs" / "task.yaml"
+    try:
+        for line in ty.read_text(encoding="utf-8", errors="replace").splitlines():
+            m = re.match(r"^\s*bus\s*:\s*['\"]?([A-Za-z0-9_]+)", line)
+            if m:
+                return m.group(1).lower()
+    except OSError:
+        pass
+    return ""
 
 
-def _is_qspi_frontend_block(block_name: str, description: str = "") -> bool:
-    """True when the block being authored owns the QSPI-slave bus boundary."""
-    hay = f"{block_name} {description}".lower()
-    return any(tok in hay for tok in _QSPI_FRONTEND_TOKENS)
+def _is_qspi_frontend_block(block_name: str, description: str = "",
+                            project_root: str = "") -> bool:
+    """True when the task declares a QSPI-slave host bus AND this block is
+    wired to the task's declared chassis top by a contract edge (WP-55).
+    Name substrings ("frontend", "regmap", ...) are not a declaration."""
+    if not project_root or "qspi" not in _declared_bus(project_root):
+        return False
+    try:
+        from orchestrator.chassis.profile import chassis_top
+        from orchestrator.harness.top_module import declared_top
+        from orchestrator.langgraph.integration_helpers import load_interface_contract_edges
+        top = declared_top(project_root) or chassis_top(project_root)
+        if not top:
+            return False
+        for e in load_interface_contract_edges(project_root):
+            ends = {e.get("producer_block"), e.get("consumer_block")}
+            if block_name in ends and top in ends:
+                return True
+    except Exception:  # noqa: BLE001
+        return False
+    return False
 
 
 def _pdk_budget_fragment(project_root: str = "") -> str:
@@ -699,7 +729,7 @@ class RTLGeneratorAgent:
             # MSB-nibble-first; drive-on-falling / sample-on-rising; prefetch the
             # registered read DURING the dummy phase so read data is not launched a
             # nibble early). Injected only for the bus-boundary block.
-            if _is_qspi_frontend_block(block_name, description):
+            if _is_qspi_frontend_block(block_name, description, project_root):
                 _fe_skill = _load_skills("qspi_slave_frontend_protocol")
                 if _fe_skill:
                     system_prompt = (

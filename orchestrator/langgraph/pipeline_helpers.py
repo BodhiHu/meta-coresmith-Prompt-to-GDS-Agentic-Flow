@@ -1128,13 +1128,27 @@ async def generate_uarch_specs_single_context(
                 pass
     call_start = _time.time()
     agent = UarchSpecGenerator(temperature=0.2)
-    await agent.generate_many(
-        blocks=blocks,
-        python_sources=python_sources,
-        feedback=feedback_by_block,
-        previous_specs=previous_specs,
-        project_root=str(PROJECT_ROOT),
-    )
+    try:
+        await agent.generate_many(
+            blocks=blocks,
+            python_sources=python_sources,
+            feedback=feedback_by_block,
+            previous_specs=previous_specs,
+            project_root=str(PROJECT_ROOT),
+        )
+    except Exception:
+        # WP-58: a spec file written before the generator raised is a PARTIAL
+        # artifact; quarantine it so a later existence check cannot adopt it.
+        for b in blocks:
+            name = b["name"]
+            p = spec_dir / f"{name}.md"
+            try:
+                if p.exists() and (name not in pre_mtime
+                                   or p.stat().st_mtime_ns != pre_mtime[name]):
+                    p.rename(p.with_name(f"{name}.md.rejected-{int(call_start)}"))
+            except OSError:
+                pass
+        raise
     session_id = getattr(getattr(agent, "llm", None), "last_session_id", "") or ""
     written: list[str] = []
     missing: list[str] = []

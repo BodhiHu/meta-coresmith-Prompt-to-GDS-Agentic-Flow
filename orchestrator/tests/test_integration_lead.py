@@ -1349,16 +1349,7 @@ endmodule
     def test_empty_chip_top_with_no_blocks_passes(self):
         assert assert_blocks_instantiated("", set()) is None
 
-    def test_accepts_exact_openframe_pad_adapter_instance(self):
-        chip_top = """\
-module chip_top;
-    reference_codec_openframe_pad_adapter u_openframe_project_wrapper ();
-endmodule
-"""
-        assert assert_blocks_instantiated(
-            chip_top, {"openframe_project_wrapper"}
-        ) is None
-
+    # WP-55: the codec-named pad-adapter waiver is gone; hierarchy is judged from the top.
     def test_rejects_misnamed_openframe_pad_adapter_instance(self):
         chip_top = """\
 module chip_top;

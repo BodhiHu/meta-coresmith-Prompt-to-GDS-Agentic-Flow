@@ -74,6 +74,8 @@ def locked_boundary_ports(project_root) -> tuple[str, ...]:
     p = resolve_profile(project_root)
     if p is not None:
         return p.locked_ports
+    if (os.environ.get("CORESMITH_CHASSIS", "") or "").strip().lower() in ("none", "0", "off"):
+        return ()            # WP-55: an explicit none means none
     seen: list[str] = []
     for prof in BUILTIN.values():
         for port in prof.locked_ports:

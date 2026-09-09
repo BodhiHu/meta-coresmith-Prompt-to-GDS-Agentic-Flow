@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import time
@@ -30,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 RECEIPT_REL = Path(".coresmith") / "candidate.json"
+_log = logging.getLogger(__name__)
 
 
 def declared_top(project_root) -> str:
@@ -114,6 +116,10 @@ def write_candidate_receipt(project_root, top_module: str, top_rtl_path: str,
     declare ``top_module`` -- a receipt never lies about its top."""
     if not module_declared_in(top_rtl_path, top_module):
         raise ValueError(f"{top_rtl_path} does not declare module {top_module!r}")
+    _declared = declared_top(project_root)
+    if _declared and top_module != _declared:
+        raise ValueError(f"the task declares top {_declared!r} but the candidate top is "
+                         f"{top_module!r}")
     sources = candidate_sources(project_root, top_rtl_path, block_rtls)
     receipt = {
         "top_module": top_module,
@@ -127,6 +133,19 @@ def write_candidate_receipt(project_root, top_module: str, top_rtl_path: str,
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(receipt, indent=1))
     return receipt
+
+
+def receipt_is_current(rec: dict) -> bool:
+    """True when every recorded source still exists and hashes to the recorded
+    candidate sha (WP-54): a receipt whose sources changed is stale."""
+    try:
+        sources = [str(x) for x in (rec.get("sources") or [])]
+        if not sources or any(not Path(s).exists() for s in sources):
+            return False
+        return candidate_sha(str(rec.get("top_module") or ""), sources) == \
+            str(rec.get("candidate_sha") or "")
+    except OSError:
+        return False
 
 
 def read_candidate_receipt(project_root) -> dict | None:
@@ -145,8 +164,11 @@ def resolve_top(project_root) -> tuple[str, str]:
     rec = read_candidate_receipt(project_root)
     if rec:
         mod, path = str(rec.get("top_module") or ""), str(rec.get("top_rtl_path") or "")
-        if mod and path and module_declared_in(path, mod):
+        if mod and path and module_declared_in(path, mod) and receipt_is_current(rec):
             return mod, path
+        if rec:
+            _log.warning("candidate receipt is stale or inconsistent (%s); ignoring it",
+                         path or "?")
     try:
         ir = json.loads((Path(project_root) / ".coresmith" / "integration_result.json")
                         .read_text(encoding="utf-8"))

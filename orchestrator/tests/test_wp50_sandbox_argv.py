@@ -28,8 +28,8 @@ def test_project_root_from_env(monkeypatch):
     assert "--add-dir" not in cmd
 
 
-def test_resume_drops_add_dir_when_unsupported(monkeypatch):
+def test_resume_without_the_boundary_becomes_a_fresh_call(monkeypatch):
     monkeypatch.setenv("CORESMITH_CODEX_RESUME", "1")
     cmd = ClaudeLLM._build_codex_cmd("/x/codex", "m", "/wd", "workspace-write", "sess",
                                      supported_flags=frozenset({"--json", "-C", "-m"}), project_root="/proj")
-    assert "--add-dir" not in cmd and "/proj" not in cmd
+    assert "resume" not in cmd and cmd[cmd.index("--add-dir") + 1] == "/proj"

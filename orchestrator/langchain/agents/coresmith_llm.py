@@ -1743,6 +1743,12 @@ class ClaudeLLM:
         """
         head: list[str] = [codex_path, "exec"]
         is_resume = bool(resume_session_id) and ClaudeLLM._codex_resume_enabled()
+        _bypass_early = (sandbox or "").strip() == "danger-full-access"
+        if (is_resume and supported_flags is not None and not _bypass_early
+                and not {"--sandbox", "--add-dir"} <= set(supported_flags)):
+            # WP-56: never resume WITHOUT the write boundary. A CLI whose
+            # `exec resume` cannot carry --sandbox/--add-dir gets a fresh call.
+            is_resume = False
         if is_resume:
             head += ["resume", resume_session_id]
 

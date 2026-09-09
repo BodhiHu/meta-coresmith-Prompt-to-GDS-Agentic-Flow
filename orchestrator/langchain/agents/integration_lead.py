@@ -294,7 +294,7 @@ class IntegrationLeadAgent:
 _INST_RE = re.compile(r"\b([A-Za-z_]\w*)\s+(?:#\s*\([^;]*?\)\s*)?[A-Za-z_\\]\w*\s*\(")
 
 
-def _reachable_hierarchy(top_code: str, other_codes: list[str]) -> str:
+def _reachable_hierarchy(top_code: str, other_codes: list[str], top_module: str = "") -> str:
     """The bodies of every module reachable by instantiation from the modules
     defined in ``top_code`` (WP-49). Comments are already stripped."""
     bodies: dict[str, str] = {}
@@ -302,7 +302,15 @@ def _reachable_hierarchy(top_code: str, other_codes: list[str]) -> str:
         for m in re.finditer(r"\bmodule\s+([A-Za-z_]\w*)", text):
             end = text.find("endmodule", m.end())
             bodies.setdefault(m.group(1), text[m.start():end if end != -1 else len(text)])
-    frontier = re.findall(r"\bmodule\s+([A-Za-z_]\w*)", top_code)
+    _declared = re.findall(r"\bmodule\s+([A-Za-z_]\w*)", top_code)
+    if top_module and top_module in bodies:
+        frontier = [top_module]
+    else:
+        # no selected top: the roots are the modules of the top file that no
+        # other module in the top file instantiates
+        _inst_in_top = {im.group(1) for name in _declared
+                        for im in _INST_RE.finditer(bodies.get(name, ""))}
+        frontier = [n for n in _declared if n not in _inst_in_top] or list(_declared)
     reachable: list[str] = []
     while frontier:
         name = frontier.pop()
@@ -318,6 +326,7 @@ def _reachable_hierarchy(top_code: str, other_codes: list[str]) -> str:
 
 def assert_blocks_instantiated(
     chip_top_verilog: str, expected_block_names: set[str], sources=None,
+    top_module: str = "",
 ) -> str | None:
     """Postcondition: every expected block must appear as an instantiation
     inside the Integration Lead's chip_top Verilog. Returns None on success
@@ -335,12 +344,18 @@ def assert_blocks_instantiated(
     # appear only in commentary.
     code = re.sub(r"//[^\n]*", "", chip_top_verilog)
     code = re.sub(r"/\*.*?\*/", "", code, flags=re.DOTALL)
-    if sources:
-        # WP-49: only modules reachable from the top count; text that merely
-        # sits in a neighbouring file (or an unreferenced module) does not.
-        _others = [re.sub(r"/\*.*?\*/", "", re.sub(r"//[^\n]*", "", str(t)), flags=re.DOTALL)
+    if sources is not None:
+        # WP-49/WP-54: only modules reachable from the SELECTED top count; the
+        # lint/sim preprocessor view applies (an instance inside an inactive
+        # `ifdef branch does not count); a same-file orphan module does not count.
+        try:
+            from orchestrator.langgraph.contract_conformance import strip_preprocessor as _spp
+        except Exception:  # noqa: BLE001
+            _spp = lambda t, defines=(): t  # noqa: E731
+        code = _spp(code)
+        _others = [_spp(re.sub(r"/\*.*?\*/", "", re.sub(r"//[^\n]*", "", str(t)), flags=re.DOTALL))
                    for t in sources if t]
-        code = _reachable_hierarchy(code, _others)
+        code = _reachable_hierarchy(code, _others, top_module=top_module)
 
     # Modules DEFINED in the chip_top file: a tier-1 block NAMED like one of
     # them (the Caravel `user_project_wrapper` collision -- the pad-adapter
@@ -355,16 +370,6 @@ def assert_blocks_instantiated(
     for block_name in expected_block_names:
         if block_name in defined_here and re.search(
             rf"\b{re.escape(block_name)}_pads\s+(?:#|[a-zA-Z_]\w*\s*\()",
-            code,
-        ):
-            continue
-        # The delivered Caravel openframe_project_wrapper exposes only the
-        # frozen io_in/io_out/io_oeb pad surface; its internal shuttle wires
-        # are therefore represented in an integration top by a local pad
-        # adapter. Accept only the exact, block-named adapter instance so the
-        # structural guard still proves that this wrapper role was not dropped.
-        if block_name == "openframe_project_wrapper" and re.search(
-            r"\breference_codec_openframe_pad_adapter\s+u_openframe_project_wrapper\s*\(",
             code,
         ):
             continue

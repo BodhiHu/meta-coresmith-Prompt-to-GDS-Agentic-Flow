@@ -645,6 +645,16 @@ def classify_bus_verdict(
     graded boundary" (loud, fail-closed) from "not a QSPI-slave design at all"
     (an honest advisory), instead of collapsing both into ``None``.
     """
+    # WP-55: an explicit "no chassis" declaration means no locked pad boundary:
+    # the QSPI boundary classifier does not apply (a generic QSPI design need
+    # not be a Caravel submission).
+    import os as _os
+    if (_os.environ.get("CORESMITH_CHASSIS", "") or "").strip().lower() in ("none", "0", "off"):
+        return BusVerdict(status="no_chassis", contract=None, boundary=None,
+                          spec_says_qspi=False, connections_say_qspi=False,
+                          simulated_top=top_module or "",
+                          reason="CORESMITH_CHASSIS=none: no locked pad boundary is "
+                                 "declared; the QSPI pin-boundary classifier does not apply")
     spec_qspi = _bus_protocol_says_qspi(project_root)
     conn_qspi = _connections_have_qspi(connections)
     corroborated = spec_qspi or conn_qspi

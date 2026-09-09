@@ -3190,36 +3190,28 @@ def _evaluate_ppa_gate(
     return _flag(verdict.reasons, verdict.checks)
 
 
-def _resolve_probe_top(design_name: str, top_txt: str) -> str:
-    """Resolve the module the chip-top synthesizability probe should target.
+def _resolve_probe_top(design_name: str, top_txt: str, project_root: str = "") -> str:
+    """The module the chip-top synthesizability probe targets (WP-54).
 
-    C24 originally assumed "the top is conventionally last" -- but the arm-U
-    integration lead declared the real top FIRST and a small glue adapter
-    (`syntax_start_final_frame_adapter`) last, so the gate probed the adapter,
-    counted 1 gate cell, and failed a chip whose real top synthesizes to
-    158k cells with both DV stages green. Preference order:
-
-    1. a Caravel/openframe wrapper module (deterministic assembly tops),
-    2. a module matching ``design_name`` exactly,
-    3. the unique module never instantiated inside the file (a true top has
-       no instantiation sites; helpers appear again at their use),
-    4. the last-declared module (original C24 convention),
-    5. ``design_name`` verbatim when the file declares nothing.
+    The recorded candidate top (receipt / integration record) wins; else the
+    design name when the file declares it; else the file's only module; else
+    the design name verbatim. No chassis-name preference and no "the module
+    nobody instantiates" guess (review round 3 showed both overriding an
+    explicit top).
     """
+    if project_root:
+        try:
+            from orchestrator.harness.top_module import resolve_top as _resolve_top
+            _mod, _ = _resolve_top(project_root)
+            if _mod:
+                return _mod
+        except Exception:  # noqa: BLE001
+            pass
     mods = re.findall(r"^\s*module\s+([A-Za-z_]\w*)", top_txt or "", re.M)
-    for pref in ("openframe_project_wrapper", "user_project_wrapper"):
-        if pref in mods:
-            return pref
     if design_name in mods:
         return design_name
-    if mods:
-        uninstantiated = [
-            m for m in mods
-            if len(re.findall(rf"\b{re.escape(m)}\b", top_txt)) == 1
-        ]
-        if len(uninstantiated) == 1:
-            return uninstantiated[0]
-        return mods[-1]
+    if len(mods) == 1:
+        return mods[0]
     return design_name
 
 
@@ -3313,7 +3305,7 @@ def _chip_top_synth_ok(
         _top_txt = Path(top_rtl_path).read_text(errors="ignore")
     except OSError:
         _top_txt = ""
-    _top_name = _resolve_probe_top(design_name, _top_txt)
+    _top_name = _resolve_probe_top(design_name, _top_txt, project_root=project_root)
     # F3 (audit): a run may DELIVER a separate locked-ABI top at
     # rtl/chip_top.v (e.g. the ppab_dut chassis contract) that is NOT part of
     # the assembled manifest -- two near-equivalent tops that silently drift
@@ -5590,6 +5582,32 @@ def _revise_named_blocks(response: dict, candidates: list[str]) -> list[str]:
     return [c for c in candidates if c in named]
 
 
+def _adopt_reviewed_specs(pr: str, edited_blocks, reviewed_specs) -> list[str]:
+    """WP-58: copy every reviewed spec over its canonical file atomically
+    (write to a temp file, then replace). Returns the blocks adopted; a block
+    whose copy failed is NOT in the list and its canonical spec is untouched."""
+    import shutil as _shutil
+    import tempfile as _tempfile
+    spec_dir = Path(pr) / "arch" / "uarch_specs"
+    adopted: list[str] = []
+    for name in list(edited_blocks or []):
+        src = (reviewed_specs or {}).get(name)
+        canonical = spec_dir / f"{name}.md"
+        try:
+            if not src or not Path(src).exists() or Path(src).resolve() == canonical.resolve():
+                continue
+            canonical.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp = _tempfile.mkstemp(prefix=f".{name}.", suffix=".md", dir=str(canonical.parent))
+            os.close(fd)
+            _shutil.copy2(src, tmp)
+            os.replace(tmp, canonical)
+            os.utime(canonical, None)
+            adopted.append(name)
+        except OSError as exc:
+            log(f"  [INTEGRATION REVIEW] {name}: could not adopt reviewed spec: {exc}", RED)
+    return adopted
+
+
 def _plan_targeted_revise(
     pr: str,
     response: dict,
@@ -5625,6 +5643,7 @@ def _plan_targeted_revise(
                 or review_summary.strip())
     spec_dir = Path(pr) / "arch" / "uarch_specs"
     plan: dict[str, bool] = {}
+    adopt_failed: set[str] = set()    # WP-58: a spec that failed to copy is not reusable
     for name in scope:
         canonical = spec_dir / f"{name}.md"
         if name in edited:
@@ -5637,8 +5656,9 @@ def _plan_targeted_revise(
                     log(f"  [INTEGRATION REVIEW] {name}: adopted the reviewed spec "
                         f"({src})", YELLOW)
             except OSError as exc:
+                adopt_failed.add(name)
                 log(f"  [INTEGRATION REVIEW] {name}: could not adopt reviewed "
-                    f"spec: {exc}", RED)
+                    f"spec: {exc} -- the block will re-spec, not reuse", RED)
         # A named block (or an unscoped whole-tier revise) re-specs with the
         # chip lead's findings; an edited-only block implements the reviewed
         # spec as-is; a failed-only block retries its RTL against its spec.
@@ -5654,7 +5674,7 @@ def _plan_targeted_revise(
                     )
             except OSError:
                 pass
-        plan[name] = bool(canonical.exists()) and not needs_respec
+        plan[name] = bool(canonical.exists()) and not needs_respec and name not in adopt_failed
         try:
             _db(pr).clear_result(name, "best")
         except Exception:  # noqa: BLE001 - never block the revise on bookkeeping
@@ -5846,9 +5866,16 @@ async def integration_review_node(state: OrchestratorState) -> dict:
             )
             action = "revise"
         else:
+            # WP-58: the explicit approve stands (auto-revise looped: the review
+            # agent edits specs cosmetically on every pass), but the approved
+            # state must be the EDITED specs, not the old canonical copies:
+            # adopt every reviewed edit atomically and record which blocks now
+            # carry a spec newer than their RTL.
+            _adopted = _adopt_reviewed_specs(pr, edited_blocks, reviewed_specs)
             log(
                 "  [INTEGRATION REVIEW] Spec edits were made; honoring explicit "
-                "approve (integration_check at RTL level will catch real mismatches). "
+                f"approve and adopting the reviewed specs as canonical ({_adopted}). "
+                "integration_check at RTL level catches real mismatches. "
                 "Export CORESMITH_STRICT_INTEGRATION_REVIEW=1 to force revise.",
                 YELLOW,
             )
@@ -6742,7 +6769,12 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                 from orchestrator.harness.top_module import write_candidate_receipt
                 write_candidate_receipt(pr, top_name, output_path, rtl_paths,
                                         note="single-block passthrough")
-            except (ValueError, OSError) as _exc:
+            except ValueError as _exc:
+                # WP-54: a single-block top that contradicts the declared top parks
+                return {"integration_result": await _park_caravel_assembly_failure(
+                    pr, design_name, rtl_paths, "top module mismatch", [str(_exc)],
+                    output_path)}
+            except OSError as _exc:
                 log(f"  [INTEGRATION] candidate receipt skipped: {_exc}", YELLOW)
             return {"integration_result": integration_result}
 
@@ -6753,13 +6785,13 @@ async def integration_check_node(state: OrchestratorState) -> dict:
         # Lead LLM, which named the top after the design and treated the pad
         # adapter as a peer block -- so the daemon never delivered a gradeable
         # wired top and every chip-lead hand-assembled one.
+        from orchestrator.chassis.profile import chassis_top
+        from orchestrator.harness.top_module import declared_top as _declared_top_fn
         from orchestrator.langgraph.integration_helpers import (
             detect_wrapper_block,
             generate_caravel_wrapper_top,
             load_interface_contract_edges,
         )
-        from orchestrator.chassis.profile import chassis_top
-        from orchestrator.harness.top_module import declared_top as _declared_top_fn
         # WP-51: the wrapper block is the one named as the task's declared top.
         _wrapper_block = detect_wrapper_block(
             modules, _declared_top_fn(pr) or chassis_top(pr) or "")
@@ -6885,6 +6917,14 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                 # Integration Lead + integration_failure interrupt, the same
                 # fail-closed retry path the generic branch uses.
                 if lint_clean and not missing:
+                    from orchestrator.harness.top_module import write_candidate_receipt
+                    try:   # WP-49/54: the receipt (declared-top check) BEFORE the record
+                        write_candidate_receipt(pr, "user_project_wrapper", top_rtl_path,
+                                                asm["lint_block_paths"], note="caravel assembly")
+                    except ValueError as _exc:
+                        return {"integration_result": await _park_caravel_assembly_failure(
+                            pr, design_name, rtl_paths, "top module mismatch",
+                            [str(_exc)], top_rtl_path)}
                     # WP-27: persist the record the backend (WP-17b) and the
                     # graders read; this branch never wrote it, so a stale
                     # Integration-Lead result named the wrong top.
@@ -6894,14 +6934,6 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                         _ir_path.write_text(json.dumps(integration_result, indent=2, default=str))
                     except OSError:
                         pass
-                    from orchestrator.harness.top_module import write_candidate_receipt
-                    try:   # WP-49: the candidate receipt (top, file, sources, sha)
-                        write_candidate_receipt(pr, "user_project_wrapper", top_rtl_path,
-                                                asm["lint_block_paths"], note="caravel assembly")
-                    except ValueError as _exc:
-                        return {"integration_result": await _park_caravel_assembly_failure(
-                            pr, design_name, rtl_paths, "top module not declared",
-                            [str(_exc)], top_rtl_path)}
                     return {"integration_result": integration_result}
                 _errs = [ln for ln in str(lint_result.get("errors", "")).splitlines()
                          if ln.strip()][:20]
@@ -7031,6 +7063,7 @@ async def integration_check_node(state: OrchestratorState) -> dict:
             pass
         postcond = assert_blocks_instantiated(
             chip_top_text, set(block_rtl_sources.keys()), sources=_hier_sources,
+            top_module=module_name,
         )
         if postcond:
             log(f"  [INTEGRATION] Postcondition failed: {postcond}", RED)
@@ -7151,16 +7184,6 @@ async def integration_check_node(state: OrchestratorState) -> dict:
             },
         }
 
-        # B3: persist the assembled integration result so the harness
-        # (`coresmith verify chip`) can resolve top_rtl_path + block_rtl_paths
-        # after the daemon parks. Best-effort -- never fails the node.
-        try:
-            _ir_path = Path(pr) / ".coresmith" / "integration_result.json"
-            _ir_path.parent.mkdir(parents=True, exist_ok=True)
-            _ir_path.write_text(json.dumps(integration_result, indent=2, default=str))
-        except Exception:  # noqa: BLE001
-            pass
-
         # WP-49: the produced top must be the task's declared top, and the
         # candidate is recorded once (top, file, exact sources, sha).
         from orchestrator.harness.top_module import declared_top, write_candidate_receipt
@@ -7182,6 +7205,16 @@ async def integration_check_node(state: OrchestratorState) -> dict:
         else:
             log(f"  [INTEGRATION] no top file on disk ({top_rtl_path!r}); "
                 "candidate receipt skipped", YELLOW)
+        # B3: persist the assembled integration result so the harness
+        # (`coresmith verify chip`) can resolve top_rtl_path + block_rtl_paths
+        # after the daemon parks. Best-effort -- never fails the node.
+        try:
+            _ir_path = Path(pr) / ".coresmith" / "integration_result.json"
+            _ir_path.parent.mkdir(parents=True, exist_ok=True)
+            _ir_path.write_text(json.dumps(integration_result, indent=2, default=str))
+        except Exception:  # noqa: BLE001
+            pass
+
         has_issues = len(errors) > 0 or not lint_clean
         if has_issues:
             log("  [INTEGRATION] Issues found -- interrupting for review", YELLOW)
@@ -9511,9 +9544,9 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
                     for c in _acc_cases
                 ]
                 _acc_log = (
-                    "RTL ACCEPTANCE DV FAILED (mission-scale stream run + the "
-                    "task's acceptance predicate):\n" + "\n".join(_acc_lines)
-                    + "\nCaptured RTL output streams: "
+                    "TASK ACCEPTANCE FAILED (the task's declared oracle on the "
+                    "assembled candidate):\n" + "\n".join(_acc_lines)
+                    + "\nCaptured oracle artifacts: "
                     + (_acc.get("captured_dir") or str(Path(pr) / ".coresmith" / "acceptance_dv"))
                     + "\nViolations: " + json.dumps(
                         _acc.get("violations", []), default=str)[:1500]
@@ -9527,17 +9560,16 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
                     "affected_blocks": [],
                     "outer_agent_summary": (
                         f"{sum(1 for c in _acc_cases if c.get('ok') is False)}/"
-                        f"{len(_acc_cases)} mission-scale acceptance case(s) fail "
-                        "the task's acceptance predicate (e.g. the external "
-                        "decoder rejects the stream). The block-level and "
-                        "validation testbenches all passed, so the defect is in "
-                        "something they never checked end-to-end: run the task's "
-                        "grader/decoder on the captured stream to localise it."
+                        f"{len(_acc_cases)} acceptance case(s) fail the task's "
+                        "declared oracle (per-case kind/detail above). Earlier "
+                        "block-level checks passed, so the defect is in what they "
+                        "did not measure end-to-end: run the task's checker on the "
+                        "captured artifacts to localise it."
                     ),
                     "suggested_fix": (
-                        "Grade the captured stream(s) offline with the task's "
-                        "grader (inputs/), read its error (which macroblock / "
-                        "sample / field), map that to the responsible block, "
+                        "Run the task's checker offline on the captured "
+                        "artifacts, read its error (which unit / sample / field), "
+                        "map that to the responsible block, "
                         "fix the RTL (fix_rtl) or the block's spec (revise)."
                     ),
                 }
@@ -9611,8 +9643,54 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
                                       if k != "cases"},
                     "violations": _acc.get("violations", []),
                 }, "pipeline_done": False}
-        except Exception as _exc:  # noqa: BLE001 - never crash the node
-            log(f"  [ACCEPTANCE-DV] gate error (skipped): {_exc}", YELLOW)
+        except Exception as _exc:  # noqa: BLE001
+            # WP-52: a required oracle that RAISES parks as oracle_incomplete;
+            # it never "skips" into the rest of signoff.
+            log(f"  [ACCEPTANCE-DV] gate raised: {_exc!r} -- parking", RED)
+            _exc_acc = {
+                "passed": False, "skipped": False, "oracle_incomplete": True,
+                "kind": "infrastructure_error",
+                "reason": f"acceptance gate raised: {_exc!r}", "cases": [],
+                "violations": [{"type": "acceptance_dv_failure",
+                                "criterion": "acceptance_dv_oracle_incomplete",
+                                "kind": "infrastructure_error",
+                                "suggested_fix": "Not an RTL verdict: the acceptance gate "
+                                                 "itself failed. Fix the adapter / engine, "
+                                                 "then retry."}],
+            }
+            _exc_audit = {
+                "category": "ACCEPTANCE_ORACLE_INCOMPLETE", "local_fix_possible": None,
+                "recommended_action": "retry", "affected_blocks": [],
+                "outer_agent_summary": f"the acceptance gate raised: {str(_exc)[:400]}",
+                "suggested_fix": "retry after the operator fixes the adapter / engine",
+            }
+            write_graph_event(pr, "Validation DV", "graph_node_exit", {
+                "action": "pending_decision", "passed": False,
+                "phase": "acceptance_dv", "error": str(_exc)[:300],
+            })
+            return {"validation_dv_result": {
+                "passed": False, "pending_decision": True,
+                "interrupt_payload": {
+                    "type": "validation_dv_failure", "phase": "acceptance_dv",
+                    "design_name": design_name, "top_rtl_path": top_rtl_path,
+                    "testbench_path": "", "test_count": 0, "requirement_count": 0,
+                    "sim_log": f"acceptance gate raised: {_exc!r}"[-3000:],
+                    "sim_log_path": "", "block_rtl_paths": block_rtl_paths,
+                    "contract_audit": _exc_audit, "contract_audit_path": "",
+                    "acceptance_dv": _exc_acc,
+                    "supported_actions": ["retry", "abort"],
+                    "outer_agent_guidance": (
+                        "The acceptance ORACLE raised an exception (see sim_log). "
+                        "This is NOT an RTL verdict: do not change RTL for it; the "
+                        "operator fixes the adapter / engine, then retry."),
+                    "reference_files": {"top_rtl": top_rtl_path},
+                },
+                "error": f"acceptance gate raised: {_exc!r}",
+                "phase": "acceptance_dv", "test_count": 0, "requirement_count": 0,
+                "testbench_path": "", "design_name": design_name,
+                "contract_audit": _exc_audit, "contract_audit_path": "",
+                "acceptance_dv": _exc_acc, "violations": _exc_acc["violations"],
+            }, "pipeline_done": False}
 
         if not top_rtl_path or not Path(top_rtl_path).exists():
             msg = "No top-level RTL available for Validation DV"

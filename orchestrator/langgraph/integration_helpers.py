@@ -939,7 +939,9 @@ def detect_wrapper_block(modules: dict[str, VerilogModule], top_name: str = "") 
     """The block that IS the declared chassis top (WP-51): matched by name
     only -- the block key or its module name equals ``top_name`` (default: the
     Caravel chassis top). No port-pattern inference."""
-    want = top_name or CARAVEL_TOP_MODULE
+    if not top_name:
+        return None        # WP-55: no declared top, no wrapper block (no default chassis)
+    want = top_name
     if want in modules:
         return want
     for name, mod in modules.items():
@@ -957,7 +959,8 @@ def _contract_signal_names(edge: dict) -> list[str]:
                 for f in (edge.get("fields") or [])] + \
                [s.get("name") if isinstance(s, dict) else s
                 for s in (edge.get("sideband_signals") or [])]
-    if not any(declared):
+    from orchestrator.langgraph.contract_conformance import signal_specs as _specs
+    if not any(declared) and not _specs(edge):
         return []          # a legacy edge: the name-keyed fallback applies
     # WP-46: ONE derivation shared with the conformance gate and the RTL
     # prompt (signal_specs): fields + sidebands + the handshake strobes the
@@ -1084,23 +1087,23 @@ def load_interface_contract_edges(project_root: str) -> list[dict]:
         cb = c.get("consumer_block") or c.get("to_block")
         if not pb or not cb or pb == cb:
             continue
-        edges.append({
+        # WP-53: keep EVERY declared key (handshake_protocol, flow_control_policy,
+        # aliases ...): the shared projection derives the valid/ready strobes from
+        # handshake_protocol, and dropping it here left every loaded valid_only edge
+        # without its strobe -- the assembler then tied `start_valid` to 1'b0
+        # with zero hazards.
+        e = dict(c)
+        e.update({
             "producer_block": pb,
             "consumer_block": cb,
             "producer_port": c.get("producer_port") or c.get("from_port") or "",
             "consumer_port": c.get("consumer_port") or c.get("to_port") or "",
             "data_width": c.get("data_width_bits") or c.get("data_width") or 0,
             "edge_id": c.get("edge_id") or f"{pb}__to__{cb}",
-            # Carry the channel SIGNAL LIST through. The contract declares every
-            # signal on the edge (fields = payload, sideband_signals =
-            # everything else, union = the port set); dropping them here forced
-            # the assembler to re-derive the port set from a naming convention
-            # and to pair the two ends positionally against each other. With the
-            # list present each end resolves against the CONTRACT instead, so
-            # the two ends never have to agree on spelling.
             "fields": c.get("fields") or [],
             "sideband_signals": c.get("sideband_signals") or [],
         })
+        edges.append(e)
     return edges
 
 
@@ -1197,7 +1200,8 @@ def generate_caravel_wrapper_top(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if wrapper_block is None:
-        wrapper_block = detect_wrapper_block(modules)
+        # the Caravel assembler IS the Caravel plugin: its own top name applies
+        wrapper_block = detect_wrapper_block(modules, CARAVEL_TOP_MODULE)
 
     # A declared pin map REPLACES the pin-adapter block. The adapter existed
     # only to translate pad bits into named signals, and the top now does that
@@ -2258,6 +2262,7 @@ def chip_rtl_sources(
     top_rtl_path: str,
     block_rtl_paths: dict[str, str],
     dedup_dir=None,
+    top_module: str = "",
 ) -> list[str]:
     """Every Verilog source needed to elaborate the ASSEMBLED chip, top first.
 
@@ -2278,13 +2283,14 @@ def chip_rtl_sources(
     # reference then elaborates a hollow chip and honestly fails, so the gate
     # reports not_run on a design that is fine. The top provides its own
     # module; a file re-declaring it leaves the list, stubs and all.
-    _top_mod = ""
-    try:
-        _top_text = Path(top_rtl_path).read_text(errors="replace")
-        _m = re.search(r"\bmodule\s+([A-Za-z_]\w*)", _top_text)
-        _top_mod = _m.group(1) if _m else ""
-    except OSError:
-        pass
+    _top_mod = top_module        # WP-54: the recorded top, never the first `module`
+    if not _top_mod:
+        try:
+            _top_text = Path(top_rtl_path).read_text(errors="replace")
+            _m = re.search(r"\bmodule\s+([A-Za-z_]\w*)", _top_text)
+            _top_mod = _m.group(1) if _m else ""
+        except OSError:
+            pass
     for bp in block_rtl_paths.values():
         if not Path(bp).exists() or bp == top_rtl_path:
             continue
@@ -2528,16 +2534,17 @@ def run_integration_simulation(
     # graded module. Honor design_name when that module is declared in the file;
     # retain the historical file-stem fallback for ordinary generated tops.
     safe_name = Path(top_rtl_path).stem
+    # WP-54: the recorded candidate top first; the design name only when the
+    # file declares it; the file stem last.
     try:
-        _top_source = Path(top_rtl_path).read_text(
-            encoding="utf-8", errors="replace"
-        )
-        if re.search(
-            rf"^\s*module\s+{re.escape(design_name)}\b",
-            _top_source,
-            re.MULTILINE,
-        ):
-            safe_name = design_name
+        from orchestrator.harness.top_module import resolve_top as _resolve_top
+        _rt_mod, _rt_path = _resolve_top(project_root) if project_root else ("", "")
+        if _rt_mod and _rt_path and Path(_rt_path).resolve() == Path(top_rtl_path).resolve():
+            safe_name = _rt_mod
+        else:
+            _top_source = Path(top_rtl_path).read_text(encoding="utf-8", errors="replace")
+            if re.search(rf"^\s*module\s+{re.escape(design_name)}\b", _top_source, re.MULTILINE):
+                safe_name = design_name
     except OSError:
         pass
 
