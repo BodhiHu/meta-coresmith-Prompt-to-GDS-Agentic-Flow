@@ -268,20 +268,31 @@ class TestResolveProbeTop:
         assert pipeline_graph._resolve_probe_top(
             "h264_encoder_core_top", self.REAL) == "h264_encoder_core_top"
 
-    def test_uninstantiated_module_wins_when_design_name_absent(self):
+    def test_ambiguous_file_without_a_record_returns_the_design_name(self):
+        """WP-54: no 'uninstantiated module wins' and no last-declared guess. Without a
+        candidate receipt the probe targets the design name and lets elaboration fail
+        loudly if the file does not declare it."""
         assert pipeline_graph._resolve_probe_top(
-            "some_other_design", self.REAL) == "h264_encoder_core_top"
+            "some_other_design", self.REAL) == "some_other_design"
+        txt = ("module top_a (input clk);\nendmodule\n"
+               "module top_b (input clk);\nendmodule\n")
+        assert pipeline_graph._resolve_probe_top("neither", txt) == "neither"
 
-    def test_caravel_wrapper_preferred(self):
+    def test_no_chassis_name_preference(self):
+        """WP-54: a chassis-named module in the file does not override the design name."""
         txt = ("module user_project_wrapper (input clk);\nendmodule\n"
                + self.REAL)
         assert pipeline_graph._resolve_probe_top(
-            "h264_encoder_core_top", txt) == "user_project_wrapper"
+            "h264_encoder_core_top", txt) == "h264_encoder_core_top"
 
-    def test_last_declared_fallback_when_ambiguous(self):
-        txt = ("module top_a (input clk);\nendmodule\n"
-               "module top_b (input clk);\nendmodule\n")
-        assert pipeline_graph._resolve_probe_top("neither", txt) == "top_b"
+    def test_recorded_candidate_wins(self, tmp_path):
+        from orchestrator.harness.top_module import write_candidate_receipt
+        (tmp_path / "rtl").mkdir()
+        top = tmp_path / "rtl" / "t.v"
+        top.write_text(self.REAL)
+        write_candidate_receipt(tmp_path, "syntax_adapter", str(top), {})
+        assert pipeline_graph._resolve_probe_top(
+            "h264_encoder_core_top", self.REAL, project_root=str(tmp_path)) == "syntax_adapter"
 
     def test_single_module_file(self):
         txt = "module only_top (input clk);\nendmodule\n"

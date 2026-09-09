@@ -163,7 +163,9 @@ class TestTheConsequenceThatActuallyBit:
                 modules[name] = mod
 
         assert len(modules) == 2
-        assert detect_wrapper_block(modules) == "user_project_wrapper_io"
+        # WP-55: the wrapper block is matched by the DECLARED top name (block key or module name)
+        assert detect_wrapper_block(modules) is None
+        assert detect_wrapper_block(modules, "user_project_wrapper_io") == "user_project_wrapper_io"
         # And the pre-fix state, for contrast: without the pad block there is
         # no Caravel boundary to find and the flow silently takes the LLM path.
         assert detect_wrapper_block(
