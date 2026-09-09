@@ -22,7 +22,7 @@ from pathlib import Path
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 4:
+    if len(argv) not in (4, 5):
         print("usage: task_adapter_runner.py <adapter.py> <candidate.json> <receipt.json>",
               file=sys.stderr)
         return 2
@@ -46,7 +46,7 @@ def main(argv: list[str]) -> int:
         "adapter": str(apath),
         "candidate_sha": candidate.get("candidate_sha"),
     }
-    workdir = rpath.parent / "work"
+    workdir = Path(argv[4]) if len(argv) == 5 else rpath.parent / "work"
     workdir.mkdir(parents=True, exist_ok=True)
     try:
         result = grade(candidate, str(workdir))

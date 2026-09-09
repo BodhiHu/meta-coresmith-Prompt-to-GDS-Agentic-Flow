@@ -621,7 +621,7 @@ async def run_start(req: StartRequest):
     # B3: persist the resolved block queue + initialize the scoreboard schema +
     # snapshot the oracle manifest so the harness (`coresmith verify ...`) can
     # resolve blocks and detect oracle tampering after the daemon parks. All
-    # best-effort -- must never block starting a run.
+    # Queue/schema exports are best-effort; trust capture must succeed.
     try:
         from orchestrator.harness.blocks import persist_block_queue
         persist_block_queue(_PROJECT_ROOT, block_queue)
@@ -632,11 +632,11 @@ async def run_start(req: StartRequest):
         Scoreboard(_PROJECT_ROOT).ensure_schema()
     except Exception:  # noqa: BLE001
         pass
+    from orchestrator.state_store.trust import capture_run_baseline
     try:
-        from orchestrator.state_store.trust import write_oracle_manifest
-        write_oracle_manifest(_PROJECT_ROOT)
-    except Exception:  # noqa: BLE001
-        pass
+        capture_run_baseline(_PROJECT_ROOT)
+    except RuntimeError as exc:
+        raise HTTPException(500, str(exc)) from exc
 
     await _pipeline.reset_for_new_run()
 
@@ -1585,6 +1585,9 @@ def main():
     ap.add_argument("--host", default="127.0.0.1")
     args = ap.parse_args()
 
+    from orchestrator.state_store.trust import capture_run_baseline
+    _apply_run_env("daemon start")
+    capture_run_baseline(_PROJECT_ROOT)
     port = _pick_port(args.port)
     _write_daemon_file(port)
 

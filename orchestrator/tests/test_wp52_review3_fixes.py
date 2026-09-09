@@ -37,6 +37,7 @@ def _proj(tmp_path, adapter_src=None):
 
 def _run(root, top, monkeypatch):
     monkeypatch.delenv("CORESMITH_TASK_ADAPTER", raising=False)
+    monkeypatch.setenv("CORESMITH_ADAPTER_SANDBOX", "none")
     return ta.run_task_adapter(str(root), str(top), {})
 
 

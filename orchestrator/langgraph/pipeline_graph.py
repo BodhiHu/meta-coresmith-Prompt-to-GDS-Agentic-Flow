@@ -2562,8 +2562,8 @@ async def generate_testbench_node(state: BlockState) -> dict:
             try:
                 from orchestrator.state_store.trust import check_oracle_manifest
                 _ocheck = check_oracle_manifest(_pr(state))
-            except Exception:  # noqa: BLE001
-                _ocheck = {"ok": True}
+            except Exception as exc:  # noqa: BLE001
+                _ocheck = {"ok": False, "violation": {"detail": f"Oracle baseline check failed: {exc}"}}
             if not _ocheck.get("ok"):
                 sim_passed = False
                 _viol = _ocheck.get("violation") or {}

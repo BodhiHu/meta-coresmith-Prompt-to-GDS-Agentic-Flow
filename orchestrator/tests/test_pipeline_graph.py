@@ -138,6 +138,10 @@ def _setup_disk_fixtures(tmp_path, blocks: list[dict]) -> None:
         (block_dir / "previous_error.txt").write_text("")
 
 
+    from orchestrator.state_store.trust import capture_run_baseline
+    capture_run_baseline(tmp_path)
+
+
 def _block_state(block: dict | None = None, tmp_path: str = "/tmp/test") -> dict:
     """Build a BlockState dict for unit-testing block-level nodes.
 

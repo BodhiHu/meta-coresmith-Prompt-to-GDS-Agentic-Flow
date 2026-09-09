@@ -55,6 +55,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -152,6 +153,34 @@ def _rows_and_violations(receipt: dict, declared: list[str]) -> tuple[list, list
     return rows, violations, budgets
 
 
+def _sandbox_argv(command: list[str], work: Path) -> list[str]:
+    """Only an explicit owner opt-out permits an unsandboxed evaluator."""
+    policy = os.environ.get("CORESMITH_ADAPTER_SANDBOX", "bwrap").strip().lower()
+    if policy == "none":
+        return command
+    if policy != "bwrap":
+        raise OSError(f"Unknown adapter sandbox policy {policy!r}")
+    bwrap = shutil.which("bwrap")
+    if not bwrap:
+        raise OSError("bubblewrap unavailable; adapter sandbox required")
+    return [bwrap, "--ro-bind", "/", "/", "--bind", str(work), str(work),
+            "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp",
+            "--unshare-net", "--die-with-parent", *command]
+
+
+def _new_attempt(root: Path, sha: str) -> Path:
+    base = root / ".coresmith/acceptance" / sha
+    base.mkdir(parents=True, exist_ok=True)
+    index = 1
+    while True:
+        attempt = base / f"attempt-{index:06d}"
+        try:
+            attempt.mkdir()
+            return attempt
+        except FileExistsError:
+            index += 1
+
+
 def run_task_adapter(project_root: str, top_rtl: str, block_rtls: Any = None) -> dict | None:
     """Run the task adapter on the candidate. ``None`` when no adapter is declared."""
     apath = adapter_path(project_root)
@@ -167,6 +196,11 @@ def run_task_adapter(project_root: str, top_rtl: str, block_rtls: Any = None) ->
             raise CandidateError("Candidate changed before adapter invocation")
     except CandidateError as exc:
         return _incomplete(str(exc), exc.kind, adapter=apath)
+    from orchestrator.state_store.trust import check_oracle_manifest
+    integrity = check_oracle_manifest(project_root)
+    if not integrity["ok"]:
+        return _incomplete("Oracle trust baseline unavailable or changed", "infrastructure_error",
+                           adapter=apath, oracle_integrity=integrity)
     hdr = read_header(apath)
     python = (os.environ.get("CORESMITH_TASK_ADAPTER_PYTHON", "") or
               hdr.get("python") or sys.executable)
@@ -179,21 +213,28 @@ def run_task_adapter(project_root: str, top_rtl: str, block_rtls: Any = None) ->
         return _incomplete(f"adapter interpreter not found: {python}", "adapter_defect",
                            adapter=apath)
 
-    keep = Path(project_root) / ".coresmith" / "acceptance" / cand["candidate_sha"][:12]
-    keep.mkdir(parents=True, exist_ok=True)
+    keep = _new_attempt(Path(project_root).resolve(), cand["candidate_sha"])
+    work = keep / "work"
+    work.mkdir()
     cand_json = keep / "candidate.json"
     receipt_json = keep / "receipt.json"
+    provisional = work / ".runner-receipt.json"
     log_path = keep / "adapter.log"
     cand_json.write_text(json.dumps(cand, indent=1))
-    if receipt_json.exists():
-        receipt_json.unlink()
     env = dict(os.environ)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
+    env["TMPDIR"] = "/tmp"
+    env["XDG_CACHE_HOME"] = "/tmp/cache"
     try:
-        with open(log_path, "w", encoding="utf-8") as lf:
-            r = subprocess.run([python, str(_RUNNER), apath, str(cand_json), str(receipt_json)],
-                               stdout=lf, stderr=subprocess.STDOUT, text=True,
-                               timeout=timeout, cwd=str(keep), env=env)
+        command = _sandbox_argv([python, str(_RUNNER), str(Path(apath).resolve()),
+                                str(cand_json), str(provisional), str(work)], work)
+        with open(log_path, "x", encoding="utf-8") as lf:
+            r = subprocess.run(command, stdout=lf, stderr=subprocess.STDOUT, text=True,
+                               timeout=timeout, cwd=str(work), env=env)
+        if provisional.is_file():
+            # Only the engine can publish into the immutable attempt directory.
+            with receipt_json.open("xb") as fh:
+                fh.write(provisional.read_bytes())
     except subprocess.TimeoutExpired:
         return _incomplete(f"task adapter exceeded {timeout}s", "infrastructure_error",
                            adapter=apath, candidate_sha=cand["candidate_sha"],
@@ -207,6 +248,10 @@ def run_task_adapter(project_root: str, top_rtl: str, block_rtls: Any = None) ->
             raise CandidateError("Candidate changed during adapter evaluation")
     except CandidateError as exc:
         return _incomplete(str(exc), exc.kind, adapter=apath, candidate_sha=cand["candidate_sha"])
+    integrity = check_oracle_manifest(project_root)
+    if not integrity["ok"]:
+        return _incomplete("Oracle changed during adapter evaluation", "infrastructure_error",
+                           adapter=apath, oracle_integrity=integrity, captured_dir=str(keep))
     if not receipt_json.exists():
         tail = ""
         try:
