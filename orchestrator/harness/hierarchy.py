@@ -43,31 +43,9 @@ def _reachable_hierarchy(design: dict, top_module: str) -> set[str]:
 
 
 def _stage_sources(paths, stage: Path, project_root=None):
-    """Resolve literal file references against each original source and task inputs.
-
-    Yosys resolves readmem from its cwd. Only path literals are rewritten in
-    scratch; the HDL and the bound asset bytes remain the same.
-    """
-    root = Path(project_root or paths[0].parent).resolve()
-    staged = {}
-    def rewrite(path):
-        if path in staged:
-            return staged[path]
-        dst = stage / f"input_{len(staged)}.v"
-        staged[path] = dst
-        def reference(match):
-            prefix, name = match.group(1), match.group(2)
-            choices = {p.resolve() for p in (path.parent / name, root / name, root / "inputs" / name)
-                       if p.is_file()}
-            if len(choices) != 1:
-                raise ValueError(f"Unresolved or ambiguous asset {name!r} in {path}")
-            dep = choices.pop()
-            target = rewrite(dep) if prefix.lstrip().startswith("`include") else dep
-            return prefix + json.dumps(str(target))
-        text = re.sub(r'(`include\s+|\$readmem\w*\s*\(\s*)"([^"\n]+)"', reference, path.read_text())
-        dst.write_text(text)
-        return dst
-    return [rewrite(path) for path in paths]
+    """Stage the same include/data literals that candidate adoption binds."""
+    from orchestrator.harness.readmem_assets import bind_assets
+    return bind_assets(paths, project_root or paths[0].parent).stage(paths, stage)
 
 
 def elaborate_hierarchy(source_paths, top_module: str, *, defines=(), parameters=None,

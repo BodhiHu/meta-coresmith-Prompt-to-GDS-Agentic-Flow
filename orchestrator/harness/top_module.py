@@ -65,44 +65,16 @@ def candidate_sources(project_root, top_rtl: str, block_rtls: Any) -> list[str]:
         if not Path(lib).is_file():
             raise CandidateError("Candidate SRAM library is missing", "infrastructure_error")
         if lib not in paths:
-            paths.append(lib)
+            from orchestrator.harness.candidate_library import library_sources
+            paths.extend(library_sources(project_root, paths, lib))
     return paths
 
 
-def _dependencies(sources: list[str], project_root) -> list[str]:
-    """Conservative include/data closure. Nonliteral or ambiguous assets park."""
-    root = Path(project_root).resolve()
-    found, visited = set(), set()
-
-    def resolve(owner: Path, name: str) -> Path:
-        choices = {p.resolve() for p in (owner.parent / name, root / name, root / "inputs" / name)
-                   if p.is_file()}
-        if len(choices) != 1:
-            raise CandidateError(f"Dependency {name!r} from {owner} is "
-                                 + ("missing" if not choices else "ambiguous"), "infrastructure_error")
-        return choices.pop()
-
-    def visit(path: Path):
-        if path in visited:
-            return
-        visited.add(path)
-        text = re.sub(r"//[^\n]*|/\*.*?\*/", " ", path.read_text(), flags=re.S)
-        for match in re.finditer(r'`include\s+([^\n]+)', text):
-            literal = re.fullmatch(r'"([^"\n]+)"\s*', match.group(1))
-            if not literal:
-                raise CandidateError(f"Nonliteral include in {path}; dependency cannot be bound")
-            dep = resolve(path, literal.group(1))
-            found.add(str(dep))
-            visit(dep)
-        for match in re.finditer(r'\$readmem\w*\s*\(\s*([^,]+)', text):
-            literal = re.fullmatch(r'"([^"\n]+)"\s*', match.group(1))
-            if not literal:
-                raise CandidateError(f"Nonliteral readmem asset in {path}; dependency cannot be bound")
-            found.add(str(resolve(path, literal.group(1))))
-
-    for source in sources:
-        visit(Path(source))
-    return sorted(found - set(sources))
+def _dependencies(sources: list[str], project_root, *, top_module="", parameters=None) -> list[str]:
+    """Bind exactly the literals staged for hierarchy elaboration."""
+    from orchestrator.harness.readmem_assets import bind_assets
+    assets = bind_assets(sources, project_root, top_module=top_module, parameters=parameters)
+    return sorted(str(p) for p in assets.dependencies - {Path(p).resolve() for p in sources})
 
 
 def candidate_sha(top_module: str, sources: list[str], *, dependencies=(), defines="none",
@@ -151,7 +123,7 @@ def write_candidate_receipt(project_root, top_module: str, top_rtl_path: str,
     if not module_declared_in(top_rtl_path, top_module, defines):
         raise CandidateError(f"{top_rtl_path} does not declare module {top_module!r}")
     sources = candidate_sources(root, top_rtl_path, block_rtls)
-    dependencies = _dependencies(sources, root)
+    dependencies = _dependencies(sources, root, top_module=top_module, parameters=parameters)
     before_sha = candidate_sha(top_module, sources, dependencies=dependencies,
                                defines=defines or "none", parameters=parameters or "none")
     expected = sorted(expected_blocks if expected_blocks is not None else
@@ -160,6 +132,14 @@ def write_candidate_receipt(project_root, top_module: str, top_rtl_path: str,
     failure = cells if isinstance(cells, HierarchyFailure) else missing_blocks(cells, expected, top_module)
     if failure:
         raise CandidateError(str(failure), failure.kind)
+    if candidate_sha(top_module, sources, dependencies=dependencies,
+                     defines=defines or "none", parameters=parameters or "none") != before_sha:
+        raise CandidateError("Candidate changed during hierarchy elaboration")
+    from orchestrator.harness.candidate_library import retain_elaborated
+    sources = retain_elaborated(sources, root, cells | {top_module})
+    dependencies = _dependencies(sources, root, top_module=top_module, parameters=parameters)
+    before_sha = candidate_sha(top_module, sources, dependencies=dependencies,
+                               defines=defines or "none", parameters=parameters or "none")
     rec = {"version": 2, "project_root": str(root), "top_module": top_module,
            "top_rtl_path": str(Path(top_rtl_path).resolve()), "sources": sources,
            "dependencies": dependencies, "defines": defines or "none", "parameters": parameters or "none",
@@ -167,7 +147,8 @@ def write_candidate_receipt(project_root, top_module: str, top_rtl_path: str,
            "written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "note": note}
     rec["candidate_sha"] = candidate_sha(top_module, sources, dependencies=dependencies,
                                          defines=rec["defines"], parameters=rec["parameters"])
-    if rec["candidate_sha"] != before_sha or _dependencies(sources, root) != dependencies:
+    if (rec["candidate_sha"] != before_sha or _dependencies(
+            sources, root, top_module=top_module, parameters=parameters) != dependencies):
         raise CandidateError("Candidate changed during hierarchy elaboration")
     _atomic_json(receipt_path, rec)
     if integration_result is not None:
@@ -183,7 +164,9 @@ def receipt_is_current(rec: dict) -> bool:
     try:
         if rec.get("version") != 2 or not rec.get("sources"):
             return False
-        dependencies = _dependencies(rec["sources"], rec["project_root"])
+        dependencies = _dependencies(rec["sources"], rec["project_root"],
+                                     top_module=rec["top_module"],
+                                     parameters=rec["parameters"] if rec["parameters"] != "none" else {})
         return dependencies == rec["dependencies"] and candidate_sha(
             rec["top_module"], rec["sources"], dependencies=dependencies,
             defines=rec["defines"], parameters=rec["parameters"]) == rec["candidate_sha"]
