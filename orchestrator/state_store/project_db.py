@@ -34,6 +34,7 @@ Design rules
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -705,18 +706,65 @@ class ProjectDB:
         os.chmod(tmp, 0o444)
         os.replace(tmp, target)
 
+    # WP-75: the registry views are read-only by convention, but the chip lead
+    # (and operators) edit them with file tools -- the prompts tell them to fix
+    # `.coresmith/interface_contracts.json` on disk. Re-exporting the database
+    # over such an edit silently restored 24 illegal port names on a live run.
+    # An edited view is therefore IMPORTED into the database before the views
+    # are regenerated, so the on-disk edit becomes canonical instead of lost.
+    def _adopt_external_view_edit(self, target: Path, importer, kind) -> bool:
+        if not target.exists():
+            return False
+        try:
+            data = target.read_bytes()
+        except OSError:
+            return False
+        recorded = self.get_setting(f"view_sha:{target.name}")
+        if not recorded:
+            return False  # never exported by this database: nothing to compare
+        current = hashlib.sha256(data).hexdigest()
+        if current == recorded:
+            return False
+        try:
+            parsed = json.loads(data.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return False  # unparsable edit: the database wins, the file is regenerated
+        if not isinstance(parsed, kind):
+            return False
+        importer(parsed)
+        self.set_setting(f"view_adopted:{target.name}", current)
+        return True
+
+    def _export_view(self, target: Path, value) -> None:
+        self._write_view(target, value)
+        self.set_setting(f"view_sha:{target.name}",
+                         hashlib.sha256(target.read_bytes()).hexdigest())
+
     def export_views(self) -> None:
-        """Regenerate the read-only registry views from the database."""
-        cdir = self.path.parent
-        bd = self.block_diagram()
-        if bd:
-            self._write_view(cdir / "block_diagram.json", bd)
-        specs = self.block_specs()
-        if specs:
-            self._write_view(cdir / "block_specs.json", specs)
-        contracts = self.contracts()
-        if contracts:
-            self._write_view(cdir / "interface_contracts.json", contracts)
+        """Regenerate the read-only registry views from the database, after
+        adopting any on-disk edit made to them since the last export (WP-75)."""
+        if getattr(self, "_exporting_views", False):
+            return
+        self._exporting_views = True
+        try:
+            cdir = self.path.parent
+            self._adopt_external_view_edit(cdir / "block_diagram.json",
+                                           self.import_block_diagram, dict)
+            self._adopt_external_view_edit(cdir / "block_specs.json",
+                                           self.import_block_specs, list)
+            self._adopt_external_view_edit(cdir / "interface_contracts.json",
+                                           self.import_contracts, dict)
+            bd = self.block_diagram()
+            if bd:
+                self._export_view(cdir / "block_diagram.json", bd)
+            specs = self.block_specs()
+            if specs:
+                self._export_view(cdir / "block_specs.json", specs)
+            contracts = self.contracts()
+            if contracts:
+                self._export_view(cdir / "interface_contracts.json", contracts)
+        finally:
+            self._exporting_views = False
         note = cdir / "STATE.md"
         if not note.exists():
             note.write_text(
