@@ -172,8 +172,16 @@ def _find_bwrap() -> str:
     return shutil.which("bwrap") or ""
 
 
-def _sandbox_argv(command: list[str], work: Path) -> list[str]:
-    """Only an explicit owner opt-out permits an unsandboxed evaluator."""
+def _sandbox_argv(command: list[str], work: Path, project_root: str = "") -> list[str]:
+    """Only an explicit owner opt-out permits an unsandboxed evaluator.
+
+    WP-79: the mounts are ordered so the adapter can always read its own
+    project and write its own work directory. ``--tmpfs /tmp`` gives the
+    adapter private scratch, but it also masks anything living under /tmp, and
+    a project there used to lose its candidate manifest, sources and inputs
+    with a confusing "no receipt" failure. The project is therefore re-bound
+    read-only after the tmpfs, and the work directory writable after that.
+    """
     policy = os.environ.get("CORESMITH_ADAPTER_SANDBOX", "bwrap").strip().lower()
     if policy == "none":
         return command
@@ -182,9 +190,14 @@ def _sandbox_argv(command: list[str], work: Path) -> list[str]:
     bwrap = _find_bwrap()
     if not bwrap:
         raise OSError("bubblewrap unavailable; adapter sandbox required")
-    return [bwrap, "--ro-bind", "/", "/", "--bind", str(work), str(work),
-            "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp",
-            "--unshare-net", "--die-with-parent", *command]
+    argv = [bwrap, "--ro-bind", "/", "/",
+            "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp"]
+    root = str(Path(project_root).resolve()) if project_root else ""
+    if root and root != "/":
+        argv += ["--ro-bind", root, root]
+    argv += ["--bind", str(work), str(work),
+             "--unshare-net", "--die-with-parent", *command]
+    return argv
 
 
 def _new_attempt(root: Path, sha: str) -> Path:
@@ -223,6 +236,10 @@ def run_task_adapter(project_root: str, top_rtl: str, block_rtls: Any = None) ->
     hdr = read_header(apath)
     python = (os.environ.get("CORESMITH_TASK_ADAPTER_PYTHON", "") or
               hdr.get("python") or sys.executable)
+    # A bare name (``# coresmith-python: python3``) resolves on PATH, so an
+    # adapter can be portable instead of hardcoding one host's interpreter.
+    if python and os.sep not in python:
+        python = shutil.which(python) or python
     try:
         timeout = int(float(hdr.get("timeout-s") or os.environ.get(
             "CORESMITH_TASK_ADAPTER_TIMEOUT_S", "3600") or 3600))
@@ -246,7 +263,8 @@ def run_task_adapter(project_root: str, top_rtl: str, block_rtls: Any = None) ->
     env["XDG_CACHE_HOME"] = "/tmp/cache"
     try:
         command = _sandbox_argv([python, str(_RUNNER), str(Path(apath).resolve()),
-                                str(cand_json), str(provisional), str(work)], work)
+                                str(cand_json), str(provisional), str(work)], work,
+                                project_root=project_root)
         with open(log_path, "x", encoding="utf-8") as lf:
             r = subprocess.run(command, stdout=lf, stderr=subprocess.STDOUT, text=True,
                                timeout=timeout, cwd=str(work), env=env)
