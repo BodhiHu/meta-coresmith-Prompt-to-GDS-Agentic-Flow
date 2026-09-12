@@ -156,7 +156,10 @@ The section MUST reference a machine-readable stimulus artifact
 pin it by content hash so every gate and revise round compares like-for-like.
 This artifact is executed by the Full Model DV gate (uarch stage) and the
 RTL Acceptance DV gate — an FRD without it leaves the mission unverified by
-construction.
+construction. If ``inputs/acceptance_stimulus.py`` does not exist yet, WRITE
+it yourself (you have file tools) from the PRD answers; when the operator
+already supplied ``inputs/model_stimulus.py`` (a module-level ``stimulus``),
+reference that file instead — the engine uses it as the acceptance stimulus.
 
 If the PRD/human answers do not determine a mission-scale acceptance test,
 DO NOT invent a degenerate one — state explicitly that acceptance is

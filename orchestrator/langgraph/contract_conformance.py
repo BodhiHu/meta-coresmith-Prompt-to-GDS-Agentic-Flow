@@ -364,8 +364,12 @@ def signal_specs(edge: dict) -> list[dict]:
     # the gate then rejects the very ports the contract-port check demands
     # (Arm E2, 2026-09-06: three blocks parked on "undeclared port *_srdy").
     proto = str(edge.get("handshake_protocol") or "").strip().lower()
+    # WP-21: valid_only edges are payload + a single `valid` strobe (the
+    # interface-definition prompt says so); contracts list it inconsistently
+    # (F-1: 15/15 edges, AX25: 0/10), and the gate parked a correct block.
     hs = {"srdy_drdy": ("srdy", "drdy"),
-          "axi_stream": ("tvalid", "tready")}.get(proto, ())
+          "axi_stream": ("tvalid", "tready"),
+          "valid_only": ("valid",)}.get(proto, ())
     present = {str(o["name"]).split("/", 1)[0] for o in out}
     for name in hs:
         if name in present:

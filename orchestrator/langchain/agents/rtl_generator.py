@@ -41,8 +41,11 @@ implementation on the SkyWater Sky130 130nm process.
 RULES:
 1. Output ONLY valid Verilog-2005 (no SystemVerilog constructs).
 2. Use AXI-Stream (tdata/tvalid/tready/tlast) for data interfaces.
-3. Use synchronous active-low reset (rst_n).
-4. Use a single clock domain (clk).
+3. Use EXACTLY the clock and reset ports the uArch spec's port table declares --
+   name AND polarity (e.g. `wb_clk_i` + synchronous active-HIGH `wb_rst_i` on a
+   Caravel task, `rst` active-high when the spec says so). Only when the spec
+   declares no reset at all, default to a synchronous active-low `rst_n`.
+4. Use a single clock domain (the spec's clock port; `clk` when unspecified).
 5. All arithmetic must be fixed-point -- no floating point.
 6. Use explicit bit widths on all signals. No implicit widths.
 7. Include a module header comment with: block name, description, I/O ports.
@@ -725,7 +728,7 @@ class RTLGeneratorAgent:
             _call_start = _time_mod.time()
 
             run_name = f"Generate Verilog [{block_title}]{retry_label}"
-            await self.llm.call(
+            _llm_text = await self.llm.call(
                 system=system_prompt,
                 prompt=user_message,
                 run_name=run_name,
@@ -752,9 +755,16 @@ class RTLGeneratorAgent:
                 rtl_path.parent.mkdir(parents=True, exist_ok=True)
                 rtl_path.write_text(recovered, encoding="utf-8")
                 return {"rtl_path": str(rtl_path)}
+            # WP-15: carry the LLM's own words -- an infrastructure failure
+            # ("[ClaudeLLM error: ...]", usage limit) must reach diagnose's
+            # infra short-circuit instead of reading as a silent agent.
+            _tail = str(_llm_text or "").strip()
+            _tail = (_tail[:400] if _tail.startswith("[ClaudeLLM error:")
+                     else _tail[-300:])
             return {"error": f"Agent did not write RTL to {rtl_target}"
                              + (" (pre-existing file unchanged -- a stale "
-                                "artifact is not success)" if _pre_sha else "")}
+                                "artifact is not success)" if _pre_sha else "")
+                             + (f" | LLM response: {_tail}" if _tail else "")}
 
     def _parse_response(
         self, content: str, block_name: str

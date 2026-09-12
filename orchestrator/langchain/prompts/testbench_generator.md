@@ -236,7 +236,8 @@ RULES:
 3. Generate random and corner-case test vectors.
 4. Compare RTL outputs against Python model outputs BIT-EXACTLY.
 5. Use cocotb.clock.Clock for clock generation (50 MHz = 20ns period).
-6. Use active-low reset (rst_n): assert low for 5 cycles, then release.
+6. Drive the DUT's reset port with the polarity the RTL declares (active-low
+   `rst_n`: hold low; active-high `rst`/`wb_rst_i`: hold high) for 5 cycles, then release.
 7. Use AXI-Stream handshaking: drive s_tvalid, check s_tready, etc.
 8. Log mismatches with detailed context (expected vs actual, cycle number).
 9. Include at least 3 tests:

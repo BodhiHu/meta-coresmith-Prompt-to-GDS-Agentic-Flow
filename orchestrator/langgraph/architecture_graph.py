@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import json
 import operator
+import os
 from pathlib import Path
 from typing import Annotated, TypedDict
 
@@ -1787,6 +1788,9 @@ async def escalate_final_review_node(state: ArchGraphState) -> dict:
         "block_diagram_doc_validation_errors": block_diagram_doc_errors,
         "constraint_rounds_used": state["round"],
         "max_rounds": state["max_rounds"],
+        "feedback_rounds_used": _feedback_rounds_used(
+            state.get("human_response_history"), "final_review"),
+        "feedback_rounds_cap": _max_feedback_rounds(),
         "supported_actions": ["accept", "feedback", "abort"],
         "instructions": (
             "Architecture is complete. Review the design summary above.\n\n"
@@ -1803,6 +1807,7 @@ async def escalate_final_review_node(state: ArchGraphState) -> dict:
     }
 
     response = await _arch_resolve_interrupt(payload)
+    response, _capped = _cap_feedback(state, "final_review", response, "Final Review", payload)
 
     action = response.get("action", "abort") if isinstance(response, dict) else "abort"
     feedback_text = response.get("feedback", "") if isinstance(response, dict) else ""
@@ -1818,7 +1823,7 @@ async def escalate_final_review_node(state: ArchGraphState) -> dict:
         "phase": "final_review", "round": state["round"],
         "action": action, "response": response,
     }]
-    if feedback_text:
+    if feedback_text and action == "feedback":
         updated["human_feedback"] = feedback_text
 
     return updated
@@ -1960,6 +1965,57 @@ def _block_diagram_summary(state: ArchGraphState) -> dict:
     }
 
 
+def _max_feedback_rounds() -> int:
+    """WP-20: feedback rounds a review phase may request before it is accepted."""
+    try:
+        return max(0, int(os.environ.get("CORESMITH_ARCH_MAX_FINAL_FEEDBACK", "2") or 2))
+    except ValueError:
+        return 2
+
+
+def _feedback_rounds_used(history, phase: str) -> int:
+    """How many `feedback` answers this review phase has already consumed."""
+    n = 0
+    for h in history or []:
+        if isinstance(h, dict) and h.get("phase") == phase and h.get("action") == "feedback":
+            n += 1
+    return n
+
+
+def _cap_feedback(state: ArchGraphState, phase: str, response, label: str,
+                  payload: dict | None = None):
+    """Park for a HUMAN once this phase's feedback budget is exhausted (WP-33).
+
+    WP-20 rewrote the reviewer's `feedback` into `accept`/`continue` past the
+    cap. Review round 2 called that manufacturing approval: the capped
+    feedback can name a missing pin or an unresolved objection just as well as
+    a nit. The bound still stops an in-graph chip lead from looping; the
+    exhausted case now hands the unresolved feedback to a human instead of
+    approving on the reviewer's behalf. Returns (response, capped)."""
+    if not isinstance(response, dict) or response.get("action") != "feedback":
+        return response, False
+    used = _feedback_rounds_used(state.get("human_response_history"), phase)
+    cap = _max_feedback_rounds()
+    if used < cap:
+        return response, False
+    feedback = str(response.get("feedback", ""))
+    _event(state, label, "feedback_cap_exhausted", {
+        "round": state["round"], "phase": phase, "feedback_rounds_used": used,
+        "cap": cap, "feedback": feedback[:1000],
+    })
+    parked = dict(payload or {})
+    parked["feedback_budget_exhausted"] = True
+    parked["feedback_rounds_used"] = used
+    parked["feedback_rounds_cap"] = cap
+    parked["unresolved_feedback"] = feedback[:4000]
+    parked["message"] = (
+        f"{label}: the feedback budget ({cap} round(s)) is exhausted and the "
+        "reviewer still asks for revisions (see unresolved_feedback). A human "
+        "must accept, give feedback, or abort -- the engine does not approve "
+        "on the reviewer's behalf.\n\n" + str(parked.get("message", "")))
+    return interrupt(parked), True
+
+
 async def escalate_diagram_node(state: ArchGraphState) -> dict:
     """Escalate to human when block diagram has questions or ambiguities.
 
@@ -1989,9 +2045,13 @@ async def escalate_diagram_node(state: ArchGraphState) -> dict:
             "feedback",   # provide text feedback, re-run block diagram
             "abort",      # stop architecture
         ],
+        "feedback_rounds_used": _feedback_rounds_used(
+            state.get("human_response_history"), "block_diagram"),
+        "feedback_rounds_cap": _max_feedback_rounds(),
     }
 
     response = await _arch_resolve_interrupt(payload)
+    response, _capped = _cap_feedback(state, "block_diagram", response, "Escalate Diagram", payload)
 
     action = response.get("action", "abort") if isinstance(response, dict) else "abort"
 

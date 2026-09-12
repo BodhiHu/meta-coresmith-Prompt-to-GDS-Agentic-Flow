@@ -114,9 +114,17 @@ For each port, verify:
    via signal "coeff_data", use that name (or a clear derivative like
    "coeff_data_in" / "coeff_data_out").
 
+
+**Contract port names are canonical and collapse.** A contract signal maps to port
+`<channel>_<signal>`; when the signal already starts with `<channel>_` or equals the
+channel name, the port is the signal as-is (channel `irq` + signal `irq` -> port `irq`,
+channel `in` + signal `in_last` -> `in_last`). Never instruct "keep both tokens" or
+spell `irq_irq`: the conformance gate demands the collapsed name and parks the block.
+
 5. **Clock and reset**: ALL blocks in the same clock domain must use
-   identical clock and reset port names and polarities. Each block simply
-   declares `clk` and `rst_n` (or per the ERS convention) as inputs and
+   identical clock and reset port names and polarities, taken from the ERS /
+   locked interface (Caravel: `wb_clk_i` + active-high `wb_rst_i`; `clk` +
+   `rst_n` only when the ERS specifies nothing). Each block declares them as inputs and
    assumes clean, synchronized signals. Do NOT include clock/reset
    synchronization logic, clock gating, or reset synchronizer sub-blocks
    inside the block -- these are inserted by the integration agent during

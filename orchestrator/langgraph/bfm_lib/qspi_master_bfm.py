@@ -39,7 +39,7 @@ class QSPIMasterBFM:
     construction.
     """
 
-    def __init__(self, dut, contract: QSPIContract):
+    def __init__(self, dut, contract: QSPIContract, strict_drive: bool = False):
         self.dut = dut
         self.c = contract
         self.h = contract.sck_half_period
@@ -47,6 +47,16 @@ class QSPIMasterBFM:
         # idle: csn high, sck low, io lanes 0
         self._in = 1 << contract.csn_bit
         self.dut.io_in.value = self._in
+        # WP-28: every read data nibble must be DRIVEN by the DUT (io_oeb lanes
+        # low). A released lane reads as 0 on a real host and is a protocol
+        # violation regardless of the value (aes_qspi: STATUS low nibble
+        # released -> DONE invisible to the grader's host, last nibble of every
+        # read dropped; the engine's polls happened to escape it).
+        self.drive_violations: list = []
+        # WP-39: generated testbenches fail on the FIRST violation (every
+        # read is asserted, not just the primary test's last one).
+        self.strict_drive = strict_drive
+        self._oeb_missing_noted = False
 
     # -- low-level GPIO ----------------------------------------------------
     def _drive(self):
@@ -82,6 +92,56 @@ class QSPIMasterBFM:
         await self._tick()
 
     # -- one quad-nibble in (DUT drives), host samples on rising SCK -------
+    def _lane_chars(self, oeb_value) -> list:
+        """Lane characters io0..io3 ('0' / '1' / 'x' / 'z' ...) of an io_oeb
+        value: a simulator value (``.binstr``), an int, or a binary string
+        (MSB first). Only the four lane bits are inspected (WP-39)."""
+        s = getattr(oeb_value, "binstr", None)
+        if s is None:
+            if isinstance(oeb_value, str):
+                s = oeb_value
+            else:
+                try:
+                    s = format(int(oeb_value), "b")
+                except (TypeError, ValueError):
+                    s = "x" * (self.c.io0_bit + 4)
+        s = str(s).strip().lower().replace("_", "")
+        need = self.c.io0_bit + 4
+        if len(s) < need:
+            s = s.rjust(need, "0")        # an int's implicit high zeros
+        rev = s[::-1]                     # index 0 = bit 0
+        return [rev[self.c.io0_bit + i] for i in range(4)]
+
+    def _violation(self, msg: str) -> bool:
+        self.drive_violations.append(msg)
+        if self.strict_drive:
+            raise AssertionError(msg)
+        return False
+
+    def _note_drive(self, oeb_value, when: str = "") -> bool:
+        """Record a violation unless all four io lanes are DRIVEN ('0' on the
+        active-low io_oeb) during a read data nibble.
+
+        Reads the four lane bits only (WP-39): converting the whole vector to
+        an int made an X on any unrelated pad look like four released lanes
+        under Icarus, and let a real X on a lane resolve to 0 under Verilator.
+        An unresolved lane value (x/z) is a violation in its own right. This is
+        a protocol assertion about output enable, not an electrical model: the
+        published host samples io_out regardless of io_oeb. Pure; unit-testable.
+        """
+        lanes = self._lane_chars(oeb_value)
+        bad = [(i, ch) for i, ch in enumerate(lanes) if ch != "0"]
+        if not bad:
+            return True
+        unresolved = any(ch not in "01" for _, ch in bad)
+        return self._violation(
+            f"{when}io lanes not driven during a read data nibble "
+            f"(io_oeb[{self.c.io0_bit + 3}:{self.c.io0_bit}] as io3..io0 = "
+            f"{''.join(reversed(lanes))}; '1' = released, x/z = unresolved)"
+            + ("; an unresolved output enable cannot be trusted by any host"
+               if unresolved else
+               "; the published host samples io_out with the lane released"))
+
     async def _shift_in(self) -> int:
         self._set(self.c.sck_bit, 0)
         self._drive()          # DUT sets read data while SCK low
@@ -89,6 +149,18 @@ class QSPIMasterBFM:
         self._set(self.c.sck_bit, 1)
         self._drive()
         await self._tick()
+        try:
+            _oeb = getattr(self.dut, "io_oeb", None)
+        except Exception:  # noqa: BLE001
+            _oeb = None
+        if _oeb is None:
+            # WP-39: an unobservable io_oeb is reported once, never ignored.
+            if not self._oeb_missing_noted:
+                self._oeb_missing_noted = True
+                self._violation("io_oeb is not observable on the DUT: the "
+                                "read-phase drive check cannot run")
+        else:
+            self._note_drive(_oeb.value)
         return self._read_io()
 
     async def _byte_out(self, b):

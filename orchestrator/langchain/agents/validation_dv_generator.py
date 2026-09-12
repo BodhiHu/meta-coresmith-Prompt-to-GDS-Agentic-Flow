@@ -198,7 +198,7 @@ class ValidationDVGenerator:
             # golden/expected operand sits on a following line).
             _golden_output_assert = bool(
                 re.search(
-                    r"assert\b(?:[^\n]|\n(?=[ \t]))*?(golden|reference|expected_(?:output|bytes|"
+                    r"assert\b(?:[^\n]|\n(?=[ \t]))*?(golden|reference|oracle|grade_|expected_(?:output|bytes|"
                     r"bits|value|result|word|state|crc))",
                     testbench,
                     re.IGNORECASE,

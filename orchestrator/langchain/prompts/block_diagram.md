@@ -121,14 +121,24 @@ RULES:
    (e.g. `clk_rst_ctrl`, `rst_sync`, `clock_gate`). The design is compiled flat
    and the integration agent inserts clock distribution, reset synchronization,
    and clock-gating cells automatically during top-level integration. Individual
-   blocks should simply declare `clk` and `rst_n` ports and assume clean,
-   synchronized signals are provided.
+   blocks simply declare the design's clock and reset ports and assume clean,
+   synchronized signals are provided. Use the clock/reset NAMES AND POLARITY the
+   requirements or locked interface define (e.g. a Caravel wrapper task uses
+   `wb_clk_i` and the synchronous active-HIGH `wb_rst_i`); default to `clk` +
+   active-low `rst_n` only when the requirements say nothing about reset.
 6. Soft-IP interface rule: if the PRD/requirements describe reusable soft IP,
    synthesizable RTL only, or an internal accelerator, do NOT narrow, serialize,
    pin-mux, or packetize functional streams solely to fit package/MPW GPIO pad
    limits. Keep AXI-Stream interfaces at the functional payload widths required
    by the user and golden model. Add pad serializers/wrappers only when the user
    explicitly asks for OpenFrame/Caravel/MPW top-level integration.
+   When the requirements LOCK a Caravel `user_project_wrapper` pinout (a
+   QSPI-slave accelerator chassis, an MPW submission), emit exactly ONE
+   pad-adapter block named `user_project_wrapper` that carries the locked
+   io_in/io_out/io_oeb + wishbone/clock ports and bridges them to the
+   core blocks. NEVER add an `openframe_project_wrapper` / outer MPW shell
+   block: the backend generates that shell, and a second wrapper block
+   breaks the deterministic Caravel assembly and the graded DV boundary.
 7. KPI arithmetic rule: for every measurable throughput, latency, bandwidth,
    frame-rate, tile-rate, packet-rate, PSNR/error, or compression KPI preserved
    from PRD/FRD, include a system invariant with the exact arithmetic and units.

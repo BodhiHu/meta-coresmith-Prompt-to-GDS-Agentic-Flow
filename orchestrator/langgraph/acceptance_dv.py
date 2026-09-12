@@ -39,6 +39,7 @@ Env:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -60,8 +61,27 @@ def acceptance_dv_enabled() -> bool:
 
 
 def _skip(reason: str) -> dict:
+    """The stage does not apply (no oracle declared, shape not covered)."""
     logger.info("acceptance dv: SKIPPED -- %s", reason)
     return {"passed": False, "skipped": True, "reason": reason, "cases": []}
+
+
+def _incomplete(reason: str, kind: str = "oracle_incomplete") -> dict:
+    """WP-38: the oracle IS declared but did not complete -- build failure,
+    tool exit, receipt cardinality, an undeclared case setting. Never a skip
+    (the pipeline treats a skip as nonblocking) and never a pass: it parks
+    with kind in {oracle_incomplete, adapter_defect, infrastructure_error}."""
+    logger.warning("acceptance dv: INCOMPLETE (%s) -- %s", kind, reason)
+    return {"passed": False, "skipped": False, "oracle_incomplete": True,
+            "kind": kind, "reason": reason, "cases": [],
+            "violations": [{
+                "type": "acceptance_dv_failure",
+                "criterion": "acceptance_dv_oracle_incomplete",
+                "kind": kind,
+                "suggested_fix": "Not an RTL verdict: the acceptance oracle did "
+                                 "not complete. Fix the adapter / toolchain, "
+                                 "then retry.",
+            }]}
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +116,26 @@ def classify_contract(ports: dict[str, dict]) -> dict | None:
     if not clk or not rst:
         return None
     rst_active_low = rst.endswith("n")
+
+    # WP-18: the published stream_core contract (config plane + start pulse +
+    # byte-per-word in/out streams with in_last/out_last). Recognised before
+    # the AXIS shape so a chip built to the task's own pin list gets the
+    # mission-scale acceptance run instead of an honest skip.
+    _sc_in = ("cfg_valid", "cfg_addr", "cfg_data", "start",
+              "in_valid", "in_data", "in_last", "out_ready")
+    _sc_out = ("in_ready", "out_valid", "out_data", "out_last")
+    if (all(n in names and ports[n]["dir"] == "input" for n in _sc_in)
+            and all(n in names and ports[n]["dir"] == "output" for n in _sc_out)):
+        return {
+            "kind": "stream_core",
+            "clk": clk,
+            "rst": rst,
+            "rst_active_low": rst_active_low,
+            "in_width": ports["in_data"]["width"],
+            "out_width": ports["out_data"]["width"],
+            "has_done": "done" in names,
+            "sidebands": {},
+        }
 
     def _group(direction: str) -> dict | None:
         # find <prefix>_tvalid with a matching _tready of the opposite driver
@@ -144,6 +184,7 @@ def classify_contract(ports: dict[str, dict]) -> dict | None:
         if p["dir"] == "input" and n not in stream_names
     }
     return {
+        "kind": "axis",
         "clk": clk,
         "rst": rst,
         "rst_active_low": rst_active_low,
@@ -162,9 +203,11 @@ def map_stimulus(stimulus: Any, contract: dict) -> dict | None:
     payload = None
     if isinstance(stimulus, dict):
         for key, val in stimulus.items():
-            if isinstance(val, (list, tuple)) or hasattr(val, "ravel"):
-                if payload is None:
+            if isinstance(val, (list, tuple, bytes, bytearray)) or hasattr(val, "ravel"):
+                if payload is None and str(key).lower() != "cfg":
                     payload = val
+                continue
+            if isinstance(val, dict):
                 continue
             if not isinstance(val, (int, float)):
                 continue
@@ -218,7 +261,133 @@ def map_stimulus(stimulus: Any, contract: dict) -> dict | None:
         except Exception:  # noqa: BLE001
             return None
     unmapped = [p for p in contract["sidebands"] if p not in sb_values]
-    return {"payload": flat, "sidebands": sb_values, "unmapped": unmapped}
+    mapped = {"payload": flat, "sidebands": sb_values, "unmapped": unmapped}
+    if contract.get("kind") == "stream_core":
+        cfg = _stream_cfg_plane(stimulus, payload)
+        if cfg is None:
+            return None
+        mapped["cfg"] = cfg
+        _sched = _stream_schedule(stimulus, payload)
+        if _sched is None:
+            return None
+        mapped.update(_sched)
+        try:
+            mapped["cycle_cap"] = int(stimulus.get("cycle_cap") or 0) if isinstance(stimulus, dict) else 0
+        except (TypeError, ValueError):
+            mapped["cycle_cap"] = 0
+    return mapped
+
+
+def _stream_cfg_plane(stimulus: Any, payload: Any) -> list[tuple[int, int]] | None:
+    """The config writes ``[(addr, value), ...]`` for a stream_core case.
+
+    ONLY an explicit ``cfg`` (dict addr->value, or a list of pairs) counts.
+    WP-18 also inferred the plane from ``n_frames``/``width``/``height``/``qp``
+    -- a video-codec register convention living in generic code (review round
+    2, overfitting table). The task's acceptance stimulus declares its own
+    config plane; the engine never guesses one.
+    """
+    if not isinstance(stimulus, dict):
+        return None
+    raw = stimulus.get("cfg")
+    if isinstance(raw, dict):
+        try:
+            return [(int(k), int(v) & 0xFFFFFFFF) for k, v in raw.items()]
+        except (TypeError, ValueError):
+            return None
+    if isinstance(raw, (list, tuple)):
+        try:
+            return [(int(a), int(v) & 0xFFFFFFFF) for a, v in raw]
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _stream_word_bytes(stimulus: dict, key: str) -> int | None:
+    """Declared bytes per data word (1..4) for one stream, or None."""
+    v = stimulus.get(key, stimulus.get("word_bytes"))
+    if v is None:
+        return None
+    try:
+        v = int(v)
+    except (TypeError, ValueError):
+        return None
+    return v if 1 <= v <= 4 else None
+
+
+def stream_case_problem(stimulus: Any) -> str:
+    """Why a stream_core case cannot run -- an adapter defect to report, never
+    something to guess around (WP-38)."""
+    if not isinstance(stimulus, dict):
+        return "stimulus is not a dict"
+    if _stream_cfg_plane(stimulus, None) is None:
+        return "no explicit 'cfg' plane ({addr: value} or [(addr, value)])"
+    if _stream_word_bytes(stimulus, "in_word_bytes") is None:
+        return ("no 'word_bytes' (or 'in_word_bytes') declaring bytes per "
+                "in_data word (1..4)")
+    return ""
+
+
+def _stream_schedule(stimulus: dict, payload: Any) -> dict | None:
+    """Per-case sampler settings DECLARED by the task's stimulus (WP-38).
+
+    ``word_bytes`` / ``in_word_bytes`` / ``out_word_bytes`` (1..4): bytes per
+    data word on each stream (the published stream_core sampler moves 32-bit
+    words; the h264 wrapper moves one byte per word -- that is the task's
+    declaration, not the engine's); ``max_out_words`` (0 = none): the sampler
+    also terminates when the output reaches its declared word bound; ``seed``
+    (0 = derived from the case); ``gap_pct`` / ``bp_pct`` (default 10 / 15,
+    0 = continuous): the input-gap / output-backpressure schedule. Nothing
+    here is inferred from the RTL or the payload shape.
+    """
+    wb_in = _stream_word_bytes(stimulus, "in_word_bytes")
+    if wb_in is None:
+        return None
+    wb_out = _stream_word_bytes(stimulus, "out_word_bytes") or wb_in
+    out: dict = {"in_word_bytes": wb_in, "out_word_bytes": wb_out}
+    if wb_in > 1:
+        mask = (1 << (8 * wb_in)) - 1
+        try:
+            import numpy as _np
+
+            words = [int(v) & mask for v in _np.asarray(payload).ravel().tolist()]
+        except Exception:  # noqa: BLE001
+            try:
+                words = [int(v) & mask for v in payload]
+            except Exception:  # noqa: BLE001
+                return None
+        packed = bytearray()
+        for w in words:
+            packed += int(w).to_bytes(wb_in, "little")
+        out["payload"] = list(packed)
+
+    def _u32(key, default):
+        try:
+            return max(0, int(stimulus.get(key, default))) & 0xFFFFFFFF
+        except (TypeError, ValueError):
+            return default
+
+    out["max_out_words"] = _u32("max_out_words", 0)
+    out["seed"] = _u32("seed", 0)
+    out["gap_pct"] = min(100, _u32("gap_pct", 10))
+    out["bp_pct"] = min(100, _u32("bp_pct", 15))
+    return out
+
+
+def _call_accept(accept_fn, expected, observed, name: str, stimulus: Any):
+    """Call the task predicate with the case when it takes one (WP-38): a
+    per-case floor (33 dB for one content class, 30 for another) needs the
+    case, and a context-free accept(expected, observed) cannot carry it."""
+    import inspect as _inspect
+
+    try:
+        params = _inspect.signature(accept_fn).parameters
+        if "case" in params or any(p.kind == p.VAR_KEYWORD for p in params.values()):
+            return accept_fn(expected, observed,
+                             case={"name": name, "stimulus": stimulus})
+    except (TypeError, ValueError):
+        pass
+    return accept_fn(expected, observed)
 
 
 # ---------------------------------------------------------------------------
@@ -364,6 +533,8 @@ int main(int argc, char **argv) {
 
 
 def generate_harness(contract: dict, top_module: str, sb_order: list[str]) -> str:
+    if contract.get("kind") == "stream_core":
+        return generate_stream_harness(contract, top_module)
     s, m = contract["s_axis"], contract["m_axis"]
     sp, mp = s["prefix"], m["prefix"]
     sb_set = "\n".join(
@@ -418,6 +589,156 @@ def generate_harness(contract: dict, top_module: str, sb_order: list[str]) -> st
     )
 
 
+_STREAM_TEMPLATE = r"""// Auto-generated RTL Acceptance DV harness (coresmith WP-18/WP-38, stream_core).
+// Mirrors the published StreamHarness cycle semantics: inputs driven before
+// the rising edge, handshakes sampled after it (post-edge ready/valid), random
+// input gaps + output backpressure at the case's DECLARED percentages and seed,
+// the case's DECLARED bytes per word on each stream, completion on a consumed
+// out_last beat OR on reaching the case's declared output word bound. Cycles
+// count from the start pulse.
+// Binary protocol (little-endian u32):
+//   input:  repeated { n_cfg, {addr, value}*n_cfg, cycle_cap, max_out_words,
+//                      seed, gap_pct, bp_pct, in_word_bytes, out_word_bytes,
+//                      n_bytes, bytes }
+//   output: repeated { status, cycles, outlen, out bytes }  (status 0=ok 1=watchdog)
+#include "V{TOP}.h"
+#include "verilated.h"
+#include <cstdio>
+#include <cstdint>
+#include <cstdlib>
+#include <utility>
+#include <vector>
+
+using DUT = V{TOP};
+static vluint64_t g_cycle = 0;
+static void posedge(DUT *t) { t->{CLK} = 1; t->eval(); g_cycle++; }
+static void negedge(DUT *t) { t->{CLK} = 0; t->eval(); }
+static uint32_t g_rng = 0x2545F491u;
+static inline uint32_t xrng() {
+    g_rng ^= g_rng << 13; g_rng ^= g_rng >> 17; g_rng ^= g_rng << 5;
+    return g_rng;
+}
+static const int BP = {BP_ENABLED};
+
+static bool rd_u32(FILE *f, uint32_t *v) {
+    unsigned char b[4];
+    if (fread(b, 1, 4, f) != 4) return false;
+    *v = (uint32_t)b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
+    return true;
+}
+static void wr_u32(FILE *f, uint32_t v) {
+    unsigned char b[4] = {(unsigned char)(v), (unsigned char)(v >> 8),
+                          (unsigned char)(v >> 16), (unsigned char)(v >> 24)};
+    fwrite(b, 1, 4, f);
+}
+
+int main(int argc, char **argv) {
+    Verilated::commandArgs(argc, argv);
+    if (argc < 3) { fprintf(stderr, "usage: %s in.bin out.bin [max_cycles]\n", argv[0]); return 2; }
+    uint64_t max_cycles_default = (argc >= 4) ? strtoull(argv[3], nullptr, 10) : {MAX_CYCLES}ULL;
+    FILE *fin = fopen(argv[1], "rb");
+    FILE *fout = fopen(argv[2], "wb");
+    if (!fin || !fout) { fprintf(stderr, "io error\n"); return 2; }
+    DUT *top = new DUT;
+
+    uint32_t n_cfg;
+    while (rd_u32(fin, &n_cfg)) {
+        std::vector<std::pair<uint32_t, uint32_t>> cfg(n_cfg);
+        for (uint32_t i = 0; i < n_cfg; i++) {
+            if (!rd_u32(fin, &cfg[i].first) || !rd_u32(fin, &cfg[i].second)) return 2;
+        }
+        uint32_t cycle_cap, max_out_words, seed, gap_pct, bp_pct, in_wb, out_wb, n_in;
+        if (!rd_u32(fin, &cycle_cap) || !rd_u32(fin, &max_out_words) || !rd_u32(fin, &seed)
+            || !rd_u32(fin, &gap_pct) || !rd_u32(fin, &bp_pct) || !rd_u32(fin, &in_wb)
+            || !rd_u32(fin, &out_wb) || !rd_u32(fin, &n_in)) return 2;
+        if (in_wb < 1 || in_wb > 4 || out_wb < 1 || out_wb > 4) { fprintf(stderr, "bad word bytes\n"); return 3; }
+        std::vector<uint8_t> in(n_in);
+        if (n_in && fread(in.data(), 1, n_in, fin) != n_in) return 2;
+        uint64_t max_cycles = cycle_cap ? (uint64_t)cycle_cap : max_cycles_default;
+
+        g_rng = seed ? seed : (0x2545F491u ^ ((uint32_t)n_in * 2654435761u) ^ (n_cfg * 40503u));
+        if (!g_rng) g_rng = 0x2545F491u;
+        const bool gaps_on = BP && gap_pct > 0;
+        const bool bp_on = BP && bp_pct > 0;
+        top->cfg_valid = 0; top->cfg_addr = 0; top->cfg_data = 0; top->start = 0;
+        top->in_valid = 0; top->in_data = 0; top->in_last = 0; top->out_ready = 0;
+        top->{RST} = {RST_ASSERT};
+        for (int i = 0; i < 5; i++) { negedge(top); posedge(top); }
+        negedge(top);
+        top->{RST} = {RST_DEASSERT};
+        negedge(top); posedge(top); negedge(top);
+
+        // config plane: one write per cycle, then a one-cycle start pulse
+        // Inputs settle with clk low (eval) BEFORE the rising edge, exactly
+        // like a cocotb driver writing before `await RisingEdge`; a single
+        // eval() with new inputs + clk=1 lets the flops sample stale D.
+        for (auto &kv : cfg) {
+            top->cfg_valid = 1; top->cfg_addr = kv.first; top->cfg_data = kv.second;
+            top->eval(); posedge(top); negedge(top);
+            top->cfg_valid = 0; top->eval();
+        }
+        top->start = 1; top->eval(); posedge(top); negedge(top); top->start = 0; top->eval();
+
+        size_t n = n_in / in_wb, i = 0;      // input WORDS
+        uint64_t cyc = 0;
+        uint32_t out_words = 0;
+        bool done_beat = false, timed_out = false;
+        std::vector<uint8_t> out;
+        while (true) {
+            bool gap = (i < n) && gaps_on && ((xrng() % 100) < gap_pct);
+            uint32_t w = 0;
+            if (i < n) for (uint32_t b = 0; b < in_wb; b++) w |= (uint32_t)in[i * in_wb + b] << (8 * b);
+            top->in_valid = (i < n && !gap) ? 1 : 0;
+            top->in_data = (i < n) ? w : 0u;
+            top->in_last = (i + 1 == n && !gap) ? 1 : 0;
+            top->out_ready = (bp_on && ((xrng() % 100) < bp_pct)) ? 0 : 1;
+            top->eval();
+            posedge(top); cyc++;
+            int iv = top->in_valid, ir = top->in_ready;
+            int ov = top->out_valid, orr = top->out_ready, ol = top->out_last;
+            if (i < n && iv == 1 && ir == 1) i++;
+            if (ov == 1 && orr == 1) {
+                uint32_t ow = (uint32_t)top->out_data;
+                for (uint32_t b = 0; b < out_wb; b++) out.push_back((uint8_t)((ow >> (8 * b)) & 0xffu));
+                out_words++;
+                if (ol == 1) done_beat = true;
+                if (max_out_words && out_words >= max_out_words) done_beat = true;
+            }
+            negedge(top);
+            if (done_beat) break;
+            if (cyc > max_cycles) { timed_out = true; break; }
+        }
+        top->in_valid = 0; top->in_last = 0; top->out_ready = 0;
+        uint32_t status = timed_out ? 1u : 0u;
+        wr_u32(fout, status);
+        wr_u32(fout, (uint32_t)cyc);
+        wr_u32(fout, (uint32_t)out.size());
+        fwrite(out.data(), 1, out.size(), fout);
+        fflush(fout);
+    }
+    fclose(fin); fclose(fout); delete top;
+    return 0;
+}
+"""
+
+
+def generate_stream_harness(contract: dict, top_module: str) -> str:
+    """The stream_core harness source (see _STREAM_TEMPLATE)."""
+    return (
+        _STREAM_TEMPLATE
+        .replace("{TOP}", top_module)
+        .replace("{CLK}", contract["clk"])
+        .replace("{RST}", contract["rst"])
+        .replace("{RST_ASSERT}", "0" if contract["rst_active_low"] else "1")
+        .replace("{RST_DEASSERT}", "1" if contract["rst_active_low"] else "0")
+        .replace("{MAX_CYCLES}", os.environ.get(
+            "CORESMITH_ACCEPTANCE_DV_MAX_CYCLES", "50000000"))
+        .replace("{BP_ENABLED}", "0" if os.environ.get(
+            "CORESMITH_ACCEPTANCE_DV_BACKPRESSURE", "1").strip().lower()
+            in ("0", "false", "no", "off") else "1")
+    )
+
+
 # ---------------------------------------------------------------------------
 # Build + run
 # ---------------------------------------------------------------------------
@@ -451,6 +772,24 @@ def _pack_cases(cases: list[tuple[str, dict]], sb_order: list[str],
                 path: Path) -> None:
     with open(path, "wb") as f:
         for _name, mapped in cases:
+            if "cfg" in mapped:
+                cfg = mapped["cfg"]
+                f.write(struct.pack("<I", len(cfg)))
+                f.writelines(struct.pack("<II", int(a) & 0xFF, int(v) & 0xFFFFFFFF)
+                             for a, v in cfg)
+                f.write(struct.pack("<I", int(mapped.get("cycle_cap") or 0) & 0xFFFFFFFF))
+                # WP-38: declared per-case schedule (see _stream_schedule)
+                f.write(struct.pack("<IIIIII",
+                                    int(mapped.get("max_out_words") or 0) & 0xFFFFFFFF,
+                                    int(mapped.get("seed") or 0) & 0xFFFFFFFF,
+                                    int(mapped.get("gap_pct", 10)) & 0xFFFFFFFF,
+                                    int(mapped.get("bp_pct", 15)) & 0xFFFFFFFF,
+                                    int(mapped.get("in_word_bytes") or 1),
+                                    int(mapped.get("out_word_bytes") or 1)))
+                payload = mapped["payload"]
+                f.write(struct.pack("<I", len(payload)))
+                f.write(bytes(payload))
+                continue
             sbv = mapped["sidebands"]
             f.write(struct.pack("<I", len(sb_order)))
             f.writelines(struct.pack("<I", sbv.get(p, 0) & 0xFFFFFFFF) for p in sb_order)
@@ -460,6 +799,9 @@ def _pack_cases(cases: list[tuple[str, dict]], sb_order: list[str],
 
 
 def _read_results(path: Path, n: int) -> list[dict]:
+    """Parse the harness receipt. A short header ends the list; a short payload
+    is recorded as ``truncated``. The caller compares the record count with
+    the requested cases and never grades a partial receipt (WP-38)."""
     out = []
     with open(path, "rb") as f:
         for _ in range(n):
@@ -468,7 +810,10 @@ def _read_results(path: Path, n: int) -> list[dict]:
                 break
             status, cycles, outlen = struct.unpack("<III", hdr)
             data = f.read(outlen)
-            out.append({"status": status, "cycles": cycles, "bytes": data})
+            out.append({"status": status, "cycles": cycles, "bytes": data,
+                        "truncated": len(data) < outlen})
+            if len(data) < outlen:
+                break
     return out
 
 
@@ -546,6 +891,20 @@ def run_acceptance_dv(project_root: str, top_rtl: str,
         if stim is None:
             return _skip("acceptance artifact exposes neither cases nor stimulus")
         raw_cases = [("acceptance", stim)]
+    # WP-38: the case list is taken whole or not at all -- never truncated
+    # silently -- and case names must be unique so a receipt row maps to
+    # exactly one requested case.
+    raw_cases = list(raw_cases)
+    _max_cases = int(os.environ.get("CORESMITH_ACCEPTANCE_MAX_CASES", "64") or 64)
+    if len(raw_cases) > _max_cases:
+        return _incomplete(f"{len(raw_cases)} acceptance cases exceed "
+                           f"CORESMITH_ACCEPTANCE_MAX_CASES={_max_cases}",
+                           "adapter_defect")
+    _names = [str(n) for n, _ in raw_cases]
+    if len(set(_names)) != len(_names):
+        return _incomplete("duplicate acceptance case names: "
+                           + ", ".join(sorted({n for n in _names if _names.count(n) > 1})),
+                           "adapter_defect")
 
     ref_path = resolve_reference_implementation(project_root)
     if not ref_path:
@@ -582,11 +941,14 @@ def run_acceptance_dv(project_root: str, top_rtl: str,
     # Map every case; skip-honest if any is unmappable.
     sb_order = sorted(contract["sidebands"])
     mapped_cases: list[tuple[str, dict]] = []
-    for name, stim in list(raw_cases)[:64]:
+    for name, stim in raw_cases:
         m = map_stimulus(stim, contract)
         if m is None:
-            return _skip(f"acceptance case {name!r} not mappable onto the "
-                         f"chip contract (sidebands={sb_order})")
+            _why = (stream_case_problem(stim) if contract.get("kind") == "stream_core"
+                    else "no payload / sideband mapping")
+            return _incomplete(f"acceptance case {name!r} not mappable onto the "
+                               f"chip contract (sidebands={sb_order}): {_why or 'unmappable'}",
+                               "adapter_defect")
         mapped_cases.append((str(name), m))
 
     workdir = Path(tempfile.mkdtemp(prefix="cs_acceptance_dv_"))
@@ -625,9 +987,15 @@ def run_acceptance_dv(project_root: str, top_rtl: str,
                 sources.append(_lib)
     except Exception:  # noqa: BLE001 - lib resolution is best-effort
         pass
+    # WP-38: candidate identity = every source the harness elaborates.
+    try:
+        candidate_sha = hashlib.sha256(
+            b"".join(Path(_s).read_bytes() for _s in sources)).hexdigest()
+    except OSError as exc:
+        return _incomplete(f"candidate source unreadable: {exc}", "infrastructure_error")
     binp = _build(workdir, top_module, sources, harness)
     if not binp:
-        return _skip("native harness build failed (see log)")
+        return _incomplete("native harness build failed (see log)", "infrastructure_error")
 
     inp, outp = workdir / "in.bin", workdir / "out.bin"
     _pack_cases(mapped_cases, sb_order, inp)
@@ -635,10 +1003,14 @@ def run_acceptance_dv(project_root: str, top_rtl: str,
     run_to = int(float(os.environ.get(
         "CORESMITH_ACCEPTANCE_DV_RUN_TIMEOUT_S", "1800") or 1800))
     try:
+        # WP-18: run from the PROJECT ROOT so project-relative $readmemh
+        # images (inputs/rom_images/*.memh) resolve -- from any other cwd the
+        # ROMs load empty and a correct chip stalls after its first frame.
         r = subprocess.run([binp, str(inp), str(outp)], capture_output=True,
-                           text=True, timeout=run_to)
+                           text=True, timeout=run_to, cwd=str(project_root))
     except subprocess.TimeoutExpired:
         return {"passed": False, "skipped": False,
+                "oracle_incomplete": True, "kind": "infrastructure_error",
                 "reason": f"native acceptance run exceeded {run_to}s",
                 "cases": [], "violations": [{
                     "type": "acceptance_dv_failure",
@@ -647,16 +1019,40 @@ def run_acceptance_dv(project_root: str, top_rtl: str,
                                      "or reduce acceptance case count",
                 }]}
     if r.returncode != 0:
-        return _skip(f"native harness exited rc={r.returncode}: "
-                     f"{(r.stderr or '')[-400:]}")
+        return _incomplete(f"native harness exited rc={r.returncode}: "
+                           f"{(r.stderr or '')[-400:]}", "infrastructure_error")
     results = _read_results(outp, len(mapped_cases))
+    # WP-38: a receipt is graded only when it is COMPLETE. One record for two
+    # requested cases used to pass (the zip below dropped the missing case).
+    _trunc = any(_r.get("truncated") for _r in results)
+    if len(results) != len(mapped_cases) or _trunc:
+        return _incomplete(
+            f"receipt has {len(results)} complete case record(s) for "
+            f"{len(mapped_cases)} requested case(s)"
+            + (" (truncated payload)" if _trunc else ""), "oracle_incomplete")
+    try:
+        _keep = Path(project_root) / ".coresmith" / "acceptance_dv" / candidate_sha[:12]
+        _keep.mkdir(parents=True, exist_ok=True)
+        for (_n, _m), _r in zip(mapped_cases, results):
+            (_keep / f"{_n}.out.bin").write_bytes(bytes(_r["bytes"]))
+    except OSError:
+        pass
 
     use_fidelity = (fidelity_gate_enabled()
                     and resolve_fidelity_metric(project_root) is not None)
+    # WP-18: a declared accept(expected, observed) predicate (decode + PSNR
+    # for a codec, result match for an MCU) is the mission's own judge; byte
+    # equality against the golden is only the fallback for bit-exact IPs.
+    accept_fn = None
+    try:
+        from orchestrator.architecture.composition import resolve_functional_acceptance
+        accept_fn = resolve_functional_acceptance(project_root)
+    except Exception as exc:  # noqa: BLE001
+        # WP-38: a declared predicate that fails to load is an adapter defect,
+        # never a silent fall-through to a weaker comparison.
+        return _incomplete(f"acceptance predicate not loadable: {exc}", "adapter_defect")
     rows, violations = [], []
-    for (name, _mapped), res, (rname, rstim) in zip(
-        mapped_cases, results, list(raw_cases)[:64]
-    ):
+    for (name, _mapped), res, (rname, rstim) in zip(mapped_cases, results, raw_cases):
         try:
             expected = _run_reference(entry_callable, rstim, reraise=True)
         except Exception as exc:  # noqa: BLE001
@@ -676,6 +1072,32 @@ def run_acceptance_dv(project_root: str, top_rtl: str,
                 "suggested_fix": "RTL never completed the mission-scale case "
                                  "(drain/EOF or stall class at scale).",
             })
+        elif accept_fn is not None:
+            try:
+                ok = bool(_call_accept(
+                    accept_fn, exp_bytes if exp_bytes is not None else expected,
+                    bytes(res["bytes"]), name, rstim))
+                note = ""
+            except Exception as exc:  # noqa: BLE001
+                ok, note = False, f"acceptance predicate raised: {exc}"
+            row["ok"] = ok
+            row["criterion"] = "acceptance_predicate"
+            if note:
+                row["note"] = note
+            if not ok:
+                violations.append({
+                    "type": "acceptance_dv_failure",
+                    "criterion": "acceptance_dv_predicate",
+                    "acceptance_case": name,
+                    "gap_class": "mission",
+                    "suggested_fix": (
+                        "RTL output fails the declared acceptance predicate at "
+                        f"mission scale ({len(res['bytes'])}B streamed"
+                        + (f"; {note}" if note else "") + "). Decode/grade the "
+                        "captured stream offline (.coresmith/acceptance_dv/) and "
+                        "fix the responsible block."
+                    ),
+                })
         elif use_fidelity:
             fid = compute_fidelity_derate(project_root, expected, res["bytes"])
             row["fidelity"] = fid
@@ -737,7 +1159,17 @@ def run_acceptance_dv(project_root: str, top_rtl: str,
                   + "; ".join(str(r.get("note", "")) for r in ungraded[:3]))
     summary = {"passed": passed, "skipped": skipped,
                "reason": reason,
-               "cases": rows, "violations": violations}
+               "cases": rows, "violations": violations,
+               # WP-38: identity + completeness receipt
+               "candidate_sha": candidate_sha,
+               "sources": sources,
+               "captured_dir": str(_keep),
+               "requested_cases": len(mapped_cases),
+               "completed_cases": len(results)}
+    try:
+        (_keep / "receipt.json").write_text(json.dumps(summary, default=str, indent=1))
+    except OSError:
+        pass
     try:
         out_json = Path(project_root) / ".coresmith" / "acceptance_dv.json"
         out_json.parent.mkdir(parents=True, exist_ok=True)

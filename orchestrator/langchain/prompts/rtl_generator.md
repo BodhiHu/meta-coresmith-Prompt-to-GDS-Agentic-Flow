@@ -20,8 +20,15 @@ REASONING BUDGET (CRITICAL):
 RULES:
 1. Output ONLY valid {rtl_language} (no constructs from other HDL variants).
 2. Use AXI-Stream (tdata/tvalid/tready/tlast) for data interfaces.
-3. Use synchronous active-low reset (rst_n).
-4. Use a single clock domain (clk).
+3. Use EXACTLY the clock and reset ports the uArch spec's port table declares --
+   name AND polarity (e.g. `wb_clk_i` + synchronous active-HIGH `wb_rst_i` on a
+   Caravel task, `rst` active-high when the spec says so). Only when the spec
+   declares no reset at all, default to a synchronous active-low `rst_n`.
+4. Use a single clock domain (the spec's clock port; `clk` when unspecified).
+4b. Port names come from the AUTHORITATIVE PORT NAMES table verbatim. A contract
+   signal that already starts with its channel prefix or equals the channel name is
+   NOT prefixed again (channel `irq` + signal `irq` -> port `irq`, never `irq_irq`),
+   even if the uArch spec says otherwise -- the table wins.
 5. All arithmetic must be fixed-point -- no floating point.
 6. Use explicit bit widths on all signals. No implicit widths.
 7. Include a module header comment with: block name, description, I/O ports.
