@@ -8637,6 +8637,14 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
             design_name, top_rtl_path, block_rtl_paths, tb_path,
             project_root=_pr(state),
         )
+        if _stale_candidate(sim_result):
+            log("  [INTEG-DV] candidate manifest is STALE (RTL changed after "
+                "adoption) -- re-running the integration check to re-adopt "
+                "before simulating", YELLOW)
+            write_graph_event(pr, "Integration DV", "candidate_stale", {
+                "log": str(sim_result.get("log", ""))[:300]})
+            return {"integration_dv_result": _reintegrate_result("integration_dv", sim_result),
+                    "pipeline_done": False}
 
         passed = sim_result.get("passed", False)
         sim_log = sim_result.get("log", "")
@@ -8947,18 +8955,42 @@ async def integration_dv_decision_node(state: OrchestratorState) -> dict:
     }
 
 
+def _stale_candidate(sim_result: dict) -> bool:
+    """WP-76: the authoritative simulation refused a stale candidate manifest
+    (someone edited the RTL after adoption -- typically a chip-lead fix_rtl).
+    That is not a functional failure: the design must be re-integrated and
+    re-adopted, then simulated."""
+    if not isinstance(sim_result, dict) or sim_result.get("passed"):
+        return False
+    return (sim_result.get("kind") == "candidate_mismatch"
+            and "stale" in str(sim_result.get("log", "")).lower())
+
+
+def _reintegrate_result(stage: str, sim_result: dict) -> dict:
+    return {
+        "passed": False, "candidate_stale": True, "action_taken": "reintegrate",
+        "pending_decision": False, "phase": stage,
+        "reason": ("the candidate manifest is stale (RTL changed after adoption); "
+                   "re-running the integration check to re-adopt the design"),
+        "error": str(sim_result.get("log", ""))[:500],
+    }
+
+
 def route_after_integration_dv_decision(state: OrchestratorState) -> str:
     """Route the operator's decision back into integration DV or terminate."""
     result = state.get("integration_dv_result") or {}
     if result.get("action_taken") == "revise":
         return "init_tier"
-    if result.get("action_taken") in ("retry", "fix_rtl", "fix_tb"):
+    if result.get("action_taken") == "fix_rtl":
+        return "integration_check"   # WP-76: edited RTL must be re-adopted first
+    if result.get("action_taken") in ("retry", "fix_tb"):
         return "integration_dv"
     return END
 
 
 route_after_integration_dv_decision.__edge_labels__ = {
-    "integration_dv": "RETRY / FIX",
+    "integration_dv": "RETRY / FIX TB",
+    "integration_check": "FIX RTL (re-adopt)",
     "init_tier": "REVISE",
     END: "DONE",
 }
@@ -9299,9 +9331,11 @@ def route_after_integration_dv(state: OrchestratorState) -> str:
     result = state.get("integration_dv_result") or {}
     if result.get("passed") is True:
         return "validation_dv"
+    if result.get("candidate_stale") or result.get("action_taken") == "fix_rtl":
+        return "integration_check"   # WP-76
     if result.get("pending_decision"):
         return "integration_dv_decision"
-    if result.get("action_taken") in ("retry", "fix_rtl", "fix_tb"):
+    if result.get("action_taken") in ("retry", "fix_tb"):
         return "integration_dv"
     return END
 
@@ -9309,6 +9343,7 @@ def route_after_integration_dv(state: OrchestratorState) -> str:
 route_after_integration_dv.__edge_labels__ = {
     "validation_dv": "Validation DV",
     "integration_dv_decision": "Park for decision",
+    "integration_check": "Re-adopt (RTL changed)",
     "integration_dv": "Retry",
     END: "DONE",
 }
@@ -9755,6 +9790,14 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
             design_name, top_rtl_path, block_rtl_paths, tb_path,
             sim_scope="validation", project_root=_pr(state),
         )
+        if _stale_candidate(sim_result):
+            log("  [VALIDATION-DV] candidate manifest is STALE (RTL changed after "
+                "adoption) -- re-running the integration check to re-adopt "
+                "before simulating", YELLOW)
+            write_graph_event(pr, "Validation DV", "candidate_stale", {
+                "log": str(sim_result.get("log", ""))[:300]})
+            return {"validation_dv_result": _reintegrate_result("validation_dv", sim_result),
+                    "pipeline_done": False}
 
         passed = sim_result.get("passed", False)
         sim_log = sim_result.get("log", "")
@@ -10060,13 +10103,16 @@ def route_after_validation_dv_decision(state: OrchestratorState) -> str:
     result = state.get("validation_dv_result") or {}
     if result.get("action_taken") == "revise":
         return "init_tier"
-    if result.get("action_taken") in ("retry", "fix_rtl", "fix_tb"):
+    if result.get("action_taken") == "fix_rtl":
+        return "integration_check"   # WP-76: edited RTL must be re-adopted first
+    if result.get("action_taken") in ("retry", "fix_tb"):
         return "validation_dv"
     return END
 
 
 route_after_validation_dv_decision.__edge_labels__ = {
-    "validation_dv": "RETRY / FIX",
+    "validation_dv": "RETRY / FIX TB",
+    "integration_check": "FIX RTL (re-adopt)",
     "init_tier": "REVISE",
     END: "DONE",
 }
@@ -10075,15 +10121,18 @@ route_after_validation_dv_decision.__edge_labels__ = {
 def route_after_validation_dv(state: OrchestratorState) -> str:
     """Route after validation DV: terminal frontend pipeline."""
     result = state.get("validation_dv_result") or {}
+    if result.get("candidate_stale") or result.get("action_taken") == "fix_rtl":
+        return "integration_check"   # WP-76
     if result.get("pending_decision"):
         return "validation_dv_decision"
-    if result.get("action_taken") in ("retry", "fix_rtl", "fix_tb"):
+    if result.get("action_taken") in ("retry", "fix_tb"):
         return "validation_dv"
     return END
 
 
 route_after_validation_dv.__edge_labels__ = {
     "validation_dv_decision": "Park for decision",
+    "integration_check": "Re-adopt (RTL changed)",
     "validation_dv": "Retry",
     END: "DONE",
 }
@@ -10242,6 +10291,7 @@ def build_pipeline_graph(checkpointer=None):
             "validation_dv": "validation_dv",
             "integration_dv": "integration_dv",
             "integration_dv_decision": "integration_dv_decision",
+            "integration_check": "integration_check",
             END: "final_report",
         },
     )
@@ -10249,6 +10299,7 @@ def build_pipeline_graph(checkpointer=None):
         "integration_dv_decision", route_after_integration_dv_decision,
         {
             "integration_dv": "integration_dv",
+            "integration_check": "integration_check",
             "init_tier": "init_tier",
             END: "final_report",
         },
@@ -10258,6 +10309,7 @@ def build_pipeline_graph(checkpointer=None):
         {
             "validation_dv": "validation_dv",
             "validation_dv_decision": "validation_dv_decision",
+            "integration_check": "integration_check",
             END: "final_report",
         },
     )
@@ -10265,6 +10317,7 @@ def build_pipeline_graph(checkpointer=None):
         "validation_dv_decision", route_after_validation_dv_decision,
         {
             "validation_dv": "validation_dv",
+            "integration_check": "integration_check",
             "init_tier": "init_tier",
             END: "final_report",
         },

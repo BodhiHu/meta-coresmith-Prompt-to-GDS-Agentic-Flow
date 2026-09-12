@@ -367,8 +367,15 @@ class TestGraphConstruction:
         assert output_path.read_text(encoding="utf-8") == generated
 
     def test_validation_dv_retries_on_fix_action(self):
+        # WP-76: an RTL fix invalidates the adopted candidate, so it re-enters
+        # the integration check (re-assembly + re-adoption) before any sim;
+        # a testbench fix re-runs validation DV directly.
         result = route_after_validation_dv({
             "validation_dv_result": {"passed": False, "action_taken": "fix_rtl"},
+        })
+        assert result == "integration_check"
+        result = route_after_validation_dv({
+            "validation_dv_result": {"passed": False, "action_taken": "fix_tb"},
         })
         assert result == "validation_dv"
 
