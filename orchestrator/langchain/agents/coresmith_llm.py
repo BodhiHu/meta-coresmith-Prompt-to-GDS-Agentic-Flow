@@ -293,6 +293,37 @@ def _llm_log_root() -> str:
     )
 
 
+# One argv string is capped by the kernel (MAX_ARG_STRLEN, 128 KiB on Linux).
+# The uArch / RTL system prompts run to several hundred KB and made ``Popen``
+# fail with ``[Errno 7] Argument list too long`` on the Claude CLI path.
+_CLAUDE_INLINE_PROMPT_LIMIT = 65536
+
+
+def _claude_system_prompt_args(system_prompt: str, log_root: str = "") -> list[str]:
+    """``--system-prompt`` argv for the Claude CLI (WP-71).
+
+    Prompts up to ``_CLAUDE_INLINE_PROMPT_LIMIT`` bytes stay inline (byte-identical
+    to the old behaviour). Larger prompts are written once, content-addressed,
+    under ``<log root>/.coresmith/llm_prompts/`` and passed with
+    ``--system-prompt-file`` so the argv never carries them.
+    """
+    import hashlib
+
+    data = system_prompt.encode("utf-8")
+    if len(data) <= _CLAUDE_INLINE_PROMPT_LIMIT:
+        return ["--system-prompt", system_prompt]
+    base = (Path(log_root) / ".coresmith" / "llm_prompts" if log_root
+            else Path(tempfile.gettempdir()) / "coresmith-llm-prompts")
+    base.mkdir(parents=True, exist_ok=True)
+    path = base / f"system-{hashlib.sha256(data).hexdigest()[:16]}.md"
+    if not path.exists() or path.read_bytes() != data:
+        fd, tmp = tempfile.mkstemp(dir=base, prefix=".system-", suffix=".tmp")
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+        os.replace(tmp, path)
+    return ["--system-prompt-file", str(path)]
+
+
 def _get_llm_tracer():
     """Lazy import to avoid circular deps at module load time."""
     try:
@@ -1539,7 +1570,7 @@ class ClaudeLLM:
             ])
 
         if system_prompt:
-            cmd.extend(["--system-prompt", system_prompt])
+            cmd.extend(_claude_system_prompt_args(system_prompt, _llm_log_root()))
 
         logger.debug(
             f"Claude CLI invocation: model={resolved_model}, "
