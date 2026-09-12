@@ -2,7 +2,7 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""``Scoreboard`` -- a SQLite record of per-block DV / PPA / coverage results.
+"""``Scoreboard`` -- the DV / PPA / coverage result tables of the project database.
 
 Design constraints (from the Package B plan):
 
@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS ppa_history (
     mem_bits       INTEGER,
     area_um2       REAL,
     wns_ns         REAL,
+    tns_ns         REAL,
     elaborated     INTEGER,
     budget_ff      INTEGER,
     budget_area_um2 REAL,
@@ -84,6 +85,13 @@ CREATE INDEX IF NOT EXISTS idx_cov_block ON coverage_results(block);
 """
 
 
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add columns introduced after a database was created (idempotent)."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(ppa_history)")}
+    if cols and "tns_ns" not in cols:
+        conn.execute("ALTER TABLE ppa_history ADD COLUMN tns_ns REAL")
+
+
 def _b(x: Any) -> int | None:
     """Coerce a tri-state (None keeps NULL) boolean to an int for storage."""
     if x is None:
@@ -101,11 +109,12 @@ def _json(x: Any) -> str | None:
 
 
 class Scoreboard:
-    """Best-effort SQLite scoreboard over ``<project_root>/.coresmith/scoreboard.db``."""
+    """Best-effort SQLite scoreboard over ``<project_root>/.coresmith/project.sqlite``."""
 
     def __init__(self, project_root: str | Path):
         self.project_root = Path(project_root)
-        self.db_path = self.project_root / ".coresmith" / "scoreboard.db"
+        # Shares the canonical project database (see project_db.py).
+        self.db_path = self.project_root / ".coresmith" / "project.sqlite"
 
     # ------------------------------------------------------------------
     # Connections
@@ -144,6 +153,7 @@ class Scoreboard:
             conn = self._writer_conn()
             try:
                 conn.executescript(_SCHEMA)
+                _migrate(conn)
             finally:
                 conn.close()
             return True
@@ -207,6 +217,7 @@ class Scoreboard:
         mem_bits: int | None = None,
         area_um2: float | None = None,
         wns_ns: float | None = None,
+        tns_ns: float | None = None,
         elaborated: bool | None = None,
         budget_ff: int | None = None,
         budget_area_um2: float | None = None,
@@ -218,14 +229,15 @@ class Scoreboard:
             conn = self._writer_conn()
             try:
                 conn.executescript(_SCHEMA)
+                _migrate(conn)
                 conn.execute(
                     "INSERT INTO ppa_history (ts, block, attempt, source, probe, "
-                    "cells, ff, mem_bits, area_um2, wns_ns, elaborated, budget_ff, "
+                    "cells, ff, mem_bits, area_um2, wns_ns, tns_ns, elaborated, budget_ff, "
                     "budget_area_um2, ppa_ok, reasons, report_path) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         time.time(), block, int(attempt or 0), source, probe or "",
-                        cells, ff, mem_bits, area_um2, wns_ns, _b(elaborated),
+                        cells, ff, mem_bits, area_um2, wns_ns, tns_ns, _b(elaborated),
                         budget_ff, budget_area_um2, _b(ppa_ok),
                         _json(reasons), report_path or "",
                     ),

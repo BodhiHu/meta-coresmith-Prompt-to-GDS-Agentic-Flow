@@ -22,6 +22,7 @@ time-bounded; everything else here is pure/deterministic and unit-tested.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -103,29 +104,82 @@ class CompositionPlan:
         )
 
 
-def find_exact(words: int, data_bits: int, registry=None) -> MacroInfo | None:
-    """An exactly-matching pre-built macro, if any."""
+_PORTS_RE = re.compile(r"(\d+)(rw|r|w)")
+
+
+def _port_counts(ports: str) -> dict:
+    """``"1rw1r"`` -> ``{"rw": 1, "r": 1, "w": 0}``. All-zero when unparseable."""
+    counts = {"rw": 0, "r": 0, "w": 0}
+    for n, k in _PORTS_RE.findall(ports or ""):
+        counts[k] += int(n)
+    return counts
+
+
+def ports_cover(macro_ports: str, want_ports: str) -> bool:
+    """True when a macro with ``macro_ports`` can serve a ``want_ports`` shell.
+
+    A 1rw1r macro satisfies a 1rw request (the second read port is simply left
+    unused); a 1rw macro NEVER satisfies a 1rw1r request -- the shell's rdata1
+    would end up driven by nothing, which is X in gate sim and floating in
+    silicon. Missing/unparseable metadata on either side is permissive: this
+    filter must not silently reject a macro whose name the registry could not
+    decode.
+    """
+    want = _port_counts(want_ports)
+    have = _port_counts(macro_ports)
+    if not any(want.values()) or not any(have.values()):
+        return True
+    return (
+        have["rw"] >= want["rw"]
+        and have["rw"] + have["r"] >= want["rw"] + want["r"]
+        and have["rw"] + have["w"] >= want["rw"] + want["w"]
+    )
+
+
+def _usable(m: MacroInfo, ports: str | None, kind: str | None) -> bool:
+    """Collateral/pin/kind/port screen shared by every resolver below.
+
+    Geometry alone is NOT a match: the registry holds ROMs and SRAMs in the
+    same dirs (``collateral_complete()`` even waives the .lib for a ROM), and
+    1rw parts alongside 1rw1r ones. Binding across either axis fails silently
+    -- writes to a ROM are discarded, and a missing second port leaves rdata1
+    undriven -- so both are screened here rather than downstream.
+    """
+    if not (m.collateral_complete() and macro_pin_clean(m)):
+        return False
+    if kind and (m.kind or "sram") != kind:
+        return False
+    return ports_cover(m.ports or "", ports or "")
+
+
+def find_exact(words: int, data_bits: int, registry=None, *,
+               ports: str | None = None,
+               kind: str | None = None) -> MacroInfo | None:
+    """An exactly-matching pre-built macro, if any.
+
+    ``ports``/``kind`` (both default None = no screen, preserving the historical
+    geometry-only behaviour for callers that do not know them) restrict the
+    match to a macro that can actually stand in for the request -- see
+    :func:`_usable`.
+    """
     if registry is None:
         registry = discover_macros()
     for m in registry.values():
-        if (
-            m.words == words
-            and m.data_bits == data_bits
-            and m.collateral_complete()
-            and macro_pin_clean(m)
-        ):
+        if m.words == words and m.data_bits == data_bits and _usable(m, ports, kind):
             return m
     return None
 
 
-def plan_composition(words: int, data_bits: int, registry=None) -> CompositionPlan | None:
+def plan_composition(words: int, data_bits: int, registry=None, *,
+                     ports: str | None = None,
+                     kind: str | None = None) -> CompositionPlan | None:
     """If the requested geometry tiles cleanly from a single pre-built macro,
     return the plan; else None. Only exact integer tilings are offered."""
     if registry is None:
         registry = discover_macros()
     best: CompositionPlan | None = None
     for m in registry.values():
-        if not (m.words and m.data_bits and m.collateral_complete() and macro_pin_clean(m)):
+        if not (m.words and m.data_bits and _usable(m, ports, kind)):
             continue
         if words % m.words or data_bits % m.data_bits:
             continue
@@ -141,7 +195,8 @@ def plan_composition(words: int, data_bits: int, registry=None) -> CompositionPl
 
 
 def plan_over_provisioned(
-    words: int, data_bits: int, registry=None
+    words: int, data_bits: int, registry=None, *,
+    ports: str | None = None, kind: str | None = None
 ) -> CompositionPlan | None:
     """Resolve a geometry that does NOT tile exactly by OVER-PROVISIONING.
 
@@ -165,7 +220,7 @@ def plan_over_provisioned(
     best: CompositionPlan | None = None
     best_waste = None
     for m in registry.values():
-        if not (m.words and m.data_bits and m.collateral_complete() and macro_pin_clean(m)):
+        if not (m.words and m.data_bits and _usable(m, ports, kind)):
             continue
         deep = -(-words // m.words)          # ceil
         wide = -(-data_bits // m.data_bits)  # ceil
@@ -383,9 +438,23 @@ def generate_openram_macro(
 
 
 def _module_runnable() -> bool:
+    """True only when ``python -m openram`` can actually LAUNCH.
+
+    A bare ``import openram`` is not proof -- the PyPI 1.2.48 wheel imports
+    fine but omits ``openram/__main__.py`` (see :func:`openram_available`).
+    Answering the import question here suppressed the OPENRAM_HOME
+    ``sram_compiler.py`` fallback in exactly the case it exists for: an
+    unpatched wheel in a read-only venv next to a valid source checkout.
+    """
     try:
         import openram  # noqa: F401
+    except Exception:
+        return False
+    if ensure_openram_patched():
         return True
+    try:
+        import importlib.util
+        return importlib.util.find_spec("openram.__main__") is not None
     except Exception:
         return False
 
@@ -430,6 +499,8 @@ def ensure_macro(
     allow_generate: bool = True,
     write_size: int = 8,
     registry: dict | None = None,
+    ports: str | None = None,
+    kind: str = "sram",
 ) -> MacroInfo | CompositionPlan | None:
     """Resolve a required memory geometry to something buildable.
 
@@ -442,10 +513,18 @@ def ensure_macro(
     registry, and tests inject a synthetic one. OpenRAM generation still writes
     into the real PDK and re-discovers, so the generated result is independent
     of the injected registry.
+
+    ``kind`` defaults to ``"sram"`` because this resolver only ever GENERATES
+    SRAMs: generated ROMs (``rom_1r_*``) install into the same sram_macros dirs
+    ``discover_macros`` scans, and their ``collateral_complete()`` waives the
+    .lib, so a geometry-only match could hand back a read-only ROM whose writes
+    are silently discarded. ``ports`` (e.g. ``"1rw1r"``) is off by default --
+    pass the shell's port configuration to also reject a macro with too few
+    ports (a 1rw part behind a 1rw1r shell leaves rdata1 undriven).
     """
     if registry is None:
         registry = discover_macros()
-    exact = find_exact(words, data_bits, registry)
+    exact = find_exact(words, data_bits, registry, ports=ports, kind=kind)
     if exact:
         return exact
 
@@ -464,7 +543,7 @@ def ensure_macro(
     #
     # Set ``CORESMITH_ALLOW_MACRO_TILING=1`` to restore the old behaviour.
     if tiling_allowed():
-        comp = plan_composition(words, data_bits, registry)
+        comp = plan_composition(words, data_bits, registry, ports=ports, kind=kind)
         if comp:
             return comp
     if allow_generate:
@@ -486,7 +565,8 @@ def ensure_macro(
     # justification was explicitly "OpenRAM was unavailable/broken" -- with the
     # generator repaired, building the exact geometry is the better answer.
     if tiling_allowed():
-        over = plan_over_provisioned(words, data_bits, registry)
+        over = plan_over_provisioned(words, data_bits, registry,
+                                     ports=ports, kind=kind)
         if over:
             return over
 

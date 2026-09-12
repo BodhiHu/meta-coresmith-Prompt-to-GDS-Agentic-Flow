@@ -58,11 +58,31 @@ COCOTB RULES:
   set `tvalid` after a falling edge and wait until another falling edge before
   checking `tready`, because the DUT may accept the beat on the intervening
   rising edge and the testbench will miss or duplicate the transaction.
-- For registered sinks that can drop `tready` on the accepting edge, sample
-  `ready_before = int(dut.<ready>.value)` immediately before `await RisingEdge`
-  while `valid` is already stable, then count the transfer after the edge using
-  the sampled `ready_before`. Do not decide whether the previous edge accepted
-  by reading post-edge `tready`.
+- For INTERNAL AXI-Stream sinks that can drop `tready` on the accepting edge,
+  sample `ready_before = int(dut.<ready>.value)` immediately before
+  `await RisingEdge` while `valid` is already stable, then count the transfer
+  after the edge using the sampled `ready_before`. This pre-edge rule applies
+  to internal block ports only -- NOT to the chip's published stream ports.
+
+- PUBLISHED STREAM SAMPLER (the chip's top-level stream ports in_*/out_* ONLY):
+  drive and sample these ports exactly as the published grader does, never with
+  the internal AXI-Stream helper above:
+
+      # drive in_valid/in_data/in_last and out_ready for this cycle (writable phase)
+      await RisingEdge(dut.clk)
+      await ReadOnly()
+      accepted = int(dut.in_valid.value) and int(dut.in_ready.value)     # post-edge ready
+      consumed = int(dut.out_valid.value) and int(dut.out_ready.value)   # post-edge valid
+      if consumed:
+          out.append(int(dut.out_data.value) & 0xFFFFFFFF)               # post-edge data
+      await NextTimeStep()                                               # before driving again
+
+  A word is accepted only if `in_ready` reads 1 AFTER the edge (re-offer it
+  otherwise); an output beat is consumed only if `out_valid` reads 1 after the
+  edge with the `out_ready` you drove for that cycle. Randomize input gaps and
+  output backpressure (about 15% of cycles) over several seeds: a DUT that drops
+  `in_ready` on an accepting edge or retires an output beat on next-edge
+  `out_ready` passes a pre-edge testbench and fails this one.
 - Use `cocotb.start_soon()` for concurrent coroutines. Do not use
   `cocotb.start_fork()`.
 - Use `assert` for every pass/fail KPI check.
@@ -76,7 +96,7 @@ COCOTB RULES:
 - Do not convert or compare multi-kilobit internal `tdata` signals through
   cocotb/VPI every cycle. Verilator/cocotb can truncate very wide string
   values. For wide internal streams, monitor `tvalid`, `tready`, `tlast`, and
-  narrow semantic/debug fields only; use VCD/WaveKit post-processing or RTL
+  narrow semantic/debug fields only; use VCD post-processing or RTL
   debug hashes/assertions for payload stability if full-width evidence is
   required. Top-level byte streams and narrow trace/status streams may be read
   directly.
@@ -217,9 +237,9 @@ the wrap happens at a 2^n boundary BELOW the maximum, not at the maximum.
 - If the ERS declares NO dimensional maxima, no max-geometry case or marker is
   needed.
 
-VCD/WAVEKIT AUDIT -- MANDATORY:
+VCD WAVEFORM -- MANDATORY:
 - The validation DV node runs Verilator with tracing enabled, expects
-  `sim_build/integration/dump.vcd`, and audits it with WaveKit before the
+  `sim_build/integration/dump.vcd`, which the debug agent and chip lead read before the
   node can pass.
 - For each RTL/application ERS requirement, drive enough realistic stimulus
   that the relevant requirement evidence is visible in the VCD: reset,
@@ -235,7 +255,7 @@ VCD/WAVEKIT AUDIT -- MANDATORY:
   symbols, reconstructed block quality, and feedback/context update evidence
   when those signals are available.
 - Log the ERS requirement IDs next to the transactions that exercise them so
-  WaveKit waveform inspection can tie each requirement to observed signals.
+  waveform inspection can tie each requirement to observed signals.
 
 OUTPUT FORMAT GUARD:
 Your response MUST be a single, complete Python file containing valid cocotb

@@ -160,7 +160,12 @@ def read_back_json(
             key=lambda p: p.stat().st_mtime,
             reverse=True,
         )
-        for candidate in candidates:
+    except (ValueError, OSError):
+        candidates = []
+    # A truncated newest artifact must not abandon recovery: try each
+    # candidate independently, newest first.
+    for candidate in candidates:
+        try:
             text = candidate.read_text(encoding="utf-8").strip()
             if not text:
                 continue
@@ -169,8 +174,8 @@ def read_back_json(
                 atomic_write(path, json.dumps(data, indent=2) + "\n")
                 merged = {**defaults, **data}
                 return merged, True
-    except (ValueError, json.JSONDecodeError, OSError):
-        pass
+        except (json.JSONDecodeError, OSError):
+            continue
     return parse_llm_json(llm_response, defaults, context=context)
 
 

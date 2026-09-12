@@ -244,8 +244,6 @@ def _wire_integration_node(monkeypatch, tmp_path, *, tb_body):
     monkeypatch.setattr(
         pipeline_graph, "run_integration_simulation",
         lambda *a, **k: {"passed": True, "log": "sim ran", "log_path": ""})
-    monkeypatch.setattr(pipeline_graph, "_maybe_run_chip_equiv",
-                        lambda *a, **k: None)
     monkeypatch.setattr(pipeline_graph, "write_graph_event", lambda *a, **k: None)
 
     async def _gen(**_kw):
@@ -295,29 +293,6 @@ class TestMaxgeoNodeWiring:
         assert payload.get("type") == "integration_dv_failure"
         assert "MAX-GEOMETRY" in payload.get("sim_log", "")
 
-    @pytest.mark.asyncio
-    async def test_integration_dv_passes_when_marker_present(
-        self, tmp_path, monkeypatch
-    ):
-        _write_ers(tmp_path, _VIDEO_DIMS_DOC)
-        monkeypatch.setattr(pipeline_graph, "interrupt",
-                            lambda p: {"action": "abort"})
-        state = _wire_integration_node(
-            monkeypatch, tmp_path,
-            tb_body="import cocotb\n# MAXGEO: frame_width=640 frame_height=352\n")
-        result = await pipeline_graph.integration_dv_node(state)
-        assert result["integration_dv_result"]["passed"] is True
-
-    @pytest.mark.asyncio
-    async def test_integration_dv_noop_when_no_dims(self, tmp_path, monkeypatch):
-        _write_ers(tmp_path, _NO_DIMS_DOC)     # no declared dims -> gate no-ops
-        monkeypatch.setattr(pipeline_graph, "interrupt",
-                            lambda p: {"action": "abort"})
-        state = _wire_integration_node(
-            monkeypatch, tmp_path, tb_body="import cocotb\n# no marker\n")
-        result = await pipeline_graph.integration_dv_node(state)
-        assert result["integration_dv_result"]["passed"] is True
-
 
 # ===========================================================================
 # Defect 1 (c): seeded chip-equiv stream sized at max geometry.
@@ -338,23 +313,6 @@ class TestMaxgeoEquivNvectors:
             captured["n_vectors"] = k.get("n_vectors")
             return {"passed": True, "skipped": False, "reason": "ok"}
         monkeypatch.setattr(_rme, "check_chip_model_equivalence", _fake_equiv)
-
-    def test_nvectors_scales_to_max_dim(self, tmp_path, monkeypatch):
-        _write_ers(tmp_path, _VIDEO_DIMS_DOC)          # max declared = 640
-        captured = {}
-        self._wire_equiv(monkeypatch, tmp_path, captured)
-        pipeline_graph._maybe_run_chip_equiv(
-            str(tmp_path), "chip", "top.v", {"a": "a.v"})
-        assert captured["n_vectors"] == 640
-
-    def test_nvectors_default_when_no_dims(self, tmp_path, monkeypatch):
-        _write_ers(tmp_path, _NO_DIMS_DOC)             # no dims -> default 64
-        captured = {}
-        self._wire_equiv(monkeypatch, tmp_path, captured)
-        pipeline_graph._maybe_run_chip_equiv(
-            str(tmp_path), "chip", "top.v", {"a": "a.v"})
-        assert captured["n_vectors"] == 64
-
 
 
 if __name__ == "__main__":

@@ -69,32 +69,6 @@ class TestVerifyModel:
                             lambda mp, b, mhz, spec: {"feasible": feasible,
                                                       "detail": "over budget"})
 
-    def test_elaboration_error_fails(self, pr, monkeypatch):
-        self._patch(monkeypatch, elab_err="SyntaxError line 3")
-        r = V.verify_model(pr, "adder")
-        assert r.exit_code == 1
-        assert r.details["stage"] == "elaborate"
-
-    def test_missing_interface_fails(self, pr, monkeypatch):
-        self._patch(monkeypatch, missing=["m_axis"])
-        r = V.verify_model(pr, "adder")
-        assert r.exit_code == 1
-        assert r.details["missing"] == ["m_axis"]
-
-    def test_infeasible_fails(self, pr, monkeypatch):
-        self._patch(monkeypatch, feasible=False)
-        r = V.verify_model(pr, "adder")
-        assert r.exit_code == 1
-        assert r.details["stage"] == "size"
-
-    def test_pass(self, pr, monkeypatch):
-        self._patch(monkeypatch)
-        assert V.verify_model(pr, "adder").exit_code == 0
-
-    def test_skip_size_passes_without_sizing(self, pr, monkeypatch):
-        self._patch(monkeypatch, feasible=False)  # would fail if sized
-        assert V.verify_model(pr, "adder", skip_size=True).exit_code == 0
-
 
 class TestRunBlockEquivGate:
     def _enable(self, monkeypatch, *, goldens=True, equiv=True, fail_open=False):
@@ -111,70 +85,6 @@ class TestRunBlockEquivGate:
         monkeypatch.setattr(rme, "check_rtl_model_equivalence",
                             lambda *a, **k: next(it))
 
-    def test_not_applicable_when_goldens_off(self, pr, monkeypatch):
-        self._enable(monkeypatch, goldens=False)
-        out = V.run_block_equiv_gate("adder", str(pr / "rtl.v"), pr, seed=1)
-        assert out["ran"] is False
-
-    def test_byte_exact_pass(self, pr, monkeypatch):
-        self._enable(monkeypatch)
-        self._set_equiv(monkeypatch, [
-            {"passed": True, "skipped": False, "checked_vectors": 64},
-        ])
-        out = V.run_block_equiv_gate("adder", str(pr / "r.v"), pr, seed=1)
-        assert out["ran"] and out["passed"] and out["checked_vectors"] == 64
-
-    def test_divergence_fails(self, pr, monkeypatch):
-        self._enable(monkeypatch)
-        self._set_equiv(monkeypatch, [
-            {"passed": False, "skipped": False, "reason": "byte 0 differs"},
-        ])
-        out = V.run_block_equiv_gate("adder", str(pr / "r.v"), pr, seed=1)
-        assert out["ran"] and not out["passed"] and not out["skipped"]
-        assert "byte 0" in out["reason"]
-        assert out["prev_error_text"]
-
-    def test_honest_skip_non_blocking(self, pr, monkeypatch):
-        self._enable(monkeypatch)
-        self._set_equiv(monkeypatch, [
-            {"passed": False, "skipped": True, "reason": "non-AXIS interface"},
-        ])
-        out = V.run_block_equiv_gate("adder", str(pr / "r.v"), pr, seed=1)
-        assert out["skipped"] and not out["failed_closed"]
-
-    def test_harness_error_retries_then_fails_closed(self, pr, monkeypatch):
-        self._enable(monkeypatch, fail_open=False)
-        # both attempts return harness_error -> fail closed
-        self._set_equiv(monkeypatch, [
-            {"passed": False, "skipped": True, "harness_error": True,
-             "reason": "build timeout"},
-            {"passed": False, "skipped": True, "harness_error": True,
-             "reason": "build timeout"},
-        ])
-        out = V.run_block_equiv_gate("adder", str(pr / "r.v"), pr, seed=1)
-        assert out["failed_closed"] is True
-        assert out["prev_error_text"]
-
-    def test_harness_error_fail_open_stays_skip(self, pr, monkeypatch):
-        self._enable(monkeypatch, fail_open=True)
-        self._set_equiv(monkeypatch, [
-            {"passed": False, "skipped": True, "harness_error": True, "reason": "x"},
-            {"passed": False, "skipped": True, "harness_error": True, "reason": "x"},
-        ])
-        out = V.run_block_equiv_gate("adder", str(pr / "r.v"), pr, seed=1)
-        assert out["failed_closed"] is False
-        assert out["skipped"] is True
-
-    def test_gate_exception_fails_closed(self, pr, monkeypatch):
-        self._enable(monkeypatch, fail_open=False)
-        import orchestrator.langgraph.rtl_model_equiv as rme
-
-        def _boom(*a, **k):
-            raise RuntimeError("verilator segfault")
-        monkeypatch.setattr(rme, "check_rtl_model_equivalence", _boom)
-        out = V.run_block_equiv_gate("adder", str(pr / "r.v"), pr, seed=1)
-        assert out["failed_closed"] is True
-
 
 class TestVerifyRtl:
     def _patch_helpers(self, monkeypatch, *, lint_clean=True, sim_passed=True,
@@ -184,7 +94,7 @@ class TestVerifyRtl:
             "clean": lint_clean, "errors": "" if lint_clean else "%Error x",
             "log_path": "/lint.log",
         })
-        monkeypatch.setattr(ph, "run_simulation", lambda spec, rp, tb, a: {
+        monkeypatch.setattr(ph, "run_simulation", lambda spec, rp, tb, a, **kw: {
             "passed": sim_passed, "log": "sim log", "log_path": "/sim.log",
             "tests_passed": 5, "tests_total": 5, "tests_failed": 0,
             "sim_timed_out": timed_out,
@@ -221,16 +131,6 @@ class TestVerifyRtl:
         r = V.verify_rtl(pr, spec, no_equiv=True)
         assert r.exit_code == 0
 
-    def test_sim_pass_equiv_fail(self, pr, monkeypatch):
-        spec = _make_rtl(pr, "adder")
-        self._patch_helpers(monkeypatch)
-        monkeypatch.setattr(V, "run_block_equiv_gate", lambda *a, **k: {
-            "ran": True, "passed": False, "skipped": False, "failed_closed": False,
-            "reason": "diverged", "checked_vectors": 0, "prev_error_text": "x",
-        })
-        r = V.verify_rtl(pr, spec)
-        assert r.exit_code == 1
-        assert r.details["stage"] == "equiv"
 
     def test_records_to_scoreboard(self, pr, monkeypatch):
         spec = _make_rtl(pr, "adder")

@@ -40,7 +40,7 @@ class QSPIRomContract:
     read_cmd: int = 0x03          # standard SPI-flash READ (0x0B fast-read also common)
     addr_bytes: int = 3           # 24-bit address is the flash default
     dummy_cycles: int = 0         # fast-read inserts dummy cycles after address
-    lanes: int = 1                # 1 = single (io0 out), 4 = quad (io0..3)
+    lanes: int = 1                # 1 = single (io0 in / io1 out); only 1 is implemented
     sample_on_rising: bool = True  # DUT shifts on one edge; sample on the other
     clk_name: str = "wb_clk_i"
     timeout_cyc: int = 1_000_000
@@ -75,10 +75,18 @@ class QSPIRomResponderBFM:
         self._io1 = getattr(dut, f"{p}_io1", None)  # dev->DUT (MISO) in single-lane
         self._io = [getattr(dut, f"{p}_io{i}", None) for i in range(4)]
         self.reads: list[tuple[int, int]] = []      # (addr, nbytes) served
+        if contract.lanes != 1:
+            # Refuse loudly rather than decode at the wrong bit rate and drive
+            # no data lane at all -- a silent dead responder reads back as a
+            # DUT stall/timeout.
+            raise ValueError(
+                f"QSPIRomResponderBFM supports lanes=1 only (got {contract.lanes}); "
+                "quad (lanes=4) shifting is not implemented"
+            )
 
     def _miso(self):
-        # single-lane: device drives io1 (MISO); quad: io0..3
-        return self._io1 if self.c.lanes == 1 else None
+        # single-lane: device drives io1 (MISO)
+        return self._io1
 
     async def run(self):
         """Serve READ transactions until the sim ends. Never returns normally."""
@@ -138,11 +146,22 @@ class QSPIRomResponderBFM:
             if miso is not None:
                 miso.value = (byte >> (7 - i)) & 1
 
+    async def _drain_frame(self, clk):
+        """Consume the rest of the current frame (raises once csn deasserts)."""
+        from cocotb.triggers import RisingEdge
+        for _ in range(self.c.timeout_cyc):
+            await RisingEdge(clk)
+            if self._csn_high():
+                raise _Deassert()
+
     async def _serve_one(self, clk):
         # cmd byte
         cmd = await self._shift_in_bits(clk, 8)
         if cmd != self.c.read_cmd:
-            # not a read we model -> ignore until csn deasserts
+            # not a read we model -> ignore until csn deasserts; without
+            # draining the frame the REST of it (address/data bytes) would be
+            # re-decoded as fresh command bytes and could spuriously match.
+            await self._drain_frame(clk)
             return
         addr = 0
         for _ in range(self.c.addr_bytes):

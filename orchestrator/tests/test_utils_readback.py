@@ -21,6 +21,34 @@ def test_read_back_json_recovers_codex_call_artifact(tmp_path):
     assert json.loads(target.read_text())["blocks"] == [{"name": "stage0"}]
 
 
+def test_read_back_json_skips_truncated_newest_candidate(tmp_path):
+    """A corrupt newest artifact must not abandon recovery: an older
+    codex-call worktree still holding valid JSON wins."""
+    import os
+
+    from orchestrator.utils import read_back_json
+
+    target = tmp_path / ".coresmith" / "block_diagram.json"
+    good = tmp_path / "codex-call-8" / ".coresmith" / "block_diagram.json"
+    good.parent.mkdir(parents=True)
+    good.write_text(json.dumps({"blocks": [{"name": "stage0"}]}))
+    truncated = tmp_path / "codex-call-9" / ".coresmith" / "block_diagram.json"
+    truncated.parent.mkdir(parents=True)
+    truncated.write_text('{"blocks": [{"name": "stag')
+    os.utime(good, (1000, 1000))
+    os.utime(truncated, (2000, 2000))
+
+    result, ok = read_back_json(
+        target,
+        "wrote the file",
+        {"blocks": [], "connections": [], "reasoning": "", "questions": []},
+        context="block_diagram",
+    )
+
+    assert ok is True
+    assert result["blocks"] == [{"name": "stage0"}]
+
+
 def test_uarch_markdown_recovery_prefers_codex_call_spec(tmp_path):
     from pathlib import Path
 

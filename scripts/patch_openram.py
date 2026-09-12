@@ -338,6 +338,7 @@ def _ptx_width_model_sub(
     if _PTX_WIDTH_MODEL_MARKER not in ptx_text:
         if _PTX_WIDTH_MODEL_ANCHOR not in ptx_text:
             return ptx_text, tech_text, substitutions
+        ptx_orig = ptx_text
         ptx_text = ptx_text.replace(
             _PTX_WIDTH_MODEL_ANCHOR, _PTX_WIDTH_MODEL_FIXED, 1
         )
@@ -348,7 +349,9 @@ def _ptx_width_model_sub(
             ptx_text,
         )
         if count < 4:
-            return ptx_text, tech_text, substitutions
+            # Bail WHOLE: the half-substituted body already carries the marker,
+            # so returning it would look "repaired" to the caller.
+            return ptx_orig, tech_text, substitutions
         substitutions += 1
     if _SKY130_WIDTH_MODEL_MARKER not in tech_text:
         if _SKY130_WIDTH_MODEL_ANCHOR not in tech_text:
@@ -687,9 +690,18 @@ def patch_openram(*, check_only: bool = False) -> PatchResult:
         patched_decoder, patched_bank, n = _rom_nomux_sub(
             decoder_text, bank_text
         )
+        # Judge on the marker being present in the RESULT of each file (the way
+        # the sram-m2-drc step does), not on n == 2: a run killed between the
+        # two writes below leaves the marker in the decoder only, and n != 2
+        # then wedged every later run on the "anchors not found" error with the
+        # bank never patched.
+        repaired = (
+            _ROM_NOMUX_MARKER in patched_decoder
+            and _ROM_NOMUX_MARKER in patched_bank
+        )
         if already_fixed:
             res.already.append("rom-nomux")
-        elif n != 2:
+        elif not repaired:
             res.errors.append(
                 "ROM no-mux anchors not found (unexpected OpenRAM version; "
                 "odd-depth ROM generation requires manual verification)"
@@ -882,9 +894,15 @@ def patch_openram(*, check_only: bool = False) -> PatchResult:
             _PTX_WIDTH_MODEL_MARKER in ptx_old
             and _SKY130_WIDTH_MODEL_MARKER in tech_old
         )
+        # Marker-in-result, not count == 2, so a prior apply interrupted between
+        # the two writes below still gets its remaining file patched.
+        repaired = (
+            _PTX_WIDTH_MODEL_MARKER in ptx_new
+            and _SKY130_WIDTH_MODEL_MARKER in tech_new
+        )
         if markers:
             res.already.append("sky130-width-model")
-        elif count != 2:
+        elif not repaired:
             res.errors.append(
                 "sky130 width-model anchors not found "
                 "(unexpected OpenRAM version)"

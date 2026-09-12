@@ -45,6 +45,11 @@ RULES:
      memory/IO/wrapper block that reproduces no golden math. Format:
      `<this_run's_golden_file>.py:<fn_or_method_1>,<fn_or_method_2>,...` naming
      the ACTUAL functions from THIS run's golden that this block reproduces.
+     HARD SIGNOFF RULE: a chip cannot sign off while any block has neither a
+     python_source golden slice nor an explicit exemption. For a pure
+     memory/IO/wrapper block that reproduces no golden math, set
+     `"golden_exempt": true` AND `"no_golden_reason": "<why the contract fixes
+     its behaviour completely>"`; every other block MUST name its golden slice.
    - rtl_target: path for generated Verilog (e.g. "rtl/<subsystem>/<name>.v")
    - testbench: path for cocotb testbench (e.g. "tb/cocotb/test_<name>.py")
    - interfaces: dict of port groups (e.g. {{"input": {{"width": 8}}, "output": {{"width": 8}}}})

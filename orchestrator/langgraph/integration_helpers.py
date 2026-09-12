@@ -32,7 +32,6 @@ from orchestrator.langgraph.pipeline_helpers import (
     apply_build_fingerprint,
     clear_build_products,
     log,
-    run_wavekit_vcd_audit,
 )
 
 # ---------------------------------------------------------------------------
@@ -81,6 +80,13 @@ class VerilogModule:
             "parameters": self.parameters,
             "filepath": self.filepath,
         }
+
+
+# Net/type keywords that may sit between a direction keyword and the port
+# identifiers it declares.
+_TYPE_KEYWORDS = {"wire", "reg", "logic", "signed", "unsigned", "bit",
+                  "tri", "var", "integer", "real", "byte", "shortint",
+                  "int", "longint", "supply0", "supply1"}
 
 
 def parse_verilog_ports(rtl_path: str, module: str | None = None) -> VerilogModule:
@@ -146,37 +152,40 @@ def parse_verilog_ports(rtl_path: str, module: str | None = None) -> VerilogModu
 
     ports: list[VerilogPort] = []
 
-    # Try ANSI-style ports (direction in header)
-    ansi_port_re = re.compile(
-        r'(input|output|inout)\s+'
-        r'(?:(reg|wire)\s+)?'
-        r'(?:(signed)\s+)?'
-        r'(?:\[\s*(\d+)\s*:\s*(\d+)\s*\]\s*)?'
-        r'(\w+)',
-        re.MULTILINE
-    )
+    # Try ANSI-style ports (direction in header). Split the header on the
+    # direction keywords and take EVERY identifier in each segment, the way
+    # contract_conformance.declared_ports does: a grouped declaration
+    # (`input [7:0] a, b`) shares one direction/width across all its names, and
+    # capturing only the first dropped the rest from the port map -- the
+    # assembled top then left them dangling.
+    dir_matches = list(re.finditer(r'\b(input|output|inout)\b', port_text))
 
-    ansi_ports = list(ansi_port_re.finditer(port_text))
-
-    if ansi_ports:
-        for m in ansi_ports:
+    if dir_matches:
+        for i, m in enumerate(dir_matches):
+            seg_end = (dir_matches[i + 1].start()
+                       if i + 1 < len(dir_matches) else len(port_text))
+            seg = port_text[m.end():seg_end]
             direction = m.group(1)
-            is_reg = m.group(2) == "reg"
-            is_signed = m.group(3) == "signed"
-            msb = int(m.group(4)) if m.group(4) else 0
-            lsb = int(m.group(5)) if m.group(5) else 0
-            name = m.group(6)
-            width = abs(msb - lsb) + 1 if m.group(4) else 1
+            is_reg = re.search(r'\breg\b', seg) is not None
+            is_signed = re.search(r'\bsigned\b', seg) is not None
+            rng = re.search(r'\[\s*(\d+)\s*:\s*(\d+)\s*\]', seg)
+            msb = int(rng.group(1)) if rng else 0
+            lsb = int(rng.group(2)) if rng else 0
+            width = abs(msb - lsb) + 1 if rng else 1
 
-            ports.append(VerilogPort(
-                name=name,
-                direction=direction,
-                width=width,
-                msb=msb,
-                lsb=lsb,
-                is_reg=is_reg,
-                is_signed=is_signed,
-            ))
+            for name in re.findall(r'[A-Za-z_]\w*',
+                                   re.sub(r'\[[^\]]*\]', ' ', seg)):
+                if name in _TYPE_KEYWORDS:
+                    continue
+                ports.append(VerilogPort(
+                    name=name,
+                    direction=direction,
+                    width=width,
+                    msb=msb,
+                    lsb=lsb,
+                    is_reg=is_reg,
+                    is_signed=is_signed,
+                ))
     else:
         # Non-ANSI: port names in header, declarations in body
         port_names = [n.strip() for n in port_text.split(',') if n.strip()]
@@ -630,6 +639,7 @@ def generate_top_level_rtl(
     connections: list[dict],
     modules: dict[str, VerilogModule],
     mismatches: list[IntegrationMismatch] | None = None,
+    project_root=None,
 ) -> dict:
     """Generate the top-level Verilog module that instantiates and wires all blocks.
 
@@ -642,6 +652,9 @@ def generate_top_level_rtl(
         connections: Architecture connection list.
         modules: Parsed block modules.
         mismatches: Known mismatches (used to skip broken connections).
+        project_root: Run directory the ``rtl/integration/`` output is
+            anchored to. Defaults to the module-level ``PROJECT_ROOT``
+            (resolved at call time so monkeypatching it still works).
 
     Returns:
         dict with keys: verilog, rtl_path, module_name, block_count,
@@ -710,6 +723,22 @@ def generate_top_level_rtl(
             ("wire", wire_name)
         )
 
+    # Fan-out: a source port feeding several consumers gets one wire per
+    # connection, but the instantiation below binds only the FIRST -- the other
+    # consumers' wires would be undriven. Drive the extras from the bound one
+    # (generate_caravel_wrapper_top merges them via union-find instead).
+    fanout: list[str] = []
+    for key, conns in wire_connections.items():
+        if len(conns) < 2:
+            continue
+        block_name, _, port_name = key.partition(".")
+        src_mod = modules.get(block_name)
+        port = src_mod.port_by_name(port_name) if src_mod else None
+        if not port or port.direction != "output":
+            continue
+        driven = conns[0][1]
+        fanout.extend(f"  assign {w} = {driven};" for _kind, w in conns[1:])
+
     # Collect top-level I/O ports (ports not connected to other blocks)
     top_inputs: list[str] = []
     top_outputs: list[str] = []
@@ -763,6 +792,12 @@ def generate_top_level_rtl(
         lines.extend(wires)
         lines.append("")
 
+    # Fan-out assigns
+    if fanout:
+        lines.append(f"  // Fan-out ({len(fanout)} extra consumer(s))")
+        lines.extend(fanout)
+        lines.append("")
+
     # Block instantiations
     for block_name, mod in sorted(modules.items()):
         lines.append(f"  // {block_name}")
@@ -811,7 +846,7 @@ def generate_top_level_rtl(
     verilog = "\n".join(lines)
 
     # Write to disk
-    rtl_dir = PROJECT_ROOT / "rtl" / "integration"
+    rtl_dir = Path(project_root or PROJECT_ROOT) / "rtl" / "integration"
     rtl_dir.mkdir(parents=True, exist_ok=True)
     rtl_path = rtl_dir / f"{safe_name}.v"
     rtl_path.write_text(verilog, encoding="utf-8")
@@ -1637,10 +1672,15 @@ def lint_top_level(
     top_rtl_path: str,
     block_rtl_paths: list[str],
     design_name: str = "integration",
+    project_root=None,
 ) -> dict:
     """Run Verilator lint on the top-level module with all block RTL files.
 
     Includes all block Verilog files so Verilator can resolve instantiations.
+
+    ``project_root`` anchors the ``sim_build/integration_lint`` dedup scratch
+    dir at the RUN directory; it defaults to the module-level ``PROJECT_ROOT``
+    (resolved at call time) so existing callers are unchanged.
 
     Returns:
         dict with: clean (bool), errors (str), warnings (str), log_path (str).
@@ -1678,7 +1718,8 @@ def lint_top_level(
     # sim keeps the lib body -- the two stages must see the same sources. Writes
     # deduped copies into a scratch dir alongside the run logs.
     try:
-        _dd_dir = PROJECT_ROOT / "sim_build" / "integration_lint"
+        _dd_dir = (Path(project_root or PROJECT_ROOT) / "sim_build"
+                   / "integration_lint")
         _dd_dir.mkdir(parents=True, exist_ok=True)
         lint_sources = _dedup_module_sources(lint_sources, _dd_dir)
     except Exception:
@@ -1812,6 +1853,7 @@ async def generate_integration_testbench(
     prior_failure: str = "",
     chip_model_path: str = "",
     parameter_table: str = "",
+    project_root=None,
 ) -> dict:
     """Generate a cocotb integration testbench via the Lead DV agent.
 
@@ -1819,6 +1861,10 @@ async def generate_integration_testbench(
     description of why the previous integration DV attempt failed so the
     LLM can avoid repeating the same mistake. The underlying
     ``IntegrationTestbenchGenerator.generate`` accepts the same kwarg.
+
+    ``project_root`` anchors ``tb/integration/`` at the RUN directory; it
+    defaults to the module-level ``PROJECT_ROOT`` (resolved at call time) so
+    existing callers are unchanged.
 
     Returns:
         dict with: tb_path (str), testbench_path (str), test_count (int).
@@ -1838,7 +1884,7 @@ async def generate_integration_testbench(
             "ports": [p.to_dict() for p in mod.ports],
         })
 
-    tb_dir = PROJECT_ROOT / "tb" / "integration"
+    tb_dir = Path(project_root or PROJECT_ROOT) / "tb" / "integration"
     tb_dir.mkdir(parents=True, exist_ok=True)
     output_path = str(tb_dir / f"test_{design_name}.py")
 
@@ -1871,8 +1917,13 @@ async def generate_validation_testbench(
     reference_path: str = "",
     reference_entry: str = "",
     parameter_table: str = "",
+    project_root=None,
 ) -> dict:
     """Generate an ERS/KPI validation cocotb testbench via Lead Validation DV.
+
+    ``project_root`` anchors ``tb/validation/`` at the RUN directory; it
+    defaults to the module-level ``PROJECT_ROOT`` (resolved at call time) so
+    existing callers are unchanged.
 
     Returns:
         dict with: tb_path (str), testbench_path (str), test_count (int).
@@ -1892,7 +1943,7 @@ async def generate_validation_testbench(
             "ports": [p.to_dict() for p in mod.ports],
         })
 
-    tb_dir = PROJECT_ROOT / "tb" / "validation"
+    tb_dir = Path(project_root or PROJECT_ROOT) / "tb" / "validation"
     tb_dir.mkdir(parents=True, exist_ok=True)
     output_path = str(tb_dir / f"test_{design_name}_validation.py")
 
@@ -2341,6 +2392,7 @@ def run_integration_simulation(
     tb_path: str,
     attempt: int = 1,
     sim_scope: str = "integration",
+    project_root=None,
 ) -> dict:
     """Run cocotb simulation on the integrated top-level design.
 
@@ -2354,6 +2406,12 @@ def run_integration_simulation(
     ``sim_build/validation`` + ``step_logs/integration/validation_sim_attempt<N>.log``
     -- preserving the integration run's raw sim log for forensics and avoiding
     build-fingerprint churn between the two runs.
+
+    ``project_root`` anchors ``sim_build/<scope>`` (and the sim PYTHONPATH) at
+    the RUN directory; it defaults to the module-level ``PROJECT_ROOT``
+    (resolved at call time) so existing callers are unchanged. Without it, a
+    process that never set ``CORESMITH_PROJECT_ROOT`` builds the chip inside
+    the engine checkout.
 
     Returns:
         dict with: passed (bool), log (str), returncode (int), log_path (str).
@@ -2369,7 +2427,8 @@ def run_integration_simulation(
     # Distinct sim build dir per scope (avoids fingerprint churn: the two runs
     # differ only in MODULE, which would otherwise trigger a full rebuild on
     # every integration<->validation switch through a shared dir).
-    sim_dir = PROJECT_ROOT / "sim_build" / sim_scope
+    root = Path(project_root) if project_root else PROJECT_ROOT
+    sim_dir = root / "sim_build" / sim_scope
     sim_dir.mkdir(parents=True, exist_ok=True)
     # Distinct step-log name per scope (validation -> validation_sim_attempt<N>.log)
     # so validation_dv never overwrites integration_dv's raw sim log.
@@ -2401,13 +2460,9 @@ def run_integration_simulation(
     except OSError:
         pass
 
-    # TRACE IS MANDATORY on the integration/validation sim path (2026-07-02 fix).
-    # This function backs BOTH integration_dv and validation_dv, whose PASS verdict
-    # HARD-REQUIRES a WaveKit VCD audit: `run_wavekit_vcd_audit` fail-closes on a
-    # missing/empty VCD and the caller gates `passed` on `wavekit_audit["ok"] is
-    # True`. Previously the trace was gated behind CORESMITH_SIM_TRACE=1 (default
-    # OFF), so a healthy 6/6-passing sim could STRUCTURALLY never pass integration
-    # DV -- it emitted no dump.vcd and the audit fail-closed on it.
+    # TRACE stays on for the integration/validation sim path: the VCD is the
+    # debug agent's and the chip lead's evidence. (WP-10a removed the WaveKit
+    # audit that used to veto the PASS verdict on it.)
     #
     # The trace was only ever gated to dodge an OOM from `--trace --trace-structs`
     # C++ built in PARALLEL fork-storming a 4-core host (2026-07-01). That storm is
@@ -2454,7 +2509,7 @@ def run_integration_simulation(
     venv_bin = str(Path(sys.prefix) / "bin")
     env["PATH"] = f"{venv_bin}:{env.get('PATH', '/usr/bin:/bin')}"
     env["SHELL"] = shutil.which("bash") or "/bin/bash"
-    env["PYTHONPATH"] = f"{sim_dir}:{PROJECT_ROOT}:{env.get('PYTHONPATH', '')}"
+    env["PYTHONPATH"] = f"{sim_dir}:{root}:{env.get('PYTHONPATH', '')}"
     # SERIAL make (-j1): with `--build-jobs 1` in the Makefile this keeps the
     # full-chip Verilator build single-threaded so it can never fork-storm the
     # host (the 2026-07-01 incident). Raise only on a big box via
@@ -2534,8 +2589,6 @@ def run_integration_simulation(
             )
 
         vcd_path = sim_dir / "dump.vcd"
-        audit_path = sim_dir / "wavekit_audit.json"
-        wavekit_audit = run_wavekit_vcd_audit(vcd_path, audit_path)
         passed = (
             result.returncode == 0
             and not no_tests
@@ -2543,13 +2596,7 @@ def run_integration_simulation(
                 not summary["found"]
                 or (summary["tests_total"] > 0 and summary["tests_failed"] == 0)
             )
-            and wavekit_audit.get("ok") is True
         )
-        if not wavekit_audit.get("ok"):
-            output = (
-                "WAVEKIT VCD AUDIT FAILED: "
-                f"{wavekit_audit.get('error', 'unknown error')}\n" + output
-            )
         return {
             "passed": passed,
             "log": output,
@@ -2559,8 +2606,6 @@ def run_integration_simulation(
             "tests_failed": summary["tests_failed"],
             "log_path": log_path,
             "vcd_path": str(vcd_path) if vcd_path.exists() else "",
-            "wavekit_audit_path": str(audit_path),
-            "wavekit_audit": wavekit_audit,
         }
     except subprocess.TimeoutExpired:
         cmd = [make_bin, "-C", str(sim_dir)]

@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from orchestrator.langgraph.gate_guard import (
@@ -61,6 +63,18 @@ class TestGateGuard:
         assert r.passed is True
         assert r.skipped is True
         assert r.errored is True  # the error is still RECORDED, just tolerated
+
+    @pytest.mark.parametrize("exc", [KeyboardInterrupt, SystemExit,
+                                     asyncio.CancelledError])
+    def test_interrupts_propagate(self, exc, monkeypatch):
+        # Control flow is not a gate outcome -- not even under fail-open.
+        monkeypatch.setenv("CORESMITH_GATE_FAIL_OPEN", "1")
+
+        def _boom():
+            raise exc()
+
+        with pytest.raises(exc):
+            gate_guard("g", _boom)
 
     def test_fail_open_default_off(self, monkeypatch):
         monkeypatch.delenv("CORESMITH_GATE_FAIL_OPEN", raising=False)

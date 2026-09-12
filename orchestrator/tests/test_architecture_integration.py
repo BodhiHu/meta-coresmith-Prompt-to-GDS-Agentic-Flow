@@ -34,13 +34,10 @@ import pytest
 from orchestrator.tests.conftest import enter_arch_llm_node_patches, wait_for_status
 from orchestrator.tests.fft16_fixtures import (
     FFT16_BLOCK_DIAGRAM,
-    FFT16_CLOCK_TREE,
     FFT16_FRD_DOCUMENT,
-    FFT16_MEMORY_MAP,
     FFT16_PRD_ANSWERS,
     FFT16_PRD_DOCUMENT,
     FFT16_PRD_QUESTIONS,
-    FFT16_REGISTER_SPEC,
     FFT16_REQUIREMENTS,
     FFT16_SAD_DOCUMENT,
 )
@@ -122,21 +119,6 @@ def _patch_specialists_for_lifecycle(*, constraint_side_effect=None):
         "orchestrator.architecture.specialists.block_diagram.analyze_block_diagram",
         new_callable=AsyncMock,
         return_value=FFT16_BLOCK_DIAGRAM,
-    ))
-    stack.enter_context(patch(
-        "orchestrator.architecture.specialists.memory_map.analyze_memory_map",
-        new_callable=AsyncMock,
-        return_value=FFT16_MEMORY_MAP,
-    ))
-    stack.enter_context(patch(
-        "orchestrator.architecture.specialists.clock_tree.analyze_clock_tree",
-        new_callable=AsyncMock,
-        return_value=FFT16_CLOCK_TREE,
-    ))
-    stack.enter_context(patch(
-        "orchestrator.architecture.specialists.register_spec.analyze_register_spec",
-        new_callable=AsyncMock,
-        return_value=FFT16_REGISTER_SPEC,
     ))
 
     if constraint_side_effect is not None:

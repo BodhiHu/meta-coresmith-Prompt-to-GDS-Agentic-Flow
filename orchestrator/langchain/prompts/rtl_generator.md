@@ -61,14 +61,14 @@ RULES:
     assign statement. Never split updates to the same signal across multiple
     always blocks or mix combinational assign with sequential always blocks
     for the same signal.
-16. WAVEKIT/VCD AUDITABILITY -- MANDATORY:
-    The downstream DV nodes dump a Verilator VCD and inspect it with WaveKit.
+16. VCD AUDITABILITY -- MANDATORY:
+    The downstream DV nodes dump a Verilator VCD that the debug agent reads.
     Your RTL must be waveform-auditable:
     a. Preserve explicit, named valid/ready, state, counter, coordinate,
        metadata, error, and packet-boundary signals instead of hiding all
        protocol state inside anonymous packed expressions.
     b. Register sideband metadata at pipeline boundaries with stable names
-       ending in `_q` where possible, so WaveKit can correlate data and
+       ending in `_q` where possible, so a waveform reader can correlate data and
        metadata across cycles.
     c. Never drop, repack, or reinterpret tuser/metadata bits without a
        named assignment documenting the bit layout in code comments.
@@ -233,11 +233,52 @@ When converting Python to {rtl_language}:
   skill below.
 - Map floating-point math to fixed-point (specify Q format in comments).
 - Handle variable-length data with valid/ready handshaking.
-- A ready/valid transfer is exactly `valid && ready` sampled on the clock edge.
-  Do not qualify the handshake with a registered copy of `ready`, a previous
-  cycle's ready, or a requirement that ready stay high for two cycles. If a
-  registered output token is held valid, a one-cycle `ready` pulse must retire
-  exactly one token and advance state once.
+- INTERNAL block-to-block interfaces: a ready/valid transfer is exactly
+  `valid && ready` sampled on the clock edge. Do not qualify the handshake with
+  a registered copy of `ready`, a previous cycle's ready, or a requirement that
+  ready stay high for two cycles. If a registered output token is held valid, a
+  one-cycle `ready` pulse must retire exactly one token and advance state once.
+  The chip-boundary stream ports are the ONE exception -- see PUBLISHED STREAM
+  SAMPLER CONTRACT below; a block that owns them (the stream controller /
+  chip top) must follow that contract on those ports.
+
+PUBLISHED STREAM SAMPLER CONTRACT (chip-boundary stream ports ONLY):
+The task's shipped sampler/testbench is the contract for these ports; the
+ERS transcribes its acceptance semantics and that transcription wins over
+anything below. For the ppabench `stream_tb.py` family the semantics are:
+the grader drives the chip's top-level stream ports (in_valid/in_ready/in_data/
+in_last, out_valid/out_ready/out_data/out_last) before each rising edge and
+samples them in the read-only phase AFTER the edge. It counts:
+  input word accepted on edge N  <=> in_valid (driven before N) && in_ready as it
+                                     reads AFTER N (the value in_ready takes at N)
+  output beat consumed on edge N <=> out_valid/out_data as they read after N &&
+                                     out_ready as driven for cycle N
+Rules that follow. Violating either desyncs the grader; the failure is
+seed-dependent under backpressure and is NOT caught by a testbench that samples
+ready before the edge (arms A, B and E of the h264 experiment all shipped it):
+  - in_ready: the grader re-offers a word whenever in_ready reads 0 after the
+    edge, and counts it accepted on the first edge after which in_ready reads 1.
+    Two self-consistent ways to honour that; pick ONE and keep it everywhere:
+      (a) pre-edge latching (accept = in_valid && in_ready_q): in_ready may only
+          FALL on an edge that accepts a word (the re-offered duplicate is then
+          absorbed by the edge on which in_ready rises, where in_ready_q is
+          still 0 so nothing is latched twice); never fall on a non-accepting
+          edge, or the re-offered word is lost when ready rises.
+      (b) post-edge latching (accept = in_valid && in_ready_next): drop ready
+          only on an edge that does NOT latch (refuse-and-drop), and latch on
+          the edge ready rises if in_valid is high.
+    Mixing the two (e.g. pre-edge latching plus refuse-and-drop) desyncs the
+    grader.
+  - out side: the beat visible after edge N is consumed by the out_ready driven
+    for cycle N. Register it (`out_ready_q <= out_ready`), keep out_valid/out_data
+    on registered state, hold the beat until `out_valid_q && out_ready_q`, and
+    only then advance to the next beat. Retiring on the raw out_ready sampled at
+    the next edge skips a beat on every ready 0->1 transition.
+  - If the task ships a reference sampler/testbench (for example a cocotb
+    `StreamHarness`), its sampling is the contract; the ERS must transcribe it
+    and the DV must drive the DUT exactly as it does.
+Internal block-to-block interfaces keep the standard convention (a transfer is
+`valid && ready` sampled at the edge); this section is about the chip boundary.
 
 If the previous attempt failed, the error will be provided. Fix the specific
 issue while maintaining correctness.
@@ -253,7 +294,7 @@ Only report success when lint is clean.
 Output format:
 1. Write the complete {rtl_language} module to the specified file path.
 2. Run verilator lint and fix any errors.
-3. Ensure the RTL exposes enough named internal signals for a WaveKit VCD
+3. Ensure the RTL exposes enough named internal signals for a VCD
    audit of reset, handshakes, metadata, state transitions, and error flags.
 4. After the module, output a JSON block with port information:
    ```json

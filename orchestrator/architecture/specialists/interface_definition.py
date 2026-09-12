@@ -109,7 +109,10 @@ async def analyze_interface_definition(
             )
             return {"result": result, "questions": []}
 
-        target_path = Path(project_root) / ".coresmith" / "interface_contracts.json"
+        # The LLM writes a DRAFT; this specialist imports the validated result
+        # into the project database, which regenerates the read-only
+        # .coresmith/interface_contracts.json view.
+        target_path = Path(project_root) / ".coresmith" / "drafts" / "interface_contracts.json"
         target_path.parent.mkdir(parents=True, exist_ok=True)
 
         parts = [
@@ -218,6 +221,12 @@ async def analyze_interface_definition(
         span.set_attribute(
             "open_question_count", len(result.get("open_questions", []) or [])
         )
+        try:
+            from orchestrator.state_store.project_db import open_project
+            open_project(project_root).import_contracts(result)
+        except Exception as exc:  # noqa: BLE001
+            span.set_attribute("contracts_import_error", str(exc))
+            raise
         return {
             "result": result,
             "questions": result.get("open_questions", []) or [],

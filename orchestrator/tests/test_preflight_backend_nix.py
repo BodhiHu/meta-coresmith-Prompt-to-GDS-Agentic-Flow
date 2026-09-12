@@ -30,7 +30,7 @@ def _warn_blob(result: dict) -> str:
 @pytest.fixture
 def _no_pdk_noise(monkeypatch):
     """Backend preflight also checks PDK files; those errors are not the point."""
-    monkeypatch.setenv("CORESMITH_SKIP_SYNTH", "1")
+    monkeypatch.setenv("CORESMITH_SYNTH_GENERIC", "1")
     monkeypatch.setenv("CORESMITH_ALLOW_NO_OPENRAM", "1")
 
 

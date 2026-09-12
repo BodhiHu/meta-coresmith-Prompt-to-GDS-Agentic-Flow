@@ -190,12 +190,21 @@ resume`. See [CLAUDE.md](CLAUDE.md) for the full decision contract.
 ### Web UI (live dashboard)
 
 `orchestrator/vscode-ext/serve.py` serves the same ReactFlow dashboard the
-VS Code extension provides, but as a plain web page in any browser — the
-graph view, a Gantt timeline of every block/node, per-node LLM
-trajectories (prompts, tool runs, reasoning), and a browser for generated
-collateral (RTL, testbenches, waveforms, GDS reports). It's **read-only**:
-it visualizes a daemon run by reading that run's `.coresmith/` event logs,
-so it never drives the pipeline.
+VS Code extension provides, but as a plain web page in any browser. It is a
+**run-review tool**: the **Overview** tab is a run-level dashboard (block table
+with DV / coverage / cells / FF / area / WNS vs budgets, integration and
+validation results, chip-lead decisions, interrupt history, engine SHA and
+settings, token and wall-time totals); the **Blocks** tab scopes everything to
+one block — a chronological **Trajectory** (rounds → graph nodes → every LLM
+call with its full prompts, agent commands and captured output, file writes,
+response, plus tool logs and engine events) and a **Design & results** page
+(uArch spec versions, RTL with diffs between attempts, testbench, simulation,
+synthesis, timing, gates, issues, decisions). The graph, Gantt timeline and
+collateral browser remain. It's **read-only**: it visualizes a run by reading
+that run's `.coresmith/` logs, `project.sqlite` (opened read-only) and
+artefacts, so it never drives the pipeline or writes to the run directory.
+See [docs/WEBVIEW.md](docs/WEBVIEW.md) for the views, where every number comes
+from, the JSON endpoints, and the data the engine does not persist yet.
 
 Because it reads the run's event logs, the webview must point at the **same
 project root as the daemon** — it keys off the same `CORESMITH_PROJECT_ROOT`
@@ -241,6 +250,7 @@ pytest orchestrator/tests/ -v -m "not requires_nix and not e2e"
 - [docs/LOCAL-DEV.md](docs/LOCAL-DEV.md) — running and iterating without containers
 - [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) — common failures (Yosys version, missing PDK, OpenROAD OOM, …)
 - [docs/RUNPOD.md](docs/RUNPOD.md) — hosted runs with a ready-to-paste pod template
+- [docs/WEBVIEW.md](docs/WEBVIEW.md) — the run-review web UI: views, data sources, endpoints, known gaps
 
 ## Maintainer
 

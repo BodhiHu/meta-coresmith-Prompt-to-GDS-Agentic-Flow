@@ -55,13 +55,7 @@ def stub_eda(
     (``(*args, **kwargs) -> dict``). Unset -> passing default (equiv -> skip).
     """
     from orchestrator.langgraph import pipeline_graph as pg
-    from orchestrator.langgraph import rtl_model_equiv as rme
 
     monkeypatch.setattr(pg, "lint_rtl", _as_callable(lint, LINT_CLEAN))
     monkeypatch.setattr(pg, "run_simulation", _as_callable(sim, SIM_PASS))
     monkeypatch.setattr(pg, "synthesize_block", _as_callable(synth, SYNTH_OK))
-    # Equiv is imported lazily inside the node from rtl_model_equiv, so patch the
-    # source module (patching the pipeline_graph namespace would miss it).
-    monkeypatch.setattr(
-        rme, "check_rtl_model_equivalence", _as_callable(equiv, EQUIV_SKIP)
-    )

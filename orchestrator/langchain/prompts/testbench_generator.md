@@ -84,6 +84,16 @@ When the DUT has AXI-Stream input (s_tvalid/s_tready) and output
   - For backpressure tests, use ``cocotb.start_soon()`` to run sender
     and receiver concurrently, toggling m_tready on/off in the receiver.
 
+  - PUBLISHED STREAM SAMPLER: if this block owns the chip's published stream ports (the ERS names
+    them: in_valid/in_ready/in_data/in_last, out_valid/out_ready/out_data/
+    out_last), drive and sample THOSE ports exactly like the published
+    grader (post-edge): drive inputs and out_ready for the cycle, `await
+    RisingEdge`, `await ReadOnly`, count a word accepted only if `in_ready`
+    reads 1 after the edge (re-offer it otherwise), count an output beat
+    consumed only if `out_valid` reads 1 after the edge with the `out_ready`
+    you drove, then `await NextTimeStep`. Randomize input gaps and ~15%
+    output backpressure over several seeds. The phase-safe helper below is
+    for the block's INTERNAL AXI-Stream ports.
   - Every AXI-Stream send helper MUST be phase-safe. Drive
     ``tvalid/tdata/tlast`` before the rising edge that may accept the beat,
     sample ``tready`` for that same rising edge, then deassert ``tvalid``
@@ -277,9 +287,9 @@ RULES:
     block model`` at the top so the divergence risk is visible. Do NOT
     reimplement the reference merely because it seems easier than calling the
     model; a TB-local copy is the staleness vector this prompt forbids.
-15. VCD/WAVEKIT AUDIT -- MANDATORY:
+15. VCD WAVEFORM -- MANDATORY:
     The pipeline runs cocotb under Verilator with tracing enabled, expects
-    `sim_build/<block>/dump.vcd`, and inspects that VCD with WaveKit. Your
+    `sim_build/<block>/dump.vcd`, which the debug agent reads. Your
     tests must exercise reset, primary handshakes, representative datapath
     activity, sideband metadata, and terminal outputs so the waveform audit
     has meaningful transitions. Do not disable tracing, skip clocks, or

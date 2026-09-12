@@ -22,7 +22,7 @@ Inputs available on disk may include:
 - uArch specs under `arch/uarch_specs/`
 - Integration or validation testbench under `tb/integration/` or `tb/validation/`
 - Simulation logs under `sim_build/integration/`
-- VCD waveform and WaveKit audit under `sim_build/integration/`
+- VCD waveform under `sim_build/integration/`
 - Golden reference model files referenced by ERS, PRD, validation TB, or examples
 
 Audit method:
@@ -30,7 +30,7 @@ Audit method:
 2. Build a first-divergence trace. Prefer measurable evidence:
    - golden model transaction or macro-step
    - RTL interface transaction
-   - VCD/WaveKit signal observation
+   - VCD signal observation
    - output mismatch
 3. Compare the observed behavior against the ERS and uArch specs.
 4. Decide whether a local RTL/TB patch is enough, or whether the contract
@@ -43,7 +43,7 @@ Important rules:
   interfaces, do not call it a local RTL bug. It is a contract/uArch issue.
 - If the RTL faithfully implements the uArch but the ERS KPI cannot be met,
   classify as `UARCH_SPEC_ERROR` or `ARCHITECTURE_ERROR`.
-- If the VCD or WaveKit audit is missing, empty, or header-only, classify that
+- If the VCD is missing, empty, or header-only, classify that
   as `DV_PROCESS_ERROR` unless there is enough other evidence to decide.
 - For application KPIs like PSNR, compression ratio, decoded frame quality,
   latency, or throughput, identify the first internal semantic value that

@@ -461,89 +461,6 @@ class TestConstraintChecker:
 # ---------------------------------------------------------------------------
 
 
-class TestStubSpecialists:
-    @pytest.mark.asyncio
-    async def test_memory_map_simple_design(self, sample_block_diagram):
-        """With <= 3 blocks and no bus infra, analyze_memory_map returns a
-        simplified no-op result (simple-design escape hatch)."""
-        from orchestrator.architecture.specialists.memory_map import analyze_memory_map
-
-        result = await analyze_memory_map(sample_block_diagram)
-
-        assert result["questions"] == []
-        mm = result["result"]
-        assert mm["peripherals"] == []
-        assert mm["peripheral_count"] == 0
-        assert mm["sram"] is None
-
-    @pytest.mark.asyncio
-    async def test_clock_tree_via_llm(self, sample_block_diagram):
-        """Clock tree now uses LLM; verify structure with mocked response."""
-        from unittest.mock import AsyncMock, patch
-
-        llm_response = json.dumps({
-            "domains": [{"name": "clk_sys", "frequency_mhz": 100.0, "source": "PLL"}],
-            "crossings": [],
-            "reset_spec": {"strategy": "synchronous", "domains": ["clk_sys"]},
-            "num_domains": 1,
-            "cdc_required": False,
-        })
-
-        with patch(
-            "orchestrator.langchain.agents.coresmith_llm.ClaudeLLM"
-        ) as MockLLM:
-            MockLLM.return_value.call = AsyncMock(return_value=llm_response)
-            from orchestrator.architecture.specialists.clock_tree import analyze_clock_tree
-            result = await analyze_clock_tree(sample_block_diagram, target_clock_mhz=100.0)
-
-        ct = result["result"]
-        assert len(ct["domains"]) == 1
-        assert ct["domains"][0]["frequency_mhz"] == 100.0
-        assert ct["cdc_required"] is False
-
-    @pytest.mark.asyncio
-    async def test_register_spec_via_llm(self, sample_block_diagram):
-        """Register spec now uses LLM; verify structure with mocked response."""
-        from unittest.mock import AsyncMock, patch
-
-        llm_response = json.dumps({
-            "total_blocks": 4,
-            "blocks": [
-                {"name": "scrambler", "num_config": 8, "num_status": 8,
-                 "registers": []},
-                {"name": "conv_encoder", "num_config": 8, "num_status": 8,
-                 "registers": []},
-                {"name": "fft_engine", "num_config": 8, "num_status": 8,
-                 "registers": []},
-                {"name": "top_csr", "num_config": 8, "num_status": 8,
-                 "registers": []},
-            ],
-        })
-
-        with patch(
-            "orchestrator.langchain.agents.coresmith_llm.ClaudeLLM"
-        ) as MockLLM:
-            MockLLM.return_value.call = AsyncMock(return_value=llm_response)
-            from orchestrator.architecture.specialists.register_spec import (
-                analyze_register_spec,
-            )
-            result = await analyze_register_spec(sample_block_diagram)
-
-        rs = result["result"]
-        assert rs["total_blocks"] == 4
-        assert any(b["name"] == "scrambler" for b in rs["blocks"])
-        assert any(b["name"] == "top_csr" for b in rs["blocks"])
-
-        scrambler_block = next(b for b in rs["blocks"] if b["name"] == "scrambler")
-        assert scrambler_block["num_config"] == 8
-        assert scrambler_block["num_status"] == 8
-
-
-# ---------------------------------------------------------------------------
-# Benchmark cache tests
-# ---------------------------------------------------------------------------
-
-
 class TestBenchmarkCache:
     def test_store_and_retrieve(self, tmp_project):
         from orchestrator.architecture.benchmarks.cache import BenchmarkCache
@@ -687,99 +604,6 @@ class TestBlockSpecsRoundtrip:
 # ---------------------------------------------------------------------------
 
 
-class TestEndToEndStateFlow:
-    @pytest.mark.asyncio
-    async def test_full_architecture_flow(self, tmp_project, sample_block_diagram):
-        """Test the complete state flow: init -> block diagram -> memory map ->
-        clock -> registers -> constraints -> finalize.
-
-        All specialists now use LLMs; mock them to keep this as a unit test.
-        """
-        from unittest.mock import AsyncMock, patch
-
-        from orchestrator.architecture.constraints import check_constraints
-        from orchestrator.architecture.specialists.clock_tree import analyze_clock_tree
-        from orchestrator.architecture.specialists.memory_map import analyze_memory_map
-        from orchestrator.architecture.specialists.register_spec import analyze_register_spec
-        from orchestrator.architecture.state import ArchitectureState, load_state, save_state
-
-        ct_response = json.dumps({
-            "domains": [{"name": "clk_sys", "frequency_mhz": 50.0, "source": "PLL"}],
-            "crossings": [], "num_domains": 1, "cdc_required": False,
-            "reset_spec": {"strategy": "synchronous", "domains": ["clk_sys"]},
-        })
-        rs_response = json.dumps({
-            "total_blocks": 4,
-            "blocks": [
-                {"name": "scrambler", "num_config": 8, "num_status": 8, "registers": []},
-                {"name": "conv_encoder", "num_config": 8, "num_status": 8, "registers": []},
-                {"name": "fft_engine", "num_config": 8, "num_status": 8, "registers": []},
-                {"name": "top_csr", "num_config": 8, "num_status": 8, "registers": []},
-            ],
-        })
-        cc_response = json.dumps({
-            "pass": True,
-            "violation_text": "",
-            "evidence": "All checks pass.",
-            "suggested_fix": "",
-        })
-
-        state = ArchitectureState(
-            requirements="DVB-T transceiver",
-            target_clock_mhz=50.0,
-        )
-        state.block_diagram = sample_block_diagram
-        save_state(state, tmp_project)
-
-        mm = await analyze_memory_map(sample_block_diagram)
-        state.memory_map = mm
-        save_state(state, tmp_project)
-
-        with patch("orchestrator.langchain.agents.coresmith_llm.ClaudeLLM") as MockLLM:
-            MockLLM.return_value.call = AsyncMock(return_value=ct_response)
-            ct = await analyze_clock_tree(sample_block_diagram, 50.0)
-        state.clock_tree = ct
-        save_state(state, tmp_project)
-
-        with patch("orchestrator.langchain.agents.coresmith_llm.ClaudeLLM") as MockLLM:
-            MockLLM.return_value.call = AsyncMock(return_value=rs_response)
-            rs = await analyze_register_spec(sample_block_diagram)
-        state.register_spec = rs
-        save_state(state, tmp_project)
-
-        with patch("orchestrator.langchain.agents.coresmith_llm.ClaudeLLM") as MockLLM:
-            MockLLM.return_value.call = AsyncMock(return_value=cc_response)
-            violations = await check_constraints(
-                block_diagram=sample_block_diagram,
-                memory_map=mm,
-                clock_tree=ct,
-                register_spec=rs,
-            )
-        assert violations == []
-
-        block_specs = []
-        for block in sample_block_diagram["blocks"]:
-            block_specs.append({
-                "name": block["name"],
-                "tier": block["tier"],
-                "python_source": block["python_source"],
-                "rtl_target": block["rtl_target"],
-                "testbench": block["testbench"],
-                "description": block["description"],
-            })
-        state.block_specs = block_specs
-        save_state(state, tmp_project)
-
-        final = load_state(tmp_project)
-        assert final.requirements == "DVB-T transceiver"
-        assert len(final.block_specs) == 3
-
-
-# ---------------------------------------------------------------------------
-# Interface Definition specialist (Stage B)
-# ---------------------------------------------------------------------------
-
-
 class TestInterfaceDefinition:
     """The Interface Definition specialist freezes per-edge bit-level
     contracts before per-block uArch specs are generated. These tests
@@ -799,7 +623,7 @@ class TestInterfaceDefinition:
         assert "Single-block" in result["result"]["design_summary"]
         # No file written for a no-op design.
         from pathlib import Path
-        assert not (Path(tmp_project) / ".coresmith" / "interface_contracts.json").exists()
+        assert not (Path(tmp_project) / ".coresmith" / "drafts" / "interface_contracts.json").exists()
 
     @pytest.mark.asyncio
     async def test_specialist_persists_contracts_to_disk(self, tmp_project):
@@ -839,7 +663,7 @@ class TestInterfaceDefinition:
             "open_questions": [],
         }
         import json as _json
-        target = Path(tmp_project) / ".coresmith" / "interface_contracts.json"
+        target = Path(tmp_project) / ".coresmith" / "drafts" / "interface_contracts.json"
 
         async def _fake_call(*args, **kwargs):
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -933,7 +757,7 @@ class TestInterfaceDefinition:
 
         monkeypatch.delenv("CORESMITH_INTERFACE_FAMILY_PROPAGATION", raising=False)
         monkeypatch.delenv("CORESMITH_INTERFACE_FAMILY_GATE", raising=False)
-        target = Path(tmp_project) / ".coresmith" / "interface_contracts.json"
+        target = Path(tmp_project) / ".coresmith" / "drafts" / "interface_contracts.json"
         diagram, fake_call = self._completion_mislabel_bundle(target)
 
         with patch("orchestrator.langchain.agents.coresmith_llm.ClaudeLLM") as MockLLM:
@@ -981,7 +805,7 @@ class TestInterfaceDefinition:
 
         monkeypatch.setenv("CORESMITH_INTERFACE_FAMILY_PROPAGATION", "0")
         monkeypatch.delenv("CORESMITH_INTERFACE_FAMILY_GATE", raising=False)
-        target = Path(tmp_project) / ".coresmith" / "interface_contracts.json"
+        target = Path(tmp_project) / ".coresmith" / "drafts" / "interface_contracts.json"
         diagram, fake_call = self._completion_mislabel_bundle(target)
 
         with patch("orchestrator.langchain.agents.coresmith_llm.ClaudeLLM") as MockLLM:
@@ -1032,7 +856,7 @@ class TestInterfaceDefinition:
             "open_questions": [],
         }
         import json as _json
-        target = Path(tmp_project) / ".coresmith" / "interface_contracts.json"
+        target = Path(tmp_project) / ".coresmith" / "drafts" / "interface_contracts.json"
 
         async def _fake_call(*args, **kwargs):
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -1081,7 +905,7 @@ class TestInterfaceDefinition:
             "open_questions": [],
         }
         import json as _json
-        target = Path(tmp_project) / ".coresmith" / "interface_contracts.json"
+        target = Path(tmp_project) / ".coresmith" / "drafts" / "interface_contracts.json"
 
         async def _fake_call(*args, **kwargs):
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -1151,7 +975,7 @@ class TestInterfaceDefinition:
             "open_questions": [],
         }
         import json as _json
-        target = Path(tmp_project) / ".coresmith" / "interface_contracts.json"
+        target = Path(tmp_project) / ".coresmith" / "drafts" / "interface_contracts.json"
 
         async def _fake_call(*args, **kwargs):
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -1212,7 +1036,7 @@ class TestInterfaceDefinition:
             "open_questions": [],
         }
         import json as _json
-        target = Path(tmp_project) / ".coresmith" / "interface_contracts.json"
+        target = Path(tmp_project) / ".coresmith" / "drafts" / "interface_contracts.json"
 
         async def _fake_call(*args, **kwargs):
             target.parent.mkdir(parents=True, exist_ok=True)

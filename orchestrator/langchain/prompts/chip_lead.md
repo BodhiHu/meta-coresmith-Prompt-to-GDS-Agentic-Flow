@@ -27,8 +27,11 @@ Omit fields you don't need. `action` MUST be one of the payload's
   only for a concrete contract violation you can name.
 - `uarch_integration_review`: `approve` is the default — the reviewer edits
   specs on every run, so `issues_fixed > 0` alone is NOT a reason to revise.
-  `revise` needs `block_actions` naming the blocks to redo, else it strands
-  the run. VERIFY ON DISK before approving: when the review (or your own
+  A `revise` is TARGETED: the blocks in `edited_blocks` re-enter the tier
+  implementing the reviewer's edited spec as-is, and every block you name
+  in `affected_blocks` (or `block_actions`) re-specs with your `feedback`;
+  all other blocks keep their passing result. A revise that names nothing
+  re-runs the whole tier, so name the blocks. VERIFY ON DISK before approving: when the review (or your own
   reasoning) claims specific RTL properties — "block X now exposes ports
   Y/Z", "the handshake is wired" — grep the actual RTL files for those
   identifiers first. A spec saying so is NOT evidence the RTL does; approving
@@ -158,10 +161,14 @@ read it FIRST — it is the operator's written policy (PDK, memory policy,
 budgets, throughput targets, acceptance matrix). Derive every answer from it
 plus the requirements; never invent policy that contradicts it.
 
-- `prd_questions` (`continue`/`abort`): answer every question as a JSON
-  object in `feedback` keyed by question id, from the standing rulings and
-  requirements. Questions the rulings don't cover: choose the conservative
-  engineering default and state it as such.
+- `prd_questions` (`continue`/`abort`): answer every question in an
+  `answers` field -- a JSON object keyed by question id -- from the standing
+  rulings and requirements, e.g. `{"action": "continue", "answers":
+  {"target_technology": "SKY130A, sky130_fd_sc_hd, tt corner", ...}}`.
+  The PRD stage reads ONLY `answers`; answers written into `reasoning` or
+  `feedback` are discarded and the same questions come back. Questions the
+  rulings don't cover: choose the conservative engineering default and say
+  so in the answer text.
 - `architecture_review_needed` (`retry`/`accept`/`feedback`/`continue`/`abort`):
   * warnings only → `accept` with a one-line rationale.
   * mechanical field errors (e.g. `min_buffer_depth_beats>=2; got 1`): do

@@ -90,17 +90,9 @@ def preflight_check(phases: list[str] | None = None) -> dict:
 
     errors: list[str] = []
     warnings: list[str] = []
-    skip_synth = os.environ.get("CORESMITH_SKIP_SYNTH", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-    # HOT-PATCH (chip-lead, synth-gated run): honor CORESMITH_SYNTH_GENERIC in
-    # preflight. Generic (PDK-free) synth maps with abc -g and needs only yosys+
-    # verilator -- NOT the sky130 Liberty/PDK. Preflight previously required the
-    # PDK unconditionally whenever SKIP_SYNTH was unset, falsely blocking generic
-    # synth on PDK-less boxes. SYNTH_GENERIC honored downstream (~L1181); align here.
+    # Generic (PDK-free) synth maps with abc -g and needs only yosys + verilator,
+    # not the sky130 Liberty/PDK. It is selected explicitly or whenever the PDK
+    # is absent; synthesis itself can never be skipped.
     synth_generic = os.environ.get("CORESMITH_SYNTH_GENERIC", "").strip().lower() in {
         "1",
         "true",
@@ -132,30 +124,18 @@ def preflight_check(phases: list[str] | None = None) -> dict:
 
         if not shutil.which("verilator"):
             errors.append("verilator not found on PATH")
-        if skip_synth:
-            _loud = (
-                "!!! CORESMITH_SKIP_SYNTH=1 -- SYNTHESIS GATE DISABLED. "
-                "Yosys/PDK checks SKIPPED; un-synthesizable RTL (e.g. a "
-                "non-terminating combinational cloud) WILL NOT be caught. "
-                "Unset CORESMITH_SKIP_SYNTH to enable the synth gate."
-            )
-            warnings.append(_loud)
-            import sys as _sys
-            print("\n" + "=" * 78 + "\n" + _loud + "\n" + "=" * 78,
-                  file=_sys.stderr, flush=True)
-        elif synth_generic:
-            # Generic PDK-free synth: only yosys (+ verilator above) required.
-            if not shutil.which("yosys"):
-                errors.append("yosys not found on PATH")
+        # Yosys always runs: with the sky130 Liberty/PDK present it maps to the
+        # library; without it (or with CORESMITH_SYNTH_GENERIC=1) it runs the
+        # PDK-free generic gate mapping. There is no way to skip synthesis.
+        if not shutil.which("yosys"):
+            errors.append("yosys not found on PATH (synthesis is mandatory)")
+        if synth_generic or not LIBERTY_FILE.exists():
             warnings.append(
-                "CORESMITH_SYNTH_GENERIC=1 -- PDK-free generic gate-mapping synth "
-                "(abc -g); sky130 Liberty/PDK checks skipped (real synth still runs)."
+                "PDK-free generic gate-mapping synthesis (abc -g): the sky130 "
+                "Liberty/PDK is absent or CORESMITH_SYNTH_GENERIC=1. Real synthesis "
+                "still runs; area and timing are generic estimates."
             )
         else:
-            if not LIBERTY_FILE.exists():
-                errors.append(f"Liberty file not found: {LIBERTY_FILE}")
-            if not shutil.which("yosys"):
-                errors.append("yosys not found on PATH")
             if not PDK_ROOT.exists():
                 errors.append(f"PDK root directory not found: {PDK_ROOT}")
             elif not any((PDK_ROOT / v).is_dir() for v in ("sky130A", "sky130B")):
@@ -309,6 +289,25 @@ def _write_step_log(
     )
     log_file.write_text(content, encoding="utf-8")
     return str(log_file)
+
+
+def archive_step_logs(block_name: str, round_no: int) -> list[str]:
+    """Rename a block's current step logs to ``<name>.round<N>.log`` so a new
+    lifecycle round does not overwrite the evidence of the previous one."""
+    log_dir = _LOG_DIR / block_name
+    moved: list[str] = []
+    if not log_dir.is_dir():
+        return moved
+    for f in sorted(log_dir.glob("*.log")):
+        if ".round" in f.name:
+            continue
+        target = log_dir / f"{f.stem}.round{round_no}.log"
+        try:
+            f.rename(target)
+            moved.append(str(target))
+        except OSError:
+            continue
+    return moved
 
 
 def _write_step_log_error(
@@ -529,8 +528,13 @@ def _slice_python_source(file_text: str, names: list[str]) -> str:
         return file_text  # named nothing resolvable -> whole file (safe)
 
     def _seg(node) -> str:
+        # A decorated def/class has .lineno on the ``def``/``class`` line, so
+        # slicing from it would drop @dataclass / @lru_cache and silently
+        # change the semantics of the emitted golden.
+        start = min([node.lineno]
+                    + [d.lineno for d in getattr(node, "decorator_list", [])])
         end = getattr(node, "end_lineno", node.lineno) or node.lineno
-        return "".join(lines[node.lineno - 1:end])
+        return "".join(lines[start - 1:end])
 
     # Emit imports, consts, then the reached top-level defs + whole classes in
     # source order (de-dup a class that was BOTH named directly and reached).
@@ -609,33 +613,20 @@ def python_source_file(python_source_ref: str, project_root=None):
 # Golden model wrapper creation
 # ---------------------------------------------------------------------------
 
-def create_golden_model_wrapper(block_name: str, python_source_path: str) -> None:
+def create_golden_model_wrapper(block_name: str, python_source_path: str,
+                                project_root=None) -> None:
     """Create a <block_name>_model.py wrapper on PYTHONPATH for cocotb import.
 
     The testbench generator expects to import ``from <block_name>_model import ...``.
     We create a thin wrapper that imports from the actual source location.
+
+    ``project_root`` anchors ``tb/cocotb/`` at the RUN directory; it defaults
+    to the module-level ``PROJECT_ROOT`` so existing callers are unchanged.
+    Resolved at call time (not as a default argument) so tests that monkeypatch
+    ``PROJECT_ROOT`` keep working.
     """
-    # Prefer the per-block Amaranth golden model as the cocotb oracle when the
-    # block-goldens feature is on. The block model (arch/block_models/<block>.py)
-    # exposes the block-level reference API (e.g. _process_mb, field masks),
-    # whereas the flat python_source (a whole-chip golden) typically does NOT.
-    # Importing the flat golden leaves the testbench's
-    # `from <block>_model import <block-level-symbol>` unresolved, which silently
-    # falls back to a wrong/missing module. (engine fix, 2026-06-21)
+    root = Path(project_root) if project_root else PROJECT_ROOT
     block_model_module = ""
-    try:
-        from orchestrator.architecture import composition as _composition
-        if _composition.block_goldens_enabled():
-            _bm = (
-                PROJECT_ROOT / "arch" / _composition.BLOCK_MODELS_DIRNAME
-                / f"{block_name}.py"
-            )
-            if _bm.exists():
-                block_model_module = ".".join(
-                    _bm.relative_to(PROJECT_ROOT).with_suffix("").parts
-                )
-    except Exception:  # noqa: BLE001
-        block_model_module = ""
 
     # armC pass-2 finding [dv-hardening-9]: architecture-driven runs have NO
     # per-block python_source (the golden is chip-level), so the early return
@@ -646,7 +637,7 @@ def create_golden_model_wrapper(block_name: str, python_source_path: str) -> Non
     have_python_source = bool(python_source_path and python_source_path.strip())
     # Strip any `:name1,name2` slice suffix to resolve the underlying golden
     # FILE (the wrapper imports the whole module; the slice is for the judge).
-    source_path = python_source_file(python_source_path, PROJECT_ROOT) if have_python_source else None
+    source_path = python_source_file(python_source_path, root) if have_python_source else None
     if source_path is not None and (
         not source_path.exists() or source_path.is_dir()
     ):
@@ -654,14 +645,14 @@ def create_golden_model_wrapper(block_name: str, python_source_path: str) -> Non
     if source_path is None and not block_model_module:
         return
 
-    wrapper_dir = PROJECT_ROOT / "tb" / "cocotb"
+    wrapper_dir = root / "tb" / "cocotb"
     wrapper_dir.mkdir(parents=True, exist_ok=True)
     wrapper_path = wrapper_dir / f"{block_name}_model.py"
 
     if block_model_module:
         module_path = block_model_module
     else:
-        module_parts = source_path.relative_to(PROJECT_ROOT).with_suffix("").parts
+        module_parts = source_path.relative_to(root).with_suffix("").parts
         module_path = ".".join(module_parts)
 
     # Refresh a stale wrapper that points at the wrong module (e.g. an old
@@ -707,120 +698,10 @@ del _mod, _name
 # Hardware golden (microarchitecture restructure, Phase-3 rollout step 1)
 # ---------------------------------------------------------------------------
 
-def _rtl_from_hw_golden_enabled() -> bool:
-    """When on, RTL is generated as a *lowering* of the per-block Amaranth hardware
-    golden (``arch/block_models/<block>.py``) -- already in hardware semantics:
-    fixed-point arithmetic, resolved feedback/state, derating applied -- instead
-    of an independent re-transcription of the float reference golden
-    (``python_source``).
-
-    Opt-in (default off) until validated on a full run; set
-    ``CORESMITH_RTL_FROM_HW_GOLDEN=1`` to enable. See
-    coresmith_microarch_phase_design.html for the rationale (the two-golden
-    model: reference golden = intent/fidelity target, hardware golden = the
-    bit-exact RTL target).
-    """
-    from orchestrator.profile import ensure_applied, flag_enabled
-    ensure_applied()
-    return flag_enabled("CORESMITH_RTL_FROM_HW_GOLDEN", default=False)
-
-
-def block_hw_golden_rel(block: dict) -> str:
-    """Project-relative path to the block's Amaranth hardware-golden model, or ''.
-
-    The model is emitted by the ``BlockGoldenGenerator`` into
-    ``arch/block_models/<block>.py`` during the uArch-spec stage, so it already
-    exists on disk by the time RTL is generated.
-    """
-    name = (block or {}).get("name", "")
-    if not name:
-        return ""
-    try:
-        from orchestrator.architecture import composition as _composition
-        _dirname = _composition.BLOCK_MODELS_DIRNAME
-    except Exception:  # noqa: BLE001
-        _dirname = "block_models"
-    bm = PROJECT_ROOT / "arch" / _dirname / f"{name}.py"
-    if bm.is_file():
-        try:
-            return str(bm.relative_to(PROJECT_ROOT))
-        except ValueError:
-            return ""
-    return ""
-
-
-def rtl_reference_source(block: dict) -> tuple[str, bool]:
-    """Return ``(relative_source_path, is_hw_golden)`` the RTL generator should
-    transcribe.
-
-    When the RTL-from-hardware-golden rollout is enabled and the block's Amaranth
-    model exists, that model is the reference and ``is_hw_golden`` is True (the
-    RTL becomes a mechanical, functionally byte-exact lowering of a proven,
-    hardware-semantics model). Otherwise falls back to the float reference golden
-    (``python_source``), preserving legacy behavior.
-    """
-    float_src = (block or {}).get("python_source", "") or ""
-    if _rtl_from_hw_golden_enabled():
-        hw = block_hw_golden_rel(block)
-        if hw:
-            return hw, True
-    return float_src, False
-
 
 # ---------------------------------------------------------------------------
 # µarch composition gate -- honest exit banner
 # ---------------------------------------------------------------------------
-
-def uarch_gate_banner(model_integration_result: dict | None) -> tuple[str, str]:
-    """``(banner_text, colour)`` for the µarch gate's exit banner.
-
-    CLEAN means nothing fired. Measured live: the gate detected a model-level
-    mismatch, logged it, DISMISSED it as advisory (the deterministic-BFM bypass,
-    which is a legitimate non-blocking decision) -- and four lines later the run
-    printed a green "µARCH GATE CLEAN". Two true statements were composed into a
-    false one, and the green line is the one a reader carries away.
-
-    This function does not change what the gate DOES -- the bypass stays
-    advisory, the run still proceeds -- only what it SAYS. Every outcome that is
-    not "nothing fired" gets a yellow banner naming the finding and stating
-    explicitly that it is non-blocking.
-    """
-    res = model_integration_result if isinstance(model_integration_result, dict) else {}
-    tail = " -> beginning RTL pass (pass 2)"
-
-    if res.get("advisory_bypass"):
-        n = len(res.get("violations") or [])
-        where = res.get("first_divergence_block") or ""
-        return (
-            "µARCH GATE NOT CLEAN: "
-            + (f"{n} model-level mismatch(es)" if n else "a model-level mismatch")
-            + " were DISMISSED as ADVISORY (non-blocking; the deterministic "
-            "integration DV on the real RTL is the authoritative check) and "
-            "carried forward"
-            + (f"; first-divergence block: {where}" if where else
-               "; first-divergence block: (unlocalized)")
-            + tail,
-            YELLOW,
-        )
-
-    if res and res.get("passed") is False:
-        return (
-            "µARCH GATE NOT CLEAN: the gate did not pass"
-            + (f" (action taken: {res.get('action_taken')})"
-               if res.get("action_taken") else "")
-            + tail,
-            YELLOW,
-        )
-
-    if res.get("derate_signed_off"):
-        return (
-            "µARCH GATE PASSED WITH A SIGNED-OFF DERATE (within budget, "
-            "recorded in the derate ledger)" + tail,
-            YELLOW,
-        )
-
-    # Nothing fired (or no record at all -- the gate never ran on this path).
-    return ("µARCH GATE CLEAN" + tail, CYAN)
 
 
 # ---------------------------------------------------------------------------
@@ -1018,60 +899,17 @@ async def generate_uarch_spec(
     # emitted 9-bit; the Lead then bridged it with a semantics-destroying
     # truncation adapter).
     try:
-        _bd = PROJECT_ROOT / ".coresmith" / "blocks" / block["name"]
-        _bd.mkdir(parents=True, exist_ok=True)
-        _ct = block_contract_sha1(str(PROJECT_ROOT), block["name"])
-        if _ct:
-            (_bd / "uarch_spec_contract_sha1").write_text(_ct, encoding="utf-8")
-    except OSError:
+        from orchestrator.state_store.project_db import open_project as _open_project
+        _open_project(str(PROJECT_ROOT)).stamp_block_spec(block["name"])
+    except Exception:  # noqa: BLE001 - provenance is best-effort
         pass
-
-    # Block model (env-gated). When CORESMITH_BLOCK_GOLDENS is on, emit a
-    # per-block Amaranth model (arch/block_models/<block>.py) transcribing the
-    # reference implementation's exact math for this block with real clock /
-    # handshake / latency semantics, so the model-integration agent can wire the
-    # block models into a top-level chip model and the deterministic
-    # model-integration gate can prove the simulated chip output == the
-    # reference implementation BEFORE end-of-pipeline DV. Best-effort: a failure
-    # here is logged but does not crash the spec step -- the gate is the hard
-    # gate. Flag off => byte-identical to before (no new file).
-    await _maybe_generate_block_golden(block, callbacks=callbacks)
 
     return result
 
 
-def gate_scoped_reuse_reason(project_root, block_name: str) -> str:
-    """Non-empty reason when this block's spec/model must be REUSED verbatim
-    during a µarch-gate revise iteration (disk-first signals, no state needed):
-
-    - ``.coresmith/_last_gate_signature.txt`` exists  => a composition-gate
-      FAILURE iteration is in progress (written on gate fail, cleared on pass);
-    - ``.coresmith/blocks/<b>/gate_feedback.txt`` is ABSENT => init_tier did
-      NOT implicate this block (precise localization writes feedback only for
-      affected blocks and clears it for the rest; a broadcast writes it for
-      every tier block, so broadcasts are unaffected by this skip).
-
-    Rationale (armC live, 2026-07-05): each gate revise round re-drew specs,
-    reviews, and models for every NON-implicated block (~5 LLM rounds of pure
-    waste per iteration) because regen is unconditional on tier re-entry --
-    and the integration reviewer's edits kept bumping spec mtimes, cascading
-    model regens that even clobbered an operator hand-patch.
-
-    ``CORESMITH_GATE_SCOPED_REVISE=0`` disables (old behavior).
-    """
-    if os.environ.get(
-        "CORESMITH_GATE_SCOPED_REVISE", "1"
-    ).strip().lower() in ("0", "false", "no", "off"):
-        return ""
-    root = Path(project_root)
-    if not (root / ".coresmith" / "_last_gate_signature.txt").exists():
-        return ""
-    if (root / ".coresmith" / "blocks" / block_name / "gate_feedback.txt").exists():
-        return ""
-    return (
-        "gate-scoped revise: the µarch gate did not implicate this block "
-        "(no gate_feedback.txt) -- reusing the on-disk spec/model verbatim"
-    )
+# Eager staleness marker written next to a block whose interface-contract
+# slice moved under it (see :func:`write_amended_contract`). Disk-first, so a
+# future preflight can read it without replaying the amendment.
 
 
 # C6: markers a generated block model uses to declare it CANNOT realize the
@@ -1098,106 +936,6 @@ def _gap_resolution_rounds_cap() -> int:
             "CORESMITH_GAP_RESOLUTION_ROUNDS", "3")))
     except ValueError:
         return 3
-
-
-def detect_model_interface_gap(model_text: str) -> str:
-    """First line of a generated block model that declares an interface gap
-    ('' when none). See ``_MODEL_GAP_MARKERS`` for the recognized forms."""
-    for line in (model_text or "").splitlines():
-        for marker in _MODEL_GAP_MARKERS:
-            if marker in line:
-                return line.strip()[:500]
-    return ""
-
-
-def stale_uarch_spec_blocks(project_root, block_names) -> list:
-    """C7(b): blocks whose uarch spec was generated against an OLDER interface
-    contract than the live one (recorded ``uarch_spec_contract_sha1`` sidecar
-    != current contract hash). Returns ``[{"block", "recorded", "current"}]``.
-    Blocks with no sidecar (older runs) are never flagged."""
-    out = []
-    for name in block_names:
-        p = (Path(project_root) / ".coresmith" / "blocks" / name
-             / "uarch_spec_contract_sha1")
-        if not p.exists():
-            continue
-        try:
-            rec = p.read_text(encoding="utf-8").strip()
-        except OSError:
-            continue
-        cur = block_contract_sha1(project_root, name)
-        if rec and cur and rec != cur:
-            out.append({"block": name, "recorded": rec, "current": cur})
-    return out
-
-
-def refresh_current_sidecars(project_root, block_names,
-                             changed_edge_substrings=None) -> list:
-    """Engine follow-up #6: re-sync the ``uarch_spec_contract_sha1`` sidecar (+
-    ``best_result.contract_sha1``) to the LIVE per-block contract hash for
-    blocks whose passing RTL is still intact -- WITHOUT regenerating them.
-
-    The staleness pileup: a ``--force`` regen wave (or a mid-run contract edit)
-    touches many blocks' recorded provenance, and blocks regenerated BEFORE a
-    later edit re-stale at the next integration preflight, forcing an
-    all-blocks mass-regen decision. This is the safe automation of the manual
-    per-block resync: a block is refreshed ONLY when its ``best_result`` is
-    ``sim_passed`` AND the on-disk RTL still hashes to the recorded
-    ``rtl_sha1`` (the passing RTL is present, not overwritten). integration_dv
-    + validation_dv (byte-exact) remain the backstop for any block wrongly
-    refreshed. When ``changed_edge_substrings`` is given, a block that
-    participates in an edge matching any substring is SKIPPED (its slice may
-    have genuinely changed -- let it regenerate). Returns the refreshed block
-    names. Never raises."""
-    refreshed: list = []
-    changed = list(changed_edge_substrings or [])
-    for name in block_names:
-        try:
-            bd = Path(project_root) / ".coresmith" / "blocks" / name
-            brj = bd / "best_result.json"
-            if not brj.exists():
-                continue
-            best = json.loads(brj.read_text(encoding="utf-8"))
-            if not best.get("sim_passed"):
-                continue
-            # passing RTL must still be on disk (hash intact)
-            rec_rtl = best.get("rtl_sha1")
-            if rec_rtl:
-                # locate the block's rtl_target via best_result or skip the check
-                rtl_rel = best.get("rtl_target") or ""
-                if rtl_rel:
-                    import hashlib as _hl
-                    try:
-                        cur = _hl.sha1(
-                            (Path(project_root) / rtl_rel).read_bytes()
-                        ).hexdigest()
-                    except OSError:
-                        cur = ""
-                    if cur and cur != rec_rtl:
-                        continue  # RTL was overwritten -- do NOT vouch for it
-            # skip blocks touching a genuinely-changed edge
-            if changed:
-                try:
-                    from orchestrator.langchain.agents.contract_lookup import (
-                        load_block_contracts,
-                    )
-                    edges = load_block_contracts(str(project_root), name) or []
-                    eids = [e.get("edge_id", "") if isinstance(e, dict) else str(e)
-                            for e in edges]
-                    if any(any(s in eid for s in changed) for eid in eids):
-                        continue
-                except Exception:  # noqa: BLE001
-                    pass
-            live = block_contract_sha1(str(project_root), name)
-            if not live:
-                continue
-            (bd / "uarch_spec_contract_sha1").write_text(live, encoding="utf-8")
-            best["contract_sha1"] = live
-            brj.write_text(json.dumps(best, indent=2))
-            refreshed.append(name)
-        except (OSError, json.JSONDecodeError):
-            continue
-    return refreshed
 
 
 def check_rtl_contract_ports(project_root, block_name: str,
@@ -1235,6 +973,45 @@ def check_rtl_contract_ports(project_root, block_name: str,
         if not mod.name or not mod.ports:
             return []
         by_name = {p.name: p for p in mod.ports}
+
+        # WP-9/WP-11: derive the channel from the contract's slash spelling
+        # and check each flattened field port's width. Handshake-pair
+        # PRESENCE is the conformance gate's job (contract_conformance
+        # .signal_specs lists the pair since WP-9c); one authority only.
+        def _channel_of(port_ref: str) -> str:
+            first = str(port_ref or "").split("/")[0].strip()
+            for suf in ("_srdy", "_drdy", "_data", "_tdata",
+                        "_tvalid", "_tready"):
+                if first.endswith(suf):
+                    return first[: -len(suf)]
+            return first
+
+        _hs_seen: set = set()
+        for e in edges:
+            proto = str(e.get("handshake_protocol") or "").strip()
+            if proto not in ("srdy_drdy", "axi_stream"):
+                continue
+            ref = (e.get("producer_port") if e.get("role") == "producer"
+                   else e.get("consumer_port")) or ""
+            chan = _channel_of(ref)
+            if not chan or chan in _hs_seen:
+                continue
+            _hs_seen.add(chan)
+            # Flattened payload fields: each `<channel>_<field>` present under
+            # its name must carry the contract's width (a missing field port
+            # stays advisory: packed `<channel>_data` is checked below).
+            for f in (e.get("fields") or []):
+                fname = str((f or {}).get("name") or "").strip()
+                fw = (f or {}).get("width")
+                if not fname or not isinstance(fw, int) or fw <= 0:
+                    continue
+                fp = by_name.get(f"{chan}_{fname}")
+                if fp is not None and fp.width != fw:
+                    errors.append(
+                        f"port '{chan}_{fname}' is {fp.width} bits but the "
+                        f"frozen contract field is {fw} bits "
+                        f"(edge {e.get('edge_id', '?')})")
+
         # A shared consumer service may have several producer edges with legacy
         # payload widths and one widened canonical request port.  The integration
         # fabric owns the lossless zero-fill adapters on the narrower edges; the
@@ -1314,400 +1091,88 @@ def check_rtl_contract_ports(project_root, block_name: str,
     return errors
 
 
-def block_contract_sha1(project_root, block_name: str) -> str:
-    """sha1 of THIS block's frozen interface-contract slice ('' on any error).
+async def generate_uarch_specs_single_context(
+    blocks: list[dict],
+    feedback_by_block: dict[str, str] | None = None,
+) -> dict:
+    """Author (or revise) the uArch specs of ``blocks`` in ONE agent session
+    (CORESMITH_UARCH_SINGLE_CONTEXT). One micro-architect writes every
+    ``arch/uarch_specs/<block>.md`` with a single, consistent naming scheme
+    across the edges that connect them, instead of one author per block.
 
-    Single source of truth for contract-provenance hashing (C5): used by the
-    sim-pass provenance in pipeline_graph AND the block-model sidecar below.
-    Hashing the block's OWN slice (not the whole interface_contracts.json)
-    keeps a chip-lead edit to one block's contract from invalidating every
-    other block's recorded provenance.
+    Returns ``{"written": [...], "missing": [...], "session_id": str}``. A
+    spec is ``written`` only when this call produced a fresh artifact for it
+    (canonical path modified, or recovered from the per-call codex workdir);
+    the caller lets ``missing`` blocks fall back to per-block generation.
     """
-    try:
-        import hashlib
+    from orchestrator.architecture.state import ARCH_DOC_DIR
+    from orchestrator.langchain.agents.uarch_spec_generator import UarchSpecGenerator
 
-        from orchestrator.langchain.agents.contract_lookup import (
-            load_block_contracts,
-        )
-
-        contract = load_block_contracts(str(project_root), block_name)
-        # No edges -> this block has no contract participation; return "" so
-        # the provenance axis is simply not recorded (load_block_contracts
-        # returns a truthy empty view when the file is missing).
-        if not contract or not contract.get("edges"):
-            return ""
-        return hashlib.sha1(
-            json.dumps(contract, sort_keys=True).encode("utf-8")
-        ).hexdigest()
-    except Exception:  # noqa: BLE001 - provenance is best-effort
-        return ""
-
-
-async def _maybe_generate_block_golden(block: dict, callbacks: list = None) -> None:
-    """Emit ``arch/block_models/<block>.py`` (Amaranth) when the flag is on.
-
-    Resolves the reference implementation and this block's interface contract,
-    then calls BlockGoldenGenerator (which emits an Amaranth Elaboratable).
-    Best-effort: any failure is logged and swallowed (the model-integration gate
-    is the hard gate).
-
-    Skipped (model REUSED) when: the operator PINNED the on-disk model
-    (``.coresmith/blocks/<b>/OPERATOR_MODEL_PIN`` -- protects hand-patches from
-    being clobbered by regen; the OPERATOR_SPEC_PIN analog, same
-    CORESMITH_IGNORE_SPEC_PINS escape), or the block is outside a
-    gate-localized revise scope (see :func:`gate_scoped_reuse_reason`).
-    """
-    from orchestrator.architecture import composition as _composition
-
-    if not _composition.block_goldens_enabled():
-        return
-
-    block_name = block["name"]
-
-    _model_path = (
-        PROJECT_ROOT / "arch" / _composition.BLOCK_MODELS_DIRNAME
-        / f"{block_name}.py"
+    feedback_by_block = feedback_by_block or {}
+    spec_dir = PROJECT_ROOT / ARCH_DOC_DIR / "uarch_specs"
+    spec_dir.mkdir(parents=True, exist_ok=True)
+    python_sources: dict[str, str] = {}
+    previous_specs: dict[str, str] = {}
+    pre_mtime: dict[str, int] = {}
+    for b in blocks:
+        name = b["name"]
+        ref = _live_python_source_ref(b, PROJECT_ROOT)
+        python_sources[name] = resolve_python_source(ref, PROJECT_ROOT)
+        _report_uarch_golden(name, ref, python_sources[name])
+        p = spec_dir / f"{name}.md"
+        if p.exists():
+            try:
+                previous_specs[name] = p.read_text()
+                pre_mtime[name] = p.stat().st_mtime_ns
+            except OSError:
+                pass
+    call_start = _time.time()
+    agent = UarchSpecGenerator(temperature=0.2)
+    await agent.generate_many(
+        blocks=blocks,
+        python_sources=python_sources,
+        feedback=feedback_by_block,
+        previous_specs=previous_specs,
+        project_root=str(PROJECT_ROOT),
     )
-    if _model_path.exists():
-        _pin = (PROJECT_ROOT / ".coresmith" / "blocks" / block_name
-                / "OPERATOR_MODEL_PIN")
-        if _pin.exists() and os.environ.get(
-            "CORESMITH_IGNORE_SPEC_PINS", ""
-        ).strip() != "1":
-            log(f"  [BLOCK-MODEL] {block_name}: OPERATOR_MODEL_PIN present -- "
-                f"keeping the on-disk (hand-patched) model, SKIPPING regen",
-                YELLOW)
-            return
-        _scope = gate_scoped_reuse_reason(str(PROJECT_ROOT), block_name)
-        if _scope:
-            # C5(b): the scoped-reuse shortcut only holds while the frozen
-            # contract this model was generated against is unchanged. The
-            # fragment_metadata_memory stale-oracle livelock: the contract
-            # widened 48->56 bits but the on-disk model was reused, so DV
-            # judged the (correct) new RTL against an obsolete oracle. PIN
-            # still wins above (explicit operator intent). No sidecar recorded
-            # (older runs) -> reuse as before.
-            _sc_path = (PROJECT_ROOT / ".coresmith" / "blocks" / block_name
-                        / "block_model_contract_sha1")
-            _rec_ct = ""
-            try:
-                if _sc_path.exists():
-                    _rec_ct = _sc_path.read_text(encoding="utf-8").strip()
-            except OSError:
-                pass
-            _cur_ct = block_contract_sha1(str(PROJECT_ROOT), block_name)
-            if _rec_ct and _cur_ct and _cur_ct != _rec_ct:
-                log(f"  [BLOCK-MODEL] {block_name}: interface contract changed "
-                    f"since this model was generated -- overriding scoped "
-                    f"reuse, REGENERATING the model", YELLOW)
-            else:
-                log(f"  [BLOCK-MODEL] {block_name}: {_scope}", YELLOW)
-                return
-    try:
-        from orchestrator.langchain.agents.block_golden_generator import (
-            BlockGoldenGenerator,
-        )
-        from orchestrator.langchain.agents.contract_lookup import (
-            load_block_contracts,
-        )
-
-        project_root = str(PROJECT_ROOT)
-
-        # Generators need the FULL golden (per-block math), not the gate's
-        # bytes-only wrapper -- use the generator-specific reference.
-        ref_path = _composition.resolve_generator_reference(project_root)
-        if not ref_path:
-            log(
-                f"  [BLOCK-MODEL] {block_name}: no reference implementation "
-                f"found; skipping block model (gate will no-op)",
-                YELLOW,
-            )
-            return
+    session_id = getattr(getattr(agent, "llm", None), "last_session_id", "") or ""
+    written: list[str] = []
+    missing: list[str] = []
+    for b in blocks:
+        name = b["name"]
+        p = spec_dir / f"{name}.md"
+        text = ""
         try:
-            reference_impl_source = Path(ref_path).read_text(encoding="utf-8")
-        except OSError as exc:
-            log(f"  [BLOCK-MODEL] {block_name}: cannot read {ref_path}: {exc}",
-                YELLOW)
-            return
-
-        # C9: prefer the block's OWN golden slice (the architecture's
-        # `python_source` ref, resolved by the C2/C3 method-aware slicer) over
-        # the whole-chip golden. The hint-based slicing below
-        # (resolve_block_slice_regions) is gated on BLOCK_ENTRY_HINTS, which is
-        # codec-specific -- so on every other design each model generation saw the
-        # ENTIRE golden: wrong scope for authoring one block's model, and a
-        # real tractability tax on frontier blocks. Only narrows (never
-        # widens); falls back to the whole file when the ref has no slice
-        # suffix or fails to resolve.
-        _ps_ref = _live_python_source_ref(block, PROJECT_ROOT)
-        if ".py:" in (_ps_ref or ""):
-            _sliced = resolve_python_source(_ps_ref, PROJECT_ROOT)
-            if _sliced and len(_sliced) < len(reference_impl_source):
-                log(f"  [BLOCK-MODEL] {block_name}: scoping the reference to "
-                    f"the block's own golden slice ({len(_sliced)} of "
-                    f"{len(reference_impl_source)} chars)", YELLOW)
-                reference_impl_source = _sliced
-
-        # This block's frozen interface contract slice + its ports.
-        interface_contract = load_block_contracts(project_root, block_name)
-        block_ports = block.get("interfaces", {}) or {}
-        if not block_ports:
-            # Fall back to the block-diagram interfaces on disk.
-            import json as _json
-            bd_path = PROJECT_ROOT / ".coresmith" / "block_diagram.json"
-            if bd_path.exists():
-                try:
-                    bd = _json.loads(bd_path.read_text(encoding="utf-8"))
-                    for b in bd.get("blocks", []):
-                        if b.get("name") == block_name:
-                            block_ports = b.get("interfaces", {}) or {}
-                            break
-                except (OSError, _json.JSONDecodeError):
-                    pass
-
-        out_path = (
-            PROJECT_ROOT / "arch" / _composition.BLOCK_MODELS_DIRNAME
-            / f"{block_name}.py"
-        )
-
-        # Authoritative, deterministic block->golden-slice mapping (line spans
-        # already computed by the AST parse). Passed to the generator as a
-        # focused hint and persisted as a .slice.json sidecar. Empty for an
-        # unmapped block, in which case the generator sees the whole golden
-        # (today's behaviour).
-        slice_functions: list[str] = []
-        slice_regions: list[dict] = []
-        try:
-            from orchestrator.langgraph.block_complexity import (
-                resolve_block_slice_regions,
-            )
-            slice_functions, slice_regions = resolve_block_slice_regions(
-                block_name, reference_impl_source
-            )
-            if slice_functions:
-                log(f"  [BLOCK-MODEL] {block_name}: golden slice = "
-                    f"{len(slice_functions)} fn(s): "
-                    f"{', '.join(slice_functions[:8])}"
-                    f"{' ...' if len(slice_functions) > 8 else ''}", YELLOW)
-        except Exception as _exc:  # noqa: BLE001 - slice is advisory context
-            log(f"  [BLOCK-MODEL] {block_name}: slice resolution skipped "
-                f"({_exc})", YELLOW)
-
-        agent = BlockGoldenGenerator(temperature=0.1)
-        _gap_path = (PROJECT_ROOT / ".coresmith" / "blocks" / block_name
-                     / "model_interface_gap.txt")
-
-        # C10: generate -> detect gap -> RESOLVE from the committed corpus ->
-        # freeze the answer into the contract -> regenerate, bounded. The gap
-        # mechanism is non-terminating under regeneration when resolutions
-        # only exist in spec prose (proven: 6 rounds, 6 different marginal
-        # asks, and a regen even LOST a previously-earned resolution) -- the
-        # resolver gives it MEMORY: every answered fact lands in
-        # interface_contracts.json, the one document the generator reads.
-        # A genuinely-new design decision still stops the loop and parks at
-        # the C6 feasibility interrupt, now with the resolver's analysis.
-        _rounds_cap = _gap_resolution_rounds_cap()
-        _gap = ""
-        for _round in range(_rounds_cap + 1):
-            log(f"  [BLOCK-MODEL] Generating Amaranth block model for "
-                f"{block_name}"
-                + (f" (gap-resolution round {_round})" if _round else "")
-                + "...", YELLOW)
-            # C6: regenerating -- clear any prior gap declaration so the
-            # marker always reflects THIS model (the pin/scope early-returns
-            # above keep the old model AND its old marker, correctly).
-            try:
-                _gap_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-            await agent.generate(
-                block_name=block_name,
-                block_ports=block_ports,
-                interface_contract=interface_contract,
-                reference_impl_source=reference_impl_source,
-                reference_impl_path=ref_path,
-                project_root=project_root,
-                output_path=str(out_path),
-                slice_functions=slice_functions or None,
-                slice_regions=slice_regions or None,
-            )
-            log(f"  [BLOCK-MODEL] Wrote {out_path}", GREEN)
-
-            # C5(b): record WHICH contract this model was generated against,
-            # so a later scoped-reuse skip can detect the frozen contract
-            # moved and regenerate instead of reusing a stale oracle.
-            try:
-                _bd = PROJECT_ROOT / ".coresmith" / "blocks" / block_name
-                _bd.mkdir(parents=True, exist_ok=True)
-                _ct = block_contract_sha1(project_root, block_name)
-                if _ct:
-                    (_bd / "block_model_contract_sha1").write_text(
-                        _ct, encoding="utf-8")
-            except OSError:
-                pass
-
-            # C6: a model that declares it CANNOT realize the datapath from
-            # the frozen interface is a model/spec feasibility CONFLICT.
-            try:
-                _model_text = Path(out_path).read_text(encoding="utf-8")
-            except OSError:
-                _model_text = ""
-            _gap = detect_model_interface_gap(_model_text)
-            if not _gap:
-                break
-            log(f"  [BLOCK-MODEL] {block_name}: model declares an INTERFACE "
-                f"GAP -- {_gap}", RED)
-            try:
-                _gap_path.parent.mkdir(parents=True, exist_ok=True)
-                _gap_path.write_text(_gap, encoding="utf-8")
-            except OSError:
-                pass
-            if _round >= _rounds_cap or not _gap_resolution_enabled():
-                break
-
-            # C10: try to answer the gap from the committed corpus.
-            try:
-                from orchestrator.langchain.agents.gap_resolver import (
-                    GapResolver,
-                    apply_contract_amendments,
-                    build_gap_corpus,
-                )
-                _corpus = build_gap_corpus(project_root, block_name, _gap)
-                _verdict = await GapResolver().resolve(
-                    block_name, _gap, _corpus)
-            except Exception as _rexc:  # noqa: BLE001 - resolver best-effort
-                log(f"  [GAP-RESOLVE] {block_name}: resolver errored "
-                    f"({_rexc}) -- leaving the gap for the feasibility "
-                    f"interrupt", RED)
-                break
-            if not _verdict.get("resolved"):
-                log(f"  [GAP-RESOLVE] {block_name}: NOT resolvable from the "
-                    f"committed corpus -- a real design decision is needed: "
-                    f"{_verdict.get('unresolved_decision', '')}", RED)
-                try:  # enrich the marker for the feasibility interrupt
-                    _gap_path.write_text(
-                        _gap + "\n\n[gap-resolver] " +
-                        (_verdict.get("unresolved_decision") or "") +
-                        ("\nRationale: " + _verdict.get("rationale", "")
-                         if _verdict.get("rationale") else ""),
-                        encoding="utf-8")
-                except OSError:
-                    pass
-                break
-            _cpath = PROJECT_ROOT / ".coresmith" / "interface_contracts.json"
-            try:
-                _cdoc = json.loads(_cpath.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError) as _cexc:
-                log(f"  [GAP-RESOLVE] {block_name}: cannot load contracts "
-                    f"({_cexc})", RED)
-                break
-            _cdoc, _applied = apply_contract_amendments(
-                _cdoc, _verdict.get("amendments") or [])
-            if not _applied:
-                log(f"  [GAP-RESOLVE] {block_name}: resolver returned no "
-                    f"applicable amendments -- leaving the gap for the "
-                    f"feasibility interrupt", RED)
-                break
-            _cpath.write_text(json.dumps(_cdoc, indent=2), encoding="utf-8")
-            try:  # audit trail -- every auto-frozen fact is reviewable
-                with open(PROJECT_ROOT / ".coresmith" /
-                          "gap_resolutions.jsonl", "a",
-                          encoding="utf-8") as _gf:
-                    _gf.write(json.dumps({
-                        "ts": _time.time(), "block": block_name,
-                        "round": _round, "gap": _gap,
-                        "applied": _applied,
-                        "rationale": _verdict.get("rationale", ""),
-                    }) + "\n")
-            except OSError:
-                pass
-            log(f"  [GAP-RESOLVE] {block_name}: RESOLVED from the committed "
-                f"corpus -- froze {len(_applied)} amendment(s) into the "
-                f"contract ({'; '.join(_applied[:4])}); regenerating", GREEN)
-            log("  [GAP-RESOLVE] NOTE: contract amended -- partner blocks' "
-                "recorded passes may be invalidated (C5/C7 catch this on "
-                "their next entry)", YELLOW)
-            # Reload the (now richer) contract slice for the next round.
-            interface_contract = load_block_contracts(
-                project_root, block_name)
-
-        # Close the swallow (Phase 2C): probe the freshly generated model for
-        # degeneracy and RECORD the verdict (never silently swallowed). Advisory
-        # by default; hard-fails only under CORESMITH_GOLDEN_FEASIBILITY_GATE.
-        try:
-            from orchestrator.architecture.model_integration import (
-                check_golden_feasibility,
-                golden_feasibility_gate_enabled,
-            )
-            fr = check_golden_feasibility(project_root, block_name)
-            if fr.get("ran") and not fr.get("passed"):
-                gate_on = golden_feasibility_gate_enabled()
-                log(f"  [BLOCK-MODEL] {block_name}: golden-feasibility "
-                    f"{'FAIL (gate on)' if gate_on else 'FAIL (advisory)'}: "
-                    f"{fr.get('reason')}", RED)
-                if gate_on:
-                    (PROJECT_ROOT / ".coresmith" / "blocks" / block_name
-                     / "golden_feasibility_failed").write_text(
-                        fr.get("reason", "degenerate golden"))
-            elif fr.get("verdict") == "pass":
-                _reach = (fr.get("checks", {})
-                          .get("slice_reachability", {}) or {})
-                log(f"  [BLOCK-MODEL] {block_name}: golden-feasibility PASS -- "
-                    f"the block's golden slice is REACHED by the reference "
-                    f"({_reach.get('reason') or 'slice exercised'})", GREEN)
-            elif fr.get("ran"):
-                # NOT RUN, reported the way the gate-sim gate reports it: full
-                # reason, no green. The old line printed "OK (skipped)" in
-                # GREEN -- an OK whose own parenthetical said the discriminating
-                # check had not run. Every block of the first hands-off run got
-                # that line.
-                log(f"  [BLOCK-MODEL] {block_name}: golden-feasibility NOT RUN "
-                    f"-- {fr.get('not_run_reason') or 'no discriminating check concluded'}",
-                    YELLOW)
-        except Exception as _fexc:  # noqa: BLE001 - probe is best-effort
-            log(f"  [BLOCK-MODEL] {block_name}: feasibility probe skipped "
-                f"({_fexc})", YELLOW)
-    except Exception as exc:  # noqa: BLE001 - generation itself failed
-        # No longer a silent swallow: record the failure so it is VISIBLE (the
-        # model-integration gate is still the hard backstop downstream).
-        log(
-            f"  [BLOCK-MODEL] {block_name}: generation FAILED ({exc}); recorded. "
-            f"The model-integration gate will flag any resulting divergence",
-            RED,
-        )
-        try:
-            _bd = PROJECT_ROOT / ".coresmith" / "blocks" / block_name
-            _bd.mkdir(parents=True, exist_ok=True)
-            (_bd / "block_golden_generation_failed.txt").write_text(str(exc))
+            if p.exists() and (name not in pre_mtime
+                               or p.stat().st_mtime_ns != pre_mtime[name]):
+                text = p.read_text()
         except OSError:
-            pass
-        # C11 backstop: generate() writes the model to disk BEFORE validating,
-        # so a validation failure can discard an otherwise-substantive model
-        # that DECLARES an interface gap (observed: an 82KB near-implementation
-        # model rejected for its clock-port name -- the gap marker was never
-        # written, so neither the C6 interrupt nor the C10 resolver ever saw
-        # the model's claim). Even on a failed generation, surface a declared
-        # gap so the feasibility gate engages instead of silently proceeding.
-        try:
-            _failed_model = (
-                PROJECT_ROOT / "arch" / _composition.BLOCK_MODELS_DIRNAME
-                / f"{block_name}.py"
+            text = ""
+        if not text.strip():
+            recovered = _recover_codex_call_artifact(
+                PROJECT_ROOT, Path(ARCH_DOC_DIR) / "uarch_specs" / f"{name}.md",
+                min_mtime=call_start,
             )
-            if _failed_model.exists():
-                _fgap = detect_model_interface_gap(
-                    _failed_model.read_text(encoding="utf-8"))
-                if _fgap:
-                    _gp = (PROJECT_ROOT / ".coresmith" / "blocks" / block_name
-                           / "model_interface_gap.txt")
-                    _gp.parent.mkdir(parents=True, exist_ok=True)
-                    _gp.write_text(
-                        _fgap + f"\n\n[generation-failed] {exc}",
-                        encoding="utf-8")
-                    log(f"  [BLOCK-MODEL] {block_name}: failed-generation "
-                        f"model still DECLARES a gap -- recorded for the "
-                        f"feasibility gate: {_fgap}", RED)
-        except Exception:  # noqa: BLE001 - backstop is best-effort
-            pass
+            if recovered:
+                text = recovered
+                p.write_text(text)
+        if text and not _looks_like_uarch_markdown(text) and p.exists():
+            # WP-11: never leave a malformed file where the reuse branch
+            # would adopt it -- quarantine it so the per-block author runs.
+            try:
+                p.rename(p.with_name(f"{name}.md.rejected-{int(call_start)}"))
+            except OSError:
+                pass
+        if text and _looks_like_uarch_markdown(text):
+            written.append(name)
+            try:
+                from orchestrator.state_store.project_db import open_project as _op
+                _op(str(PROJECT_ROOT)).stamp_block_spec(name)
+            except Exception:  # noqa: BLE001 - provenance is best-effort
+                pass
+        else:
+            missing.append(name)
+    return {"written": written, "missing": missing, "session_id": session_id}
 
 
 def _recover_codex_call_artifact(
@@ -1784,7 +1249,7 @@ async def generate_rtl(
     # hardware golden as the reference the RTL lowers (when enabled), so the RTL
     # inherits the hardware-lowering decisions instead of re-deriving them from
     # the float reference golden. Falls back to python_source otherwise.
-    _ref_src, _ref_is_hw = rtl_reference_source(block)
+    _ref_src, _ref_is_hw = ((block or {}).get("python_source", "") or ""), False
     try:
         result = await agent.generate(
             block_name=block["name"],
@@ -1994,22 +1459,7 @@ async def generate_testbench(
     tb_path_str = str(PROJECT_ROOT / block["testbench"])
     Path(tb_path_str).parent.mkdir(parents=True, exist_ok=True)
 
-    # When the block-goldens feature is on AND this block has a block-level
-    # golden model on disk, pass it so the testbench uses it as the per-block
-    # oracle. Flag off (or no golden file) => unchanged behavior.
     block_golden_path = ""
-    try:
-        from orchestrator.architecture import composition as _composition
-
-        if _composition.block_goldens_enabled():
-            bg = (
-                PROJECT_ROOT / "arch" / _composition.BLOCK_MODELS_DIRNAME
-                / f"{block['name']}.py"
-            )
-            if bg.exists():
-                block_golden_path = str(bg)
-    except Exception:  # noqa: BLE001 - never let this break TB generation
-        block_golden_path = ""
 
     agent = TestbenchGeneratorAgent(model=DEFAULT_MODEL, temperature=0.1)
     result = await agent.generate(
@@ -2060,181 +1510,12 @@ def _assert_testbench_materialized(tb_path: Path, block_name: str) -> str | None
 # Simulation
 # ---------------------------------------------------------------------------
 
-# Standalone WaveKit VCD-audit program. Runs in a SEPARATE interpreter
-# (see wavekit_python()), which may be a scratch venv rather than this
-# process, so it must not import anything from orchestrator. Module-level
-# so tests can exec it against stub readers for both WaveKit API shapes.
-_WAVEKIT_AUDIT_SCRIPT = r"""
-import json
-import sys
-from pathlib import Path
-
-from wavekit import VcdReader
-
-vcd_path = Path(sys.argv[1])
-clock_hint = sys.argv[2]
-
-with VcdReader(str(vcd_path)) as reader:
-    # WaveKit renamed its tree API between 0.5.x and 0.7.x. wavekit is
-    # unpinned in requirements.txt AND the wavekit_python() fallback below
-    # pip-installs the latest into a scratch venv, so a fresh box gets the new
-    # API no matter what the operator pinned. On the new API the 0.5.x calls
-    # raise AttributeError inside this script, which exits non-zero and is
-    # read as an audit FAILURE -- and the DV gates fail closed on that, so
-    # integration_dv and validation_dv could never pass. Support both shapes:
-    #   0.5.x: reader.top_scope_list()  scope.signal_list  scope.child_scope_list
-    #   0.7.x: reader.top_scopes        scope.children (signals and scopes mixed)
-    # Signal objects expose .full_name and .width in both.
-    _tops = getattr(reader, "top_scope_list", None)
-    top_scopes = _tops() if callable(_tops) else reader.top_scopes
-    signals = []
-    clocks = []
-
-    def _split(scope):
-        # Return (child_signals, child_scopes) for either API shape.
-        if hasattr(scope, "signal_list") or hasattr(scope, "child_scope_list"):
-            return (getattr(scope, "signal_list", []),
-                    getattr(scope, "child_scope_list", []))
-        sigs, scopes = [], []
-        for child in getattr(scope, "children", []):
-            # A signal is a leaf carrying a width; a scope is not.
-            (sigs if hasattr(child, "width") else scopes).append(child)
-        return sigs, scopes
-
-    def walk(scope):
-        child_signals, child_scopes = _split(scope)
-        for sig in child_signals:
-            name = sig.full_name
-            signals.append({"name": name, "width": int(sig.width)})
-            base = name.split(".")[-1].split("[")[0]
-            if base in {clock_hint, "clk", "clock", "i_clk"}:
-                clocks.append(name)
-        for child in child_scopes:
-            walk(child)
-
-    for top in top_scopes:
-        walk(top)
-
-    if not signals:
-        raise RuntimeError("VCD contains no signals")
-    if int(reader.end_time) <= int(reader.begin_time):
-        raise RuntimeError(
-            f"VCD contains no value-change time range: begin={reader.begin_time} end={reader.end_time}"
-        )
-
-    report = {
-        "ok": True,
-        "vcd_path": str(vcd_path),
-        "begin_time": int(reader.begin_time),
-        "end_time": int(reader.end_time),
-        "signal_count": len(signals),
-        "sample_signals": signals[:64],
-        "clock_candidates": clocks[:16],
-    }
-    print(json.dumps(report))
-"""
-
-
-def run_wavekit_vcd_audit(vcd_path: Path, audit_path: Path, clock_hint: str = "clk") -> dict:
-    """Inspect a Verilator VCD with WaveKit and persist a small audit report."""
-    if not vcd_path.exists() or vcd_path.stat().st_size == 0:
-        result = {
-            "ok": False,
-            "error": f"missing or empty VCD: {vcd_path}",
-            "vcd_path": str(vcd_path),
-        }
-        audit_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
-        return result
-
-    def has_wavekit(python: str) -> bool:
-        check = subprocess.run(
-            [python, "-c", "import wavekit"],
-            capture_output=True,
-            text=True,
-            timeout=scaled(30),
-        )
-        return check.returncode == 0
-
-    def wavekit_python() -> str:
-        if has_wavekit(sys.executable):
-            return sys.executable
-
-        venv_dir = PROJECT_ROOT / ".coresmith" / "tools" / "wavekit-venv"
-        python = venv_dir / "bin" / "python"
-        if not python.exists():
-            subprocess.run(
-                [sys.executable, "-m", "venv", str(venv_dir)],
-                capture_output=True,
-                text=True,
-                timeout=scaled(120),
-                check=True,
-            )
-        if not has_wavekit(str(python)):
-            subprocess.run(
-                [str(python), "-m", "pip", "install", "-q", "wavekit>=0.5.6"],
-                capture_output=True,
-                text=True,
-                timeout=scaled(300),
-                check=True,
-            )
-        return str(python)
-
-    script = _WAVEKIT_AUDIT_SCRIPT
-    try:
-        audit_python = wavekit_python()
-        proc = subprocess.run(
-            [audit_python, "-c", script, str(vcd_path), clock_hint],
-            capture_output=True,
-            text=True,
-            timeout=scaled(180),
-        )
-    except subprocess.CalledProcessError as exc:
-        # WaveKit could not be SET UP (no prebuilt wheel for this arch + missing
-        # native build deps like python3-dev/cmake, etc.). The WaveKit VCD audit
-        # is a *supplementary* analysis layered on top of the cocotb regression
-        # result -- a missing optional tool must NOT masquerade as a DV failure
-        # (that produced a spurious DV_PROCESS_ERROR on arm64 workers lacking
-        # build deps). Skip gracefully so DV is decided by the cocotb pass/fail.
-        result = {
-            "ok": True,
-            "skipped": True,
-            "reason": (
-                "WaveKit unavailable; VCD audit skipped -- DV relies on cocotb "
-                "results. Install WaveKit (needs python3-dev + cmake to build "
-                "pylibfst from sdist on platforms without a prebuilt wheel)."
-            ),
-            "detail": (exc.stderr or exc.stdout or str(exc))[-1000:],
-            "vcd_path": str(vcd_path),
-        }
-        audit_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
-        return result
-    except subprocess.TimeoutExpired:
-        result = {
-            "ok": False,
-            "error": "WaveKit VCD audit timed out",
-            "vcd_path": str(vcd_path),
-        }
-        audit_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
-        return result
-
-    if proc.returncode != 0:
-        result = {
-            "ok": False,
-            "error": (proc.stderr or proc.stdout)[-2000:],
-            "vcd_path": str(vcd_path),
-        }
-    else:
-        result = json.loads(proc.stdout)
-    audit_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
-    return result
-
-
 def _build_products_present(sim_dir: Path) -> bool:
     """True when ``sim_dir`` holds a prior Verilator/cocotb BUILD.
 
     Distinguishes real build products -- the cocotb obj dir (``sim_build/``), a
     ``V*`` sim binary, or a ``results.xml`` -- from mere config inputs (Makefile,
-    the copied TB, ``.build_fingerprint``, ``wavekit_audit.json``, the flock).
+    the copied TB, ``.build_fingerprint``, the flock).
     Cheap: a couple of stat/glob calls, so the no-products first-call fast path
     stays inexpensive. Best-effort (any error -> False)."""
     try:
@@ -2431,7 +1712,8 @@ def _normalize_cocotb_timing_keywords(tb_file: Path) -> None:
 def run_simulation(block: dict, rtl_path, tb_path: str, attempt: int = 1,
                    extra_defines: list | None = None,
                    sim_subdir: str | None = None,
-                   extra_args: list | None = None) -> dict:
+                   extra_args: list | None = None,
+                   project_root=None) -> dict:
     """Run cocotb simulation with Verilator.
 
     ``extra_defines`` (e.g. ``["SYNTHESIS"]``) are added as Verilator ``-D``
@@ -2442,9 +1724,17 @@ def run_simulation(block: dict, rtl_path, tb_path: str, attempt: int = 1,
     used by the gate-sim harness (harness.gate_sim) to record a PORT-ONLY
     waveform for post-synthesis vector replay. With all three omitted the
     Makefile and build dir are byte-identical to the default.
+
+    ``project_root`` anchors ``sim_build/`` and the cocotb oracle wrapper at
+    the RUN directory instead of the module-level ``PROJECT_ROOT`` constant.
+    It defaults to ``PROJECT_ROOT`` (resolved at call time, so monkeypatching
+    the constant still works), which is what the daemon relies on; any caller
+    that knows the run's root should pass it, otherwise a process without
+    ``CORESMITH_PROJECT_ROOT`` set writes DV artifacts into the checkout.
     """
     block_name = block["name"]
-    sim_dir = PROJECT_ROOT / "sim_build" / (sim_subdir or block_name)
+    root = Path(project_root) if project_root else PROJECT_ROOT
+    sim_dir = root / "sim_build" / (sim_subdir or block_name)
     sim_dir.mkdir(parents=True, exist_ok=True)
 
     # Bound Verilator's C++ build parallelism (engine fix 2026-06-24). A huge
@@ -2544,18 +1834,18 @@ EXTRA_ARGS += --build-jobs {_build_jobs}
     shutil.copy2(tb_path, sim_tb_path)
     _normalize_cocotb_timing_keywords(sim_tb_path)
 
-    create_golden_model_wrapper(block_name, block.get("python_source", ""))
+    create_golden_model_wrapper(block_name, block.get("python_source", ""),
+                                project_root=root)
 
-    wrapper_src = PROJECT_ROOT / "tb" / "cocotb" / f"{block_name}_model.py"
+    wrapper_src = root / "tb" / "cocotb" / f"{block_name}_model.py"
     if wrapper_src.exists():
         shutil.copy2(wrapper_src, sim_dir / f"{block_name}_model.py")
 
     env = os.environ.copy()
-    import sys
     venv_bin = str(Path(sys.prefix) / "bin")
     env["PATH"] = f"{venv_bin}:{env.get('PATH', '/usr/bin:/bin')}"
     env["SHELL"] = shutil.which("bash") or "/bin/bash"
-    env["PYTHONPATH"] = f"{sim_dir}:{PROJECT_ROOT}:{env.get('PYTHONPATH', '')}"
+    env["PYTHONPATH"] = f"{sim_dir}:{root}:{env.get('PYTHONPATH', '')}"
 
     # ANTI-MEMORIZATION DV SEED (engine fix, 2026-06-21).
     # Per-block DV stimulus must be UNPREDICTABLE at RTL-generation time, so a
@@ -2683,8 +1973,6 @@ EXTRA_ARGS += --build-jobs {_build_jobs}
             )
 
         vcd_path = sim_dir / "dump.vcd"
-        audit_path = sim_dir / "wavekit_audit.json"
-        wavekit_audit = run_wavekit_vcd_audit(vcd_path, audit_path)
         passed = (
             result.returncode == 0
             and not no_tests
@@ -2693,11 +1981,6 @@ EXTRA_ARGS += --build-jobs {_build_jobs}
                 or (summary["tests_total"] > 0 and summary["tests_failed"] == 0)
             )
         )
-        if not wavekit_audit.get("ok"):
-            output = (
-                "WAVEKIT VCD AUDIT WARNING: "
-                f"{wavekit_audit.get('error', 'unknown error')}\n" + output
-            )
 
         # --- LINE-COVERAGE FLOOR GATE (weak-TB rejector) --------------------
         # Only on the PRIMARY block-DV run (not the branch-parity smoke): a
@@ -2791,7 +2074,7 @@ EXTRA_ARGS += --build-jobs {_build_jobs}
                     # prior DV run's number on the retry path) is ignored and
                     # re-measured, not trusted.
                     throughput_record = evaluate_block_throughput(
-                        str(PROJECT_ROOT), block_name, sim_dir, rtl_path
+                        str(root), block_name, sim_dir, rtl_path
                     )
                 else:
                     throughput_record = {
@@ -2806,16 +2089,15 @@ EXTRA_ARGS += --build-jobs {_build_jobs}
                     "applicable": False, "passed": None,
                     "reason": "throughput gate plumbing error",
                 }
+            # WP-10c: the measured-throughput verdict is ADVISORY. It is
+            # recorded (``throughput``) and its report is appended to the log,
+            # but a functional DV pass is never demoted for cycles/op.
             if (passed and isinstance(throughput_record, dict)
                     and throughput_record.get("applicable")
                     and throughput_record.get("passed") is False):
-                passed = False
-                throughput_gate_failed = True
-                throughput_needs_tb = bool(
-                    throughput_record.get("artifact_missing")
-                )
                 _trep = throughput_record.get("report", "") or ""
-                output = _trep + "\n\n" + output
+                output = ("THROUGHPUT ADVISORY (not a DV failure):\n"
+                          + _trep + "\n\n" + output)
                 try:
                     if log_path:
                         with open(log_path, "a", encoding="utf-8") as _lf:
@@ -2832,8 +2114,6 @@ EXTRA_ARGS += --build-jobs {_build_jobs}
             "tests_failed": summary["tests_failed"],
             "log_path": log_path,
             "vcd_path": str(vcd_path) if vcd_path.exists() else "",
-            "wavekit_audit_path": str(audit_path),
-            "wavekit_audit": wavekit_audit,
             "coverage_gate_failed": coverage_gate_failed,
             "coverage_pct": coverage_pct,
             "coverage": coverage_record,
@@ -2869,18 +2149,25 @@ EXTRA_ARGS += --build-jobs {_build_jobs}
 # SDC Generation
 # ---------------------------------------------------------------------------
 
-def _detect_clock_port(rtl_source: str) -> str:
-    """Regex-based clock port detection from Verilog source.
+# Input port declaration: skips the net/type keywords (wire/reg/logic/bit,
+# signed/unsigned) and an optional vector range so `input logic clk_i` yields
+# "clk_i" rather than the type keyword "logic".
+_INPUT_PORT_RE = re.compile(
+    r"\binput\s+(?:(?:wire|reg|logic|bit|signed|unsigned)\s+)*"
+    r"(?:\[[^\]]*\]\s*)?(\w+)",
+    re.MULTILINE,
+)
 
-    Scans the module port declarations for common clock port names.
-    Returns the detected clock port name, or 'clk' as fallback.
+
+def _detect_clock_port_or_empty(rtl_source: str) -> str:
+    """Clock port detection that returns ``""`` when the module has none.
+
+    ``_detect_clock_port`` keeps the historical ``"clk"`` fallback for callers
+    that need *some* port name; the SDC generator needs the honest empty
+    answer so a pure combinational block gets a virtual clock instead of a
+    ``create_clock ... [get_ports clk]`` on a port that does not exist.
     """
-    import re
-
-    port_pattern = re.compile(
-        r'\binput\s+(?:wire\s+)?(\w+)', re.MULTILINE
-    )
-    ports = port_pattern.findall(rtl_source)
+    ports = _INPUT_PORT_RE.findall(rtl_source)
 
     for name in ("clk", "clk_in", "clock", "CLK", "CLOCK"):
         if name in ports:
@@ -2890,7 +2177,16 @@ def _detect_clock_port(rtl_source: str) -> str:
         if "clk" in p.lower() or "clock" in p.lower():
             return p
 
-    return "clk"
+    return ""
+
+
+def _detect_clock_port(rtl_source: str) -> str:
+    """Regex-based clock port detection from Verilog source.
+
+    Scans the module port declarations for common clock port names.
+    Returns the detected clock port name, or 'clk' as fallback.
+    """
+    return _detect_clock_port_or_empty(rtl_source) or "clk"
 
 
 # Word-boundary reset token: matches rst / rst_n / reset / arst_n / aresetn /
@@ -2907,8 +2203,7 @@ def _detect_reset_port(rtl_source: str) -> str:
     ``[get_ports -quiet ...]`` existence guard, so a fallback that is not an
     actual port simply no-ops -- the reset false-path is reset-name-agnostic.
     """
-    port_pattern = re.compile(r"\binput\s+(?:wire\s+)?(\w+)", re.MULTILINE)
-    ports = port_pattern.findall(rtl_source)
+    ports = _INPUT_PORT_RE.findall(rtl_source)
 
     for name in ("rst_n", "resetn", "reset_n", "rstn", "arst_n", "aresetn",
                  "rst", "reset", "arst", "areset"):
@@ -2947,7 +2242,8 @@ def _build_sdc_content(rtl_source: str, target_clock_mhz: float) -> str:
     unbuffered pre-layout reset net can't masquerade as the block WNS.
     """
     period_ns = 1000.0 / target_clock_mhz
-    clock_port = _detect_clock_port(rtl_source)
+    # Empty (no clock port at all) selects the virtual-clock branch below.
+    clock_port = _detect_clock_port_or_empty(rtl_source)
 
     if clock_port:
         sdc_content = (
@@ -3002,6 +2298,11 @@ def synthesize_block(
 ) -> dict:
     """Run Yosys synthesis targeting Sky130."""
     block_name = block["name"]
+    # The yosys top is the module the RTL actually DECLARES, which is not
+    # always the block name (externally-mandated tops carry theirs in
+    # rtl_target) -- the same resolution lint, the RTL postcondition and
+    # cocotb's TOPLEVEL already use.
+    top_module = rtl_module_name(rtl_path, block_name)
     output_dir = PROJECT_ROOT / "syn" / "output" / block_name
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -3069,11 +2370,11 @@ def synthesize_block(
         # is real, finite, loop-free logic.
         script = f"""# Auto-generated GENERIC synthesis script for {block_name}
 read_verilog -sv {rtl_path}
-{_wrapper_read}hierarchy -top {block_name}
+{_wrapper_read}hierarchy -top {top_module}
 proc
 flatten
 opt
-synth -top {block_name}
+synth -top {top_module}
 memory_map
 opt -full
 techmap
@@ -3085,7 +2386,7 @@ write_verilog -noattr {netlist_path}
     else:
         script = f"""# Auto-generated synthesis script for {block_name}
 read_verilog {rtl_path}
-{_wrapper_read}hierarchy -top {block_name}
+{_wrapper_read}hierarchy -top {top_module}
 proc
 flatten
 opt
@@ -3280,10 +2581,6 @@ async def fix_synth_errors(
     rtl_before = ""
     try:
         rtl_before = Path(rtl_path).read_text()
-        from orchestrator.langgraph.rtl_storage_lint import (
-            find_flat_packed_dynamic_storage,
-        )
-        structural = not find_flat_packed_dynamic_storage(rtl_before).ok
     except Exception:  # noqa: BLE001
         pass
 
@@ -3390,7 +2687,6 @@ async def fix_testbench_errors(
         f"- RTL Verilog: {rtl_path}\n"
         f"- Simulation log: {sim_log_path}\n"
         f"- VCD waveform: sim_build/{block_name}/dump.vcd\n"
-        f"- WaveKit audit: sim_build/{block_name}/wavekit_audit.json\n"
         f"- uArch Spec: arch/uarch_specs/{block_name}.md\n"
         f"- Constraints: .coresmith/blocks/{block_name}/constraints.json\n"
         f"- DV Rules: arch/DV_RULES.md\n\n"

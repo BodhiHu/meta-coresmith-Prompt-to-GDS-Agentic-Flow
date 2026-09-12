@@ -130,7 +130,7 @@ def _phase_evidence_section(block_name: str, phase: str) -> tuple[str, str]:
             f"## Instructions\n"
             f"This is a PRE-SIMULATION failure: a deterministic contract gate "
             f"FAILED the block BEFORE any testbench was generated. NO "
-            f"simulation ran. There is NO waveform, NO VCD, NO WaveKit audit "
+            f"simulation ran. There is NO waveform, NO VCD "
             f"and NO cocotb log for this attempt, and none is missing or "
             f"broken -- they do not exist by construction. Do NOT ask for "
             f"them, do NOT look for them, do NOT infer anything from "
@@ -159,9 +159,7 @@ def _phase_evidence_section(block_name: str, phase: str) -> tuple[str, str]:
         f"- Error log: .coresmith/blocks/{block_name}/previous_error.txt\n"
         f"- Step logs: .coresmith/step_logs/{block_name}/ (read the latest {phase}_attempt*.log)\n"
         f"- VCD waveform: sim_build/{block_name}/dump.vcd\n"
-        f"- WaveKit audit: sim_build/{block_name}/wavekit_audit.json\n"
         f"- Integration VCD, if this is a chip-level failure: sim_build/integration/dump.vcd\n"
-        f"- Integration WaveKit audit, if relevant: sim_build/integration/wavekit_audit.json\n"
         f"- RTL source: find the .v file for this block under rtl/\n"
         f"- Testbench: tb/cocotb/test_{block_name}.py\n"
         f"- uArch spec: arch/uarch_specs/{block_name}.md\n"
@@ -277,6 +275,18 @@ class DebugAgent:
         try:
             user_message = build_debug_user_message(block_name, phase)
 
+            diag_path = Path(project_root) / ".coresmith" / "blocks" / block_name / "diagnosis.json"
+            # The path is STABLE across attempts and ClaudeLLM.call() returns
+            # error strings instead of raising, so a bare exists() check adopts
+            # the PREVIOUS attempt's diagnosis -- for a different failure --
+            # whenever this call writes nothing. Snapshot the bytes before the
+            # call and adopt the file only if it CHANGED (same guard as
+            # ContractAuditAgent).
+            try:
+                diag_before = diag_path.read_bytes() if diag_path.exists() else None
+            except OSError:
+                diag_before = None
+
             run_name = f"Analyze Failure [{block_title}]"
             await self.llm.call(
                 system=DEBUG_SYSTEM_PROMPT,
@@ -284,8 +294,13 @@ class DebugAgent:
                 run_name=run_name,
             )
 
-            diag_path = Path(project_root) / ".coresmith" / "blocks" / block_name / "diagnosis.json"
-            if diag_path.exists():
+            try:
+                written_by_this_call = (
+                    diag_path.exists() and diag_path.read_bytes() != diag_before
+                )
+            except OSError:
+                written_by_this_call = False
+            if written_by_this_call:
                 return json.loads(diag_path.read_text())
 
             return {

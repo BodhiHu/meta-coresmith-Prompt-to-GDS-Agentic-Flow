@@ -54,6 +54,17 @@ ExitHookFn = Callable[[str, str, dict], Awaitable[None]]
 
 _exit_hooks: list[ExitHookFn] = []
 
+# Strong references to in-flight hook tasks.  The event loop only keeps weak
+# references to tasks, so a fire-and-forget task whose only reference lived in
+# a local can be garbage-collected mid-await (documented asyncio pitfall).
+_pending_hook_tasks: set[asyncio.Task] = set()
+
+# Event loop that last wrote an event from a loop thread.  write_graph_event()
+# is a sync function that also runs inside asyncio.to_thread() workers, where
+# there is no running loop; remembering the loop lets those calls still
+# dispatch hooks instead of silently dropping them.
+_hook_loop: asyncio.AbstractEventLoop | None = None
+
 
 def register_exit_hook(fn: ExitHookFn) -> None:
     """Register an async callback that fires on every ``graph_node_exit`` event.
@@ -63,6 +74,19 @@ def register_exit_hook(fn: ExitHookFn) -> None:
     block the pipeline.
     """
     _exit_hooks.append(fn)
+
+
+def _spawn_hook(
+    loop: asyncio.AbstractEventLoop,
+    hook: ExitHookFn,
+    project_root: str,
+    node_name: str,
+    record: dict,
+) -> None:
+    """Schedule one hook on ``loop``, keeping a strong reference to the task."""
+    task = loop.create_task(_safe_hook(hook, project_root, node_name, record))
+    _pending_hook_tasks.add(task)
+    task.add_done_callback(_pending_hook_tasks.discard)
 
 
 # ---------------------------------------------------------------------------
@@ -107,12 +131,35 @@ def write_graph_event(
 
     # Dispatch exit hooks as fire-and-forget async tasks
     if event_type == "graph_node_exit" and _exit_hooks:
+        global _hook_loop
         try:
             loop = asyncio.get_running_loop()
-            for hook in _exit_hooks:
-                loop.create_task(_safe_hook(hook, project_root, node_name, record))
         except RuntimeError:
-            pass  # No event loop running (e.g. sync test context)
+            loop = None
+        if loop is not None:
+            _hook_loop = loop
+            for hook in _exit_hooks:
+                _spawn_hook(loop, hook, project_root, node_name, record)
+        elif _hook_loop is not None and _hook_loop.is_running():
+            # Called off the loop thread (e.g. from an asyncio.to_thread
+            # worker): hand the hooks back to the loop rather than drop them.
+            for hook in _exit_hooks:
+                try:
+                    _hook_loop.call_soon_threadsafe(
+                        _spawn_hook, _hook_loop, hook, project_root, node_name, record
+                    )
+                except RuntimeError:
+                    logger.debug(
+                        "Exit hook %s skipped for node %s (loop unavailable)",
+                        getattr(hook, "__name__", hook),
+                        node_name,
+                    )
+        else:
+            logger.debug(
+                "No event loop available; skipped %d exit hook(s) for node %s",
+                len(_exit_hooks),
+                node_name,
+            )
 
 
 async def _safe_hook(

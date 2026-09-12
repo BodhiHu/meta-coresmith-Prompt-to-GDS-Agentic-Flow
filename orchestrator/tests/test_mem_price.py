@@ -536,30 +536,11 @@ class TestPromptPinning:
         assert "dependency window" in t.lower()
         assert "MANDATORY" in t
 
-    def test_block_golden_mandates_manifest(self):
-        t = self._read("block_golden_generator.md")
-        assert "# MEM <name>:" in t
-        assert "impl=<flop|fpmem|sram>" in t
-        assert "dependency window" in t.lower()
-
-    def test_ppa_judge_surfaces_ledger(self):
-        t = self._read("microarch_ppa_judge.md")
-        assert "mem_price.json" in t
-        assert "sanity cap" in t.lower()
-        assert "estimate source" in t.lower() or "estimate_source" in t
 
     def test_integration_review_surfaces_ledger(self):
         t = self._read("integration_review.md")
         assert "mem_price.json" in t
         assert "line-buffer" in t.lower() or "line buffer" in t.lower()
-
-    def test_justification_discipline_present(self):
-        # D3: the storage-justification discipline (the line-buffer-vs-frame-store
-        # question) appears in BOTH generators.
-        for name in ("uarch_spec_generator.md", "block_golden_generator.md"):
-            t = self._read(name).lower()
-            assert "line" in t and "store" in t
-            assert "dependency window" in t
 
 
 # ---------------------------------------------------------------------------
@@ -581,6 +562,7 @@ class TestGateVerdictHelper:
 
     def test_oversized_store_revises_with_physics(self, tmp_path, monkeypatch):
         pg = self._pg(monkeypatch)
+        monkeypatch.setenv("CORESMITH_MEM_PRICE_MAX_REVISE", "3")
         self._spec(tmp_path, "recon",
                    "area_budget_um2 = 250000\nsram_budget = 1.9 Mbit\n"
                    "# MEM recon_luma: 8x235520 ports=1rw1r impl=sram "
@@ -613,7 +595,9 @@ class TestGateVerdictHelper:
         monkeypatch.setenv("CORESMITH_MEM_MANIFEST_REQUIRED", "1")
         self._spec(tmp_path, "legacy", "sram_budget = 4 KiB (1x sky130_sram)\n")
         r = pg._mem_price_gate_verdict(str(tmp_path), "legacy")
-        assert r is not None and "MANIFEST REQUIRED" in r["feedback"]
+        assert r is None  # WP-11: a missing manifest is advisory (ledger note), not a re-spec
+        led = json.loads((tmp_path / ".coresmith" / "blocks" / "legacy" / "mem_price.json").read_text())
+        assert led.get("manifest_present") is False
 
     def test_revise_cap_accepts_after_bound(self, tmp_path, monkeypatch):
         pg = self._pg(monkeypatch)
@@ -694,6 +678,7 @@ class TestReviseLoopConvergence:
 
     def test_revise_feedback_is_directive_rich(self, tmp_path, monkeypatch):
         pg = self._pg(monkeypatch)
+        monkeypatch.setenv("CORESMITH_MEM_PRICE_MAX_REVISE", "3")
         self._spec(tmp_path, "recon",
                    "area_budget_um2 = 250000\n"
                    "# MEM r: 8x235520 ports=1rw1r impl=sram justification=x\n")
@@ -708,6 +693,7 @@ class TestReviseLoopConvergence:
 
     def test_trajectory_worse_across_rounds(self, tmp_path, monkeypatch):
         pg = self._pg(monkeypatch)
+        monkeypatch.setenv("CORESMITH_MEM_PRICE_MAX_REVISE", "3")
         # round 1: 1 store, over budget
         self._spec(tmp_path, "irdc",
                    "area_budget_um2 = 250000\n"

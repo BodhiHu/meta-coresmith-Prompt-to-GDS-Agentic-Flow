@@ -175,6 +175,15 @@ async def _run_tapeout_llm_step(
         "After writing the result file, respond with a brief summary."
     )
 
+    # A result file left by a PREVIOUS attempt would be parsed as this
+    # attempt's result if the agent finishes without writing one, so a retry
+    # would silently report the stale (pre-override) outcome.
+    rp = Path(result_json_path)
+    try:
+        rp.unlink(missing_ok=True)
+    except OSError:
+        pass
+
     llm = ClaudeLLM(model=DEFAULT_MODEL, timeout=timeout)
     try:
         await llm.call(
@@ -185,7 +194,6 @@ async def _run_tapeout_llm_step(
     except Exception as e:
         return {"success": False, "error": f"LLM call failed: {e}"}
 
-    rp = Path(result_json_path)
     if rp.exists():
         try:
             return json.loads(rp.read_text(encoding="utf-8"))
@@ -529,12 +537,21 @@ async def wrapper_drc_node(state: TapeoutState) -> dict:
         "phase": "drc",
     }
 
-    if result.get("clean") or result.get("success"):
+    if result.get("success"):
         out["wrapper_gds_path"] = result.get("gds_path", "")
         out["wrapper_spice_path"] = result.get("spice_path", "")
+
+    # keyed on `clean` exactly like route_after_wrapper_drc: a dirty-but-
+    # successful run must still hand diagnosis THIS phase's error, not the
+    # stale previous_error from an earlier one.
+    if result.get("clean"):
         log(f"  [WRAPPER DRC] Clean: {result.get('violation_count', 0)} violations", GREEN)
     else:
-        out["previous_error"] = f"Wrapper DRC: {result.get('violation_count', '?')} violations"
+        err = result.get("error")
+        out["previous_error"] = (
+            f"Wrapper DRC: {err}" if err
+            else f"Wrapper DRC: {result.get('violation_count', '?')} violations"
+        )
         log(f"  [WRAPPER DRC] {out['previous_error']}", RED)
 
     return out

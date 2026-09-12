@@ -55,6 +55,34 @@ class TestFindCoverageDat:
         assert cov.find_coverage_dat(tmp_path) is None
 
 
+class TestAnnotate:
+    """A failed verilator_coverage run must never yield a STALE annotated dir."""
+
+    def _stub(self, monkeypatch, returncode: int):
+        import subprocess as _sp
+        monkeypatch.setattr(cov.shutil, "which", lambda name: "/usr/bin/" + name)
+        monkeypatch.setattr(
+            cov.subprocess, "run",
+            lambda *a, **k: _sp.CompletedProcess(a[0], returncode, "", ""),
+        )
+
+    def test_failed_run_returns_none_and_clears_stale_tree(
+        self, tmp_path, monkeypatch
+    ):
+        (tmp_path / "coverage.dat").write_text("x")
+        stale = tmp_path / "coverage_annotated"
+        stale.mkdir()
+        (stale / "old_tb.v").write_text(" 000100  assign x = 1;\n")
+        self._stub(monkeypatch, 1)
+        assert cov.annotate(tmp_path) is None
+        assert not (stale / "old_tb.v").exists()
+
+    def test_empty_output_returns_none(self, tmp_path, monkeypatch):
+        (tmp_path / "coverage.dat").write_text("x")
+        self._stub(monkeypatch, 0)
+        assert cov.annotate(tmp_path) is None
+
+
 def _annotated_tree(tmp_path: Path, hit: int, uncov: int) -> Path:
     """Fabricate a verilator_coverage --annotate output tree."""
     ann = tmp_path / "coverage_annotated"
@@ -80,7 +108,7 @@ class TestLineCovGate:
         monkeypatch.setattr(cov, "annotate", lambda sim_dir, **k: ann)
 
     def test_default_on_floor_70(self, monkeypatch):
-        monkeypatch.delenv("CORESMITH_LINE_COV_GATE", raising=False)
+        monkeypatch.setenv("CORESMITH_LINE_COV_GATE", "1")
         monkeypatch.delenv("CORESMITH_LINE_COV_FLOOR", raising=False)
         assert cov.line_cov_gate_enabled() is True
         assert cov.line_cov_floor() == 70.0
@@ -91,7 +119,7 @@ class TestLineCovGate:
         assert cov.line_cov_gate_verdict(tmp_path) is None
 
     def test_below_floor_fails_with_uncovered_feedback(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("CORESMITH_LINE_COV_GATE", raising=False)
+        monkeypatch.setenv("CORESMITH_LINE_COV_GATE", "1")
         monkeypatch.delenv("CORESMITH_LINE_COV_FLOOR", raising=False)
         self._arm(tmp_path, monkeypatch, hit=4, uncov=6)  # 5/11 hit = 45%
         v = cov.line_cov_gate_verdict(tmp_path)
@@ -103,7 +131,7 @@ class TestLineCovGate:
         assert "blk.v" in v["report"]
 
     def test_above_floor_passes(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("CORESMITH_LINE_COV_GATE", raising=False)
+        monkeypatch.setenv("CORESMITH_LINE_COV_GATE", "1")
         monkeypatch.delenv("CORESMITH_LINE_COV_FLOOR", raising=False)
         self._arm(tmp_path, monkeypatch, hit=9, uncov=1)  # 10/11 hit = 91%
         v = cov.line_cov_gate_verdict(tmp_path)
@@ -111,7 +139,7 @@ class TestLineCovGate:
 
     def test_verdict_exposes_points_hit_and_uncovered_count(self, tmp_path, monkeypatch):
         # Part A: the verdict carries the persistable metrics the report needs.
-        monkeypatch.delenv("CORESMITH_LINE_COV_GATE", raising=False)
+        monkeypatch.setenv("CORESMITH_LINE_COV_GATE", "1")
         monkeypatch.delenv("CORESMITH_LINE_COV_FLOOR", raising=False)
         self._arm(tmp_path, monkeypatch, hit=4, uncov=6)  # 5/11 hit
         v = cov.line_cov_gate_verdict(tmp_path)
@@ -121,6 +149,7 @@ class TestLineCovGate:
         assert v["uncovered_count"] == 6
 
     def test_floor_env_override(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CORESMITH_LINE_COV_GATE", "1")
         self._arm(tmp_path, monkeypatch, hit=4, uncov=6)  # 45%
         monkeypatch.setenv("CORESMITH_LINE_COV_FLOOR", "40")
         v = cov.line_cov_gate_verdict(tmp_path)
@@ -129,7 +158,7 @@ class TestLineCovGate:
     def test_not_applicable_without_coverage_dat(self, tmp_path, monkeypatch):
         # no coverage.dat -> annotate() returns None -> gate skips (None),
         # never failing a block for missing tooling.
-        monkeypatch.delenv("CORESMITH_LINE_COV_GATE", raising=False)
+        monkeypatch.setenv("CORESMITH_LINE_COV_GATE", "1")
         assert cov.line_cov_gate_verdict(tmp_path) is None
 
     def test_makefile_injection_follows_gate(self, monkeypatch):
@@ -137,7 +166,7 @@ class TestLineCovGate:
         gate is on (default) OR the explicit opt-in is set; omitted only when
         both are off."""
         monkeypatch.delenv("CORESMITH_COVERAGE", raising=False)
-        monkeypatch.delenv("CORESMITH_LINE_COV_GATE", raising=False)
+        monkeypatch.setenv("CORESMITH_LINE_COV_GATE", "1")
         assert cov.coverage_enabled() or cov.line_cov_gate_enabled()
         monkeypatch.setenv("CORESMITH_LINE_COV_GATE", "0")
         assert not (cov.coverage_enabled() or cov.line_cov_gate_enabled())
@@ -155,13 +184,13 @@ class TestCoverageRecord:
 
     def test_default_on_by_default(self, monkeypatch):
         # LOCK: coverage line-cov gate is ON by default (floor 70).
-        monkeypatch.delenv("CORESMITH_LINE_COV_GATE", raising=False)
+        monkeypatch.setenv("CORESMITH_LINE_COV_GATE", "1")
         monkeypatch.delenv("CORESMITH_LINE_COV_FLOOR", raising=False)
         assert cov.line_cov_gate_enabled() is True
         assert cov.line_cov_floor() == 70.0
 
     def test_applicable_record(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("CORESMITH_LINE_COV_GATE", raising=False)
+        monkeypatch.setenv("CORESMITH_LINE_COV_GATE", "1")
         monkeypatch.delenv("CORESMITH_LINE_COV_FLOOR", raising=False)
         self._arm(tmp_path, monkeypatch, hit=9, uncov=1)  # 10/11 = 90.9%
         rec = cov.coverage_record(tmp_path)
@@ -173,7 +202,7 @@ class TestCoverageRecord:
 
     def test_not_applicable_no_coverage_dat_has_visible_reason(self, tmp_path, monkeypatch):
         # No coverage.dat -> not applicable, but a VISIBLE reason (never blank).
-        monkeypatch.delenv("CORESMITH_LINE_COV_GATE", raising=False)
+        monkeypatch.setenv("CORESMITH_LINE_COV_GATE", "1")
         rec = cov.coverage_record(tmp_path)
         assert rec["applicable"] is False
         assert "coverage.dat" in rec["reason"]
@@ -186,7 +215,7 @@ class TestCoverageRecord:
         assert "disabled" in rec["reason"]
 
     def test_na_reason_never_raises(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("CORESMITH_LINE_COV_GATE", raising=False)
+        monkeypatch.setenv("CORESMITH_LINE_COV_GATE", "1")
         # arbitrary non-existent dir -> reason string, no exception
         assert isinstance(cov.coverage_na_reason(tmp_path / "nope"), str)
 

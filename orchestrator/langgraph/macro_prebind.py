@@ -253,7 +253,16 @@ def macro_mask_lanes(verilog_path) -> int | None:
     return None
 
 
-def _ports_for(macro, spec, nmask: int = 1) -> list[tuple[str, str]]:
+def _ports_cover(macro_ports_str: str, want_ports: str) -> bool:
+    """Delegate to :func:`openram_gen.ports_cover`; permissive if unavailable."""
+    try:
+        from orchestrator.langgraph.openram_gen import ports_cover
+    except Exception:  # pragma: no cover - import guard
+        return True
+    return ports_cover(macro_ports_str, want_ports)
+
+
+def _ports_for(macro, spec, nmask: int | None = None) -> list[tuple[str, str]]:
     """Port connections from the OpenRAM macro to the shell's signals.
 
     OpenRAM sky130 SRAMs use ACTIVE-LOW chip-select and write-enable
@@ -274,7 +283,19 @@ def _ports_for(macro, spec, nmask: int = 1) -> list[tuple[str, str]]:
     if "wmask0" in have:
         # Connect the SHELL's mask, not a constant. Tying this high was the
         # defect: it silently turned every partial write into a full-word write.
-        conns.insert(3, ("wmask0", "wmask0"))
+        lanes = macro_mask_lanes(getattr(macro, "verilog", "") or "") or 1
+        if nmask is not None and int(nmask) <= 1 < lanes:
+            # The shell is KNOWN to drive a single whole-word mask bit into a
+            # multi-lane macro port. A bare connection ZERO-EXTENDS, leaving
+            # lanes 1..N-1 permanently write-disabled -- only the low byte of
+            # each word would ever be written. Replicating the bit across every
+            # lane is exactly the whole-word semantics the shell expresses.
+            # (nmask None = lane count not recorded for this geometry -> connect
+            # straight through; nmask > 1 was verified equal to `lanes` by
+            # resolve_prebindings.)
+            conns.insert(3, ("wmask0", "{%d{wmask0[0]}}" % lanes))
+        else:
+            conns.insert(3, ("wmask0", "wmask0"))
     else:
         # The macro has no mask port at all -- OpenRAM omits it when
         # word_size == write_size, i.e. the mask is a single whole-word bit.
@@ -346,7 +367,10 @@ def emit_bound_shell(result: PrebindResult) -> str:
         )
         lines.append(f"      {macro.name} u_macro (")
         key = (w, d, n)
-        nmask = max(1, int(result.mask_lanes.get(key, 1) or 1))
+        # None = this geometry's lane count was never recorded (e.g. the shell
+        # came from a netlist rather than a wrapper instantiation), which is
+        # NOT the same as "one lane" -- see _ports_for.
+        nmask = result.mask_lanes.get(key)
         conns = _ports_for(macro, spec, nmask)
         for i, (port, sig) in enumerate(conns):
             comma = "," if i < len(conns) - 1 else ""
@@ -440,6 +464,37 @@ def resolve_prebindings(sources, *, allow_generate: bool = True,
                 f"macro {macro.name} for {spec.describe()} has no Verilog model "
                 f"-- cannot simulate; regenerate it so a .v view exists")
             continue
+        # Geometry is not a match on its own. ``openram_gen.find_exact``
+        # screens words/data_bits only, and the registry holds ROMs next to
+        # SRAMs and 1rw parts next to 1rw1r ones, so a WxD hit can come back
+        # with the wrong kind or too few ports. Both fail silently downstream
+        # -- writes to a ROM are discarded, and _ports_for drops the port-1
+        # pins so the shell's rdata1 ends up driven by nothing (X in gate sim,
+        # floating in silicon) -- so refuse here.
+        want_kind = str(getattr(spec, "kind", "sram") or "sram")
+        got_kind = str(getattr(macro, "kind", "") or want_kind)
+        if got_kind != want_kind:
+            res.unresolved.append(spec)
+            res.errors.append(
+                f"{spec.describe()}: resolved to {got_kind} macro {macro.name}, "
+                f"but the RTL instantiates a {want_kind}. The geometry matched "
+                f"and nothing else does -- an SRAM bound to a read-only ROM "
+                f"discards every write. Provide a {want_kind} macro for this "
+                f"geometry.")
+            continue
+        # (ROM shells are read-only: their port naming is "<n>r", so the
+        # rw-based cover check below does not apply to them.)
+        want_ports = "1rw%dr" % (int(getattr(spec, "nport", 1) or 1) - 1)
+        if want_kind != "rom" and not _ports_cover(
+                getattr(macro, "ports", "") or "", want_ports):
+            res.unresolved.append(spec)
+            res.errors.append(
+                f"{spec.describe()}: macro {macro.name} is a "
+                f"{macro.ports} part but the shell needs {want_ports}. The "
+                f"missing read port would leave rdata1 undriven rather than "
+                f"reading memory, so this is refused. Provide a {want_ports} "
+                f"macro for this geometry.")
+            continue
         key = (int(spec.width), int(spec.depth),
                int(getattr(spec, "nport", 1) or 1))
         if key in req_mask:
@@ -499,16 +554,33 @@ def resolve_prebindings(sources, *, allow_generate: bool = True,
                     f"writes into full-word writes, which RTL DV cannot see.")
                 continue
             # nb == 1: a whole-word mask, exactly equivalent to a write-enable
-            # qualifier. The shell now folds it into web0 itself, so this is
-            # correct by construction and no longer depends on the RTL author
-            # remembering to write `we0 = write_fire & wmask`.
+            # qualifier. A MASKLESS macro gets it folded into web0 by the
+            # shell; a mask-capable one gets the single bit REPLICATED across
+            # every lane (a bare connection would zero-extend and leave lanes
+            # 1..N-1 permanently write-disabled), so both are correct by
+            # construction and neither depends on the RTL author remembering to
+            # write `we0 = write_fire & wmask`.
+            lanes = macro_mask_lanes(macro.verilog) if macro_has_mask else 1
+            if macro_has_mask and lanes is None:
+                # Same discipline as the nb > 1 arm: "cannot verify" is never a
+                # default, because this number decides which bytes a write hits.
+                res.unresolved.append(spec)
+                res.errors.append(
+                    f"{spec.describe()}: macro {macro.name} declares a wmask0 "
+                    f"port whose lane count is unresolvable, so the shell "
+                    f"cannot know how far to replicate the RTL's whole-word "
+                    f"mask. Connecting it unreplicated would zero-extend and "
+                    f"disable every lane but the lowest, so this is refused.")
+                continue
             res.mask_lanes[key] = 1
             res.warnings.append(
-                f"{spec.describe()}: whole-word write mask folded into the "
-                f"macro's write enable by the bound shell"
-                f"{'' if macro_has_mask else f' (macro {macro.name} exposes no wmask0)'}"
-                f" -- masked writes are suppressed correctly without any RTL "
-                f"change.")
+                f"{spec.describe()}: whole-word write mask "
+                + (f"replicated across macro {macro.name}'s {lanes} wmask0 "
+                   f"lane(s)" if macro_has_mask else
+                   f"folded into the macro's write enable (macro {macro.name} "
+                   f"exposes no wmask0)")
+                + " by the bound shell -- masked writes are suppressed "
+                  "correctly without any RTL change.")
         res.bindings.append((spec, macro))
     return res
 

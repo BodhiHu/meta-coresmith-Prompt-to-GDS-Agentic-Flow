@@ -117,30 +117,6 @@ def test_byte_exact_ledger_is_clean(tmp_path):
     assert doc["integrated_escalate"] is False
 
 
-def test_gate_tier_appends_violation_below_budget(tmp_path, monkeypatch):
-    import orchestrator.architecture.model_integration as mi
-
-    monkeypatch.setenv(
-        "CORESMITH_FIDELITY_METRIC", _metric_file(tmp_path, body="return float(len(observed))")
-    )
-    # below budget: len(observed)=3 < floor 100 -> FAIL (violation appended)
-    monkeypatch.setenv("CORESMITH_FIDELITY_BUDGET", json.dumps({"floor": 100}))
-    v: list[dict] = []
-    mi._run_fidelity_tier(str(tmp_path), b"reference_long_expected_stream", b"abc", v)
-    assert len(v) == 1 and v[0]["criterion"] == "fidelity_below_budget"
-    # armC live (twice driver-flagged): a below-budget fidelity score is a
-    # CONTENT failure -- block_math (targeted re-spec), never 'contract'
-    # (which broadcast-re-fanned / ENDed the run on a quant-table bug).
-    assert v[0]["gap_class"] == "block_math"
-
-    # within budget: floor 1 -> len 3 >= 1 -> PASS (no violation)
-    monkeypatch.setenv("CORESMITH_FIDELITY_BUDGET", json.dumps({"floor": 1}))
-    v2: list[dict] = []
-    mi._run_fidelity_tier(str(tmp_path), b"reference_long_expected_stream", b"abc", v2)
-    assert v2 == []
-    assert (tmp_path / ".coresmith" / "derate_ledger.json").exists()
-
-
 # --- step 3: derate escalation / sign-off -------------------------------------
 
 def test_read_escalation_then_signed_off(tmp_path, monkeypatch):

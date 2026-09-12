@@ -85,6 +85,25 @@ class TestHarnessGeneration:
                       "cfg_offset = sb[0]", "rst_n = 0", "rst_n = 1"):
             assert token in src, token
 
+    def test_input_gap_never_drops_a_pending_beat(self):
+        # AXI-Stream: TVALID must hold until TREADY -- the gap branch is gated
+        # on nothing being pending.
+        c = classify_contract(discover_ports(FRAMED_HEADER))
+        src = generate_harness(c, "toy_top", sorted(c["sidebands"]))
+        assert "if (!s_pend && BP" in src
+        assert "{ load(idx); s_pend = true; }" in src
+
+    def test_no_tlast_completion_uses_idle_window(self):
+        # Without an egress tlast the run ends after the output has been QUIET
+        # for 64 cycles, not after 64 total cycles (which truncated capture on
+        # the first beat accepted post-drain).
+        c = classify_contract(discover_ports(
+            FRAMED_HEADER.replace("output wire m_axis_tlast,\n", "")))
+        src = generate_harness(c, "toy_top", sorted(c["sidebands"]))
+        assert "s_done && wd > 64" not in src
+        assert "++m_idle > 64" in src
+        assert "m_idle = 0;" in src
+
 
 # ---------------------------------------------------------------------------
 # E2E: real verilator, tiny framed DUT
@@ -238,6 +257,38 @@ cases = [
 '''
 
 
+# A framed DUT with NO egress tlast: the run ends on the quiet-window rule
+# (sender done + output idle) rather than on an egress tlast.
+NO_TLAST_DUT = """
+module toy_top (
+    input  wire clk,
+    input  wire rst_n,
+    input  wire [7:0] s_axis_tdata,
+    input  wire s_axis_tvalid,
+    output wire s_axis_tready,
+    input  wire s_axis_tuser,
+    input  wire s_axis_tlast,
+    output reg  [7:0] m_axis_tdata,
+    output reg  m_axis_tvalid,
+    input  wire m_axis_tready,
+    input  wire [7:0] cfg_offset
+);
+    assign s_axis_tready = !m_axis_tvalid || m_axis_tready;
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            m_axis_tvalid <= 1'b0;
+        end else begin
+            if (m_axis_tvalid && m_axis_tready) m_axis_tvalid <= 1'b0;
+            if (s_axis_tvalid && s_axis_tready) begin
+                m_axis_tdata <= s_axis_tdata + cfg_offset;
+                m_axis_tvalid <= 1'b1;
+            end
+        end
+    end
+endmodule
+"""
+
+
 def _write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
@@ -292,6 +343,48 @@ class TestAcceptanceDVEndToEnd:
         res = run_acceptance_dv(str(root), str(top))
         assert res["skipped"]
         assert "acceptance stimulus" in res["reason"]
+
+    def test_ungradable_golden_is_a_skip_not_a_pass(self, tmp_path, monkeypatch):
+        # The charter is HONEST SKIPS, NEVER A FALSE PASS: when the reference
+        # raises on every case the rows are unjudged, so the gate must report
+        # a skip instead of a vacuous PASS.
+        _env(monkeypatch)
+        root, top = _project(tmp_path)
+        _write(root / "inputs" / "toy_golden.py",
+               'def run(stim):\n    raise ValueError("boom")\n')
+        res = run_acceptance_dv(str(root), str(top))
+        assert res["skipped"], res
+        assert not res["passed"]
+        assert "not gradable" in res["reason"]
+
+    def test_numpy_golden_is_byte_compared(self, tmp_path, monkeypatch):
+        # An ndarray golden used to compare against 0 bytes -> false divergence.
+        _env(monkeypatch)
+        root, top = _project(tmp_path)
+        _write(root / "inputs" / "toy_golden.py",
+               'import numpy as np\n\n\n'
+               'def run(stim):\n'
+               '    off = stim.get("offset", 0)\n'
+               '    return np.asarray([(v + off) & 0xFF for v in stim["pixels"]],\n'
+               '                      dtype=np.uint8)\n')
+        res = run_acceptance_dv(str(root), str(top))
+        assert not res["skipped"], res["reason"]
+        assert res["passed"], res
+
+    def test_no_tlast_top_runs_to_completion(self, tmp_path, monkeypatch):
+        # A top without an egress tlast completes on the idle window and
+        # captures every beat (the old rule ended capture on a beat, not on
+        # quiet, and could truncate the tail).
+        _env(monkeypatch)
+        root = tmp_path
+        top = root / "rtl" / "toy_top.v"
+        _write(top, NO_TLAST_DUT)
+        _write(root / "inputs" / "toy_golden.py", REFERENCE)
+        _write(root / "inputs" / "acceptance_stimulus.py", ACCEPTANCE)
+        res = run_acceptance_dv(str(root), str(top))
+        assert not res["skipped"], res["reason"]
+        assert res["passed"], res
+        assert [r["rtl_bytes"] for r in res["cases"]] == [4, 200]
 
     def test_kill_switch(self, tmp_path, monkeypatch):
         _env(monkeypatch)

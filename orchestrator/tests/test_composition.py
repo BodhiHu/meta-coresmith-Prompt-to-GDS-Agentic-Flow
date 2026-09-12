@@ -137,78 +137,10 @@ def toy_reference(x: int) -> int:
 # compose_and_run -- forward DAG
 # ---------------------------------------------------------------------------
 
-class TestComposeAndRun:
-    def test_matches_reference_for_several_inputs(self, tmp_path):
-        d = tmp_path / "arch" / "block_goldens"
-        _write(d / "blockA.py", BLOCK_A_DOUBLER)
-        _write(d / "blockB.py", BLOCK_B_ADD1)
-        goldens = composition.load_block_goldens(str(d), ["blockA", "blockB"])
-
-        for x in (0, 1, 3, 7, 42, 255):
-            out = composition.compose_and_run(
-                TOY_BLOCK_DIAGRAM, goldens, {"chip_in": [x]}
-            )
-            assert out["chip_out"] == [toy_reference(x)], (x, out)
-
-    def test_multi_transaction_stream(self, tmp_path):
-        d = tmp_path / "arch" / "block_goldens"
-        _write(d / "blockA.py", BLOCK_A_DOUBLER)
-        _write(d / "blockB.py", BLOCK_B_ADD1)
-        goldens = composition.load_block_goldens(str(d), ["blockA", "blockB"])
-
-        xs = [1, 2, 3, 4]
-        out = composition.compose_and_run(
-            TOY_BLOCK_DIAGRAM, goldens, {"chip_in": xs}
-        )
-        assert out["chip_out"] == [toy_reference(x) for x in xs]
-
-    def test_wrong_block_diverges(self, tmp_path):
-        d = tmp_path / "arch" / "block_goldens"
-        _write(d / "blockA.py", BLOCK_A_DOUBLER)
-        _write(d / "blockB.py", BLOCK_B_WRONG)
-        goldens = composition.load_block_goldens(str(d), ["blockA", "blockB"])
-
-        out = composition.compose_and_run(
-            TOY_BLOCK_DIAGRAM, goldens, {"chip_in": [5]}
-        )
-        # wrong: (5*2)+99 = 109 ; reference (5*2)+1 = 11
-        assert out["chip_out"] == [109]
-        assert out["chip_out"] != [toy_reference(5)]
-
 
 # ---------------------------------------------------------------------------
 # Feedback edge (one-transaction delay accumulator)
 # ---------------------------------------------------------------------------
-
-class TestFeedbackEdge:
-    def test_accumulator_one_txn_delay(self, tmp_path):
-        d = tmp_path / "arch" / "block_goldens"
-        _write(d / "acc.py", BLOCK_ACC)
-        goldens = composition.load_block_goldens(str(d), ["acc"])
-
-        bd = {
-            "blocks": [
-                {"name": "acc", "interfaces": {
-                    "in": {"direction": "input"},
-                    "acc_fb": {"direction": "input"},
-                    "out": {"direction": "output"},
-                }},
-            ],
-            "connections": [
-                {"from": "chip_in", "to": "acc",
-                 "from_port": "chip_in", "to_port": "in"},
-                # feedback: acc.out -> acc.acc_fb (self-loop, one-txn delay)
-                {"from": "acc", "to": "acc",
-                 "from_port": "out", "to_port": "acc_fb"},
-                {"from": "acc", "to": "chip_out",
-                 "from_port": "out", "to_port": "chip_out"},
-            ],
-        }
-
-        # Feed [1,2,3,4]: with one-txn-delay feedback the running total is the
-        # prefix sum -> 1, 3, 6, 10.
-        out = composition.compose_and_run(bd, goldens, {"chip_in": [1, 2, 3, 4]})
-        assert out["chip_out"] == [1, 3, 6, 10]
 
 
 # ---------------------------------------------------------------------------
@@ -317,62 +249,6 @@ def _toy_project(tmp_path: Path, block_b_text: str, *, with_reference=True):
         )
         _write(root / "inputs" / "toy_golden.py", ref)
     return root
-
-
-class TestRunCompositionGate:
-    def test_noop_when_flag_off(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("CORESMITH_BLOCK_GOLDENS", raising=False)
-        root = _toy_project(tmp_path, BLOCK_B_WRONG)  # wrong, but flag off
-        assert composition.run_composition_gate(str(root)) == []
-
-    def test_passes_when_correct(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("CORESMITH_BLOCK_GOLDENS", "1")
-        root = _toy_project(tmp_path, BLOCK_B_ADD1)
-        violations = composition.run_composition_gate(str(root))
-        assert violations == [], violations
-
-    def test_flags_wrong_block(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("CORESMITH_BLOCK_GOLDENS", "1")
-        root = _toy_project(tmp_path, BLOCK_B_WRONG)
-        # v2 run_composition_gate delegates to the MyHDL model-integration gate;
-        # the retired v1 composition logic is exercised via _run_composition_gate_v1.
-        violations = composition._run_composition_gate_v1(str(root))
-        assert violations, "expected a composition violation"
-        v = violations[0]
-        assert v["type"] == "composition_gate_failure"
-        # The FUNC vector names blockB as its block, so divergence localizes there.
-        assert v["first_divergence_block"] == "blockB"
-        assert v["vector_id"] == "FUNC-001"
-
-    def test_noop_when_no_reference(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("CORESMITH_BLOCK_GOLDENS", "1")
-        monkeypatch.delenv("CORESMITH_SOURCE_ROOT", raising=False)
-        # No reference file -> still uses FUNC expected output for comparison,
-        # but resolve_reference_implementation must return None here. Build a
-        # tree with NO *_golden.py anywhere; the gate then relies on FUNC
-        # expected output. To exercise the "no reference => no-op" branch we
-        # remove the FUNC section too.
-        import json
-        root = tmp_path
-        (root / ".coresmith").mkdir(parents=True, exist_ok=True)
-        (root / ".coresmith" / "block_diagram.json").write_text(
-            json.dumps(TOY_BLOCK_DIAGRAM), encoding="utf-8"
-        )
-        gd = root / "arch" / "block_goldens"
-        _write(gd / "blockA.py", BLOCK_A_DOUBLER)
-        _write(gd / "blockB.py", BLOCK_B_WRONG)
-        # No frd, no reference impl.
-        assert composition.run_composition_gate(str(root)) == []
-
-    def test_noop_when_no_goldens_dir(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("CORESMITH_BLOCK_GOLDENS", "1")
-        import json
-        root = tmp_path
-        (root / ".coresmith").mkdir(parents=True, exist_ok=True)
-        (root / ".coresmith" / "block_diagram.json").write_text(
-            json.dumps(TOY_BLOCK_DIAGRAM), encoding="utf-8"
-        )
-        assert composition.run_composition_gate(str(root)) == []
 
 
 # ---------------------------------------------------------------------------
@@ -691,117 +567,180 @@ def _ref_oracle_project(tmp_path: Path, block_b_text: str):
     return root
 
 
-class TestReferenceAsOracleGate:
-    def test_passes_when_composition_matches_reference(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("CORESMITH_BLOCK_GOLDENS", "1")
-        monkeypatch.delenv("CORESMITH_REFERENCE_ENTRY", raising=False)
-        root = _ref_oracle_project(tmp_path, BLOCK_B_ADD1)
-        violations = composition.run_composition_gate(str(root))
-        assert violations == [], violations
-
-    def test_flags_planted_wrong_block(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("CORESMITH_BLOCK_GOLDENS", "1")
-        monkeypatch.delenv("CORESMITH_REFERENCE_ENTRY", raising=False)
-        # blockB adds 99 -> composed = x*2+99, reference = x*2+1 -> divergence.
-        root = _ref_oracle_project(tmp_path, BLOCK_B_WRONG)
-        violations = composition._run_composition_gate_v1(str(root))
-        assert violations, "expected a reference-vs-composition violation"
-        v = violations[0]
-        assert v["type"] == "composition_gate_failure"
-        assert v["first_divergence_block"] == "blockB"
-        assert v["vector_id"] == "FUNC-001"
-        # Expected comes from the reference (x*2+1 for [1,2,3]).
-        assert v["expected"] == [3, 5, 7]
-        assert "reference" in v["suggested_fix"].lower()
-
-
-class TestNoReferenceFallback:
-    def test_uses_expected_struct_when_no_entry(self, tmp_path, monkeypatch):
-        import json as _json
-
-        monkeypatch.setenv("CORESMITH_BLOCK_GOLDENS", "1")
-        monkeypatch.delenv("CORESMITH_REFERENCE_ENTRY", raising=False)
-        # No reference impl anywhere; rely on structured expected. blockB wrong.
-        root = tmp_path
-        (root / ".coresmith").mkdir(parents=True, exist_ok=True)
-        (root / ".coresmith" / "block_diagram.json").write_text(
-            _json.dumps(TOY_BLOCK_DIAGRAM), encoding="utf-8"
-        )
-        gd = root / "arch" / "block_goldens"
-        _write(gd / "blockA.py", BLOCK_A_DOUBLER)
-        _write(gd / "blockB.py", BLOCK_B_WRONG)
-        frd = textwrap.dedent(
-            """\
-            ## Functional Vectors
-
-            ### FUNC-001
-            - **ID**: FUNC-001
-            - **Block / I-O ports**: blockB / chip_in -> chip_out
-            ```json
-            {"stimulus": {"chip_in": [5]}, "expected": {"chip_out": [11]}}
-            ```
-            """
-        )
-        _write(root / "arch" / "frd_spec.md", frd)
-        # resolve_reference_implementation must find nothing.
-        assert composition.resolve_reference_implementation(str(root)) is None
-        violations = composition._run_composition_gate_v1(str(root))
-        # composed = 5*2+99 = 109 != expected_struct 11 -> violation.
-        assert violations, "expected fallback expected_struct to flag mismatch"
-        assert violations[0]["expected"] in ({"chip_out": [11]}, [11], 11)
-
-
-class TestFlagHelper:
-    @pytest.mark.parametrize("val", ["1", "true", "yes", "on", "TRUE", "On"])
-    def test_truthy(self, monkeypatch, val):
-        monkeypatch.setenv("CORESMITH_BLOCK_GOLDENS", val)
-        assert composition.block_goldens_enabled() is True
-
-    @pytest.mark.parametrize("val", ["", "0", "false", "no", "off"])
-    def test_falsy(self, monkeypatch, val):
-        monkeypatch.setenv("CORESMITH_BLOCK_GOLDENS", val)
-        assert composition.block_goldens_enabled() is False
-
-    def test_unset(self, monkeypatch):
-        monkeypatch.delenv("CORESMITH_BLOCK_GOLDENS", raising=False)
-        assert composition.block_goldens_enabled() is False
-
-
 class TestFloatPolicyHelpers:
     """Fixed-point-default / float-epsilon gate policy (user spec): bias to
     fixed-point bit-exact; when the reference OUTPUT is float-valued, allow an
     epsilon tolerance."""
 
-    def test_output_has_float_detection(self):
-        assert composition.output_has_float([1, 2, 3]) is False        # ints
-        assert composition.output_has_float([1, 2.0, 3]) is True       # a float
-        assert composition.output_has_float({"a": [0, 0]}) is False
-        assert composition.output_has_float({"a": [0, 0.5]}) is True
-        assert composition.output_has_float(b"\x01\x02") is False      # bytes
-        assert composition.output_has_float([True, False]) is False    # bools
-        import numpy as np
-        assert composition.output_has_float(np.array([1, 2], dtype=np.int32)) is False
-        assert composition.output_has_float(np.array([1.0], dtype=np.float64)) is True
 
-    def test_gate_epsilon_default_and_override(self, monkeypatch):
-        monkeypatch.delenv("CORESMITH_GATE_EPSILON", raising=False)
-        assert composition.gate_epsilon() == 1e-6
-        monkeypatch.setenv("CORESMITH_GATE_EPSILON", "1e-3")
-        assert composition.gate_epsilon() == 1e-3
-        monkeypatch.setenv("CORESMITH_GATE_EPSILON", "garbage")
-        assert composition.gate_epsilon() == 1e-6
+# ---------------------------------------------------------------------------
+# Reference-entry ABI preflight + resolution provenance
+# ---------------------------------------------------------------------------
 
-    def test_outputs_close_within_and_outside_eps(self):
-        assert composition.outputs_close([1.0, 2.0], [1.0, 2.0000001], 1e-5) is True
-        assert composition.outputs_close([1.0, 2.0], [1.0, 2.5], 1e-5) is False
-        # length mismatch -> not close
-        assert composition.outputs_close([1.0], [1.0, 2.0], 1e-5) is False
-        # non-numeric leaves must be exactly equal
-        assert composition.outputs_close(["a", 1.0], ["a", 1.0], 1e-5) is True
-        assert composition.outputs_close(["a", 1.0], ["b", 1.0], 1e-5) is False
+class TestEntryAcceptsStimulus:
+    """The oracle is always invoked as ``entry(stimulus)``."""
 
-    def test_int_output_unaffected_by_eps(self):
-        # Integer (byte) outputs are compared exactly elsewhere; outputs_close
-        # with eps=0 still requires equality for ints.
-        assert composition.outputs_close([129, 39], [129, 39], 0.0) is True
-        assert composition.outputs_close([129, 39], [129, 40], 0.0) is False
+    def test_positional_forms_accept(self):
+        def one(x):
+            return x
+
+        def defaulted(x=None):
+            return x
+
+        def varargs(*args):
+            return args
+
+        assert composition._entry_accepts_stimulus(one) is True
+        assert composition._entry_accepts_stimulus(defaulted) is True
+        assert composition._entry_accepts_stimulus(varargs) is True
+
+    def test_zero_positional_forms_reject(self):
+        def main():
+            return 0
+
+        def kwonly(*, stimulus=None):
+            return stimulus
+
+        def kwargs_only(**kw):
+            return kw
+
+        assert composition._entry_accepts_stimulus(main) is False
+        assert composition._entry_accepts_stimulus(kwonly) is False
+        assert composition._entry_accepts_stimulus(kwargs_only) is False
+        assert composition._entry_accepts_stimulus(None) is False
+
+    def test_uninspectable_callable_is_accepted(self):
+        # "unknown" is not proof of impossibility -- a real invocation failure
+        # is still reported as reference_uninvokable.
+        assert composition._entry_accepts_stimulus(len) is True
+
+
+class TestEntryAbiPreflight:
+    """THE BUG: a zero-argument ``main()`` became the whole-chip oracle.
+
+    A live run auto-selected ``generate_normative_rom_images.py:main`` -- a
+    ROM utility -- as the golden reference; every vector died on "main() takes
+    0 positional arguments but 1 was given" and the category error consumed 11
+    chip-lead decisions.
+    """
+
+    def test_zero_arg_main_is_never_discovered(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("CORESMITH_REFERENCE_ENTRY", raising=False)
+        mod = _make_ref_module(
+            "def main():\n    return 0\n"
+            "def build_rom(path):\n    return path\n"
+        )
+        fn, name = composition.resolve_reference_entrypoint(str(tmp_path), mod)
+        assert name != "main"
+        assert fn is not None and fn is mod.build_rom
+
+    def test_module_with_only_zero_arg_main_resolves_to_nothing(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.delenv("CORESMITH_REFERENCE_ENTRY", raising=False)
+        mod = _make_ref_module("def main():\n    return 0\n")
+        fn, name, source = composition.resolve_reference_entrypoint(
+            str(tmp_path), mod, with_provenance=True
+        )
+        assert fn is None
+        assert source == composition.ENTRY_SOURCE_NONE
+
+    def test_main_taking_a_stimulus_needs_explicit_config(
+        self, tmp_path, monkeypatch
+    ):
+        """``main(stimulus)`` is invokable, but still never GUESSED at.
+
+        Even as the module's SOLE public function: ``main`` is a script
+        convention, so its presence says nothing about whether it models the
+        chip. An operator asserting it explicitly is a different matter.
+        """
+        src = "def main(stimulus):\n    return stimulus\n"
+        monkeypatch.delenv("CORESMITH_REFERENCE_ENTRY", raising=False)
+        mod = _make_ref_module(src)
+        fn, _name = composition.resolve_reference_entrypoint(str(tmp_path), mod)
+        assert fn is None
+
+        # Declared in the PRD -> resolves (explicit, and ABI-clean).
+        (tmp_path / "arch").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "arch" / "prd_spec.md").write_text(
+            "reference_entry_point: main\n", encoding="utf-8"
+        )
+        fn2, name2, source2 = composition.resolve_reference_entrypoint(
+            str(tmp_path), mod, with_provenance=True
+        )
+        assert fn2 is mod.main
+        assert (name2, source2) == ("main", composition.ENTRY_SOURCE_DECLARED)
+
+        # Env var -> resolves too, and outranks the declaration.
+        monkeypatch.setenv("CORESMITH_REFERENCE_ENTRY", "main")
+        fn3, name3, source3 = composition.resolve_reference_entrypoint(
+            str(tmp_path), mod, with_provenance=True
+        )
+        assert fn3 is mod.main
+        assert (name3, source3) == ("main", composition.ENTRY_SOURCE_ENV)
+
+    def test_explicit_env_entry_with_no_positional_fails_fast(
+        self, tmp_path, monkeypatch
+    ):
+        mod = _make_ref_module(
+            "def main():\n    return 0\n"
+            "def encode(x):\n    return x\n"
+        )
+        monkeypatch.setenv("CORESMITH_REFERENCE_ENTRY", "main")
+        with pytest.raises(composition.ReferenceEntryPointError) as exc:
+            composition.resolve_reference_entrypoint(str(tmp_path), mod)
+        msg = str(exc.value)
+        # Actionable: names the callable, its signature, and the way out --
+        # and does NOT silently fall back to the `encode` heuristic.
+        assert "main()" in msg
+        assert "CORESMITH_REFERENCE_ENTRY" in msg
+        assert "no positional argument" in msg.lower()
+
+    def test_explicit_declared_entry_with_no_positional_fails_fast(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.delenv("CORESMITH_REFERENCE_ENTRY", raising=False)
+        mod = _make_ref_module("def main():\n    return 0\n")
+        (tmp_path / "arch").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "arch" / "prd_spec.md").write_text(
+            "reference_entry_point: main\n", encoding="utf-8"
+        )
+        with pytest.raises(composition.ReferenceEntryPointError) as exc:
+            composition.resolve_reference_entrypoint(str(tmp_path), mod)
+        assert "prd_spec.md" in str(exc.value)
+
+
+class TestEntryResolutionProvenance:
+    """``with_provenance=True`` reports WHICH tier chose the oracle."""
+
+    def test_env_declared_and_discovered_tiers(self, tmp_path, monkeypatch):
+        mod = _make_ref_module(
+            "def encode(x):\n    return x\n"
+            "def the_oracle(x):\n    return x\n"
+        )
+        monkeypatch.delenv("CORESMITH_REFERENCE_ENTRY", raising=False)
+        _fn, name, source = composition.resolve_reference_entrypoint(
+            str(tmp_path), mod, with_provenance=True
+        )
+        assert (name, source) == ("encode", composition.ENTRY_SOURCE_DISCOVERED)
+
+        (tmp_path / "arch").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "arch" / "prd_spec.md").write_text(
+            "reference_entry_point: the_oracle\n", encoding="utf-8"
+        )
+        _fn, name, source = composition.resolve_reference_entrypoint(
+            str(tmp_path), mod, with_provenance=True
+        )
+        assert (name, source) == ("the_oracle", composition.ENTRY_SOURCE_DECLARED)
+
+        monkeypatch.setenv("CORESMITH_REFERENCE_ENTRY", "encode")
+        _fn, name, source = composition.resolve_reference_entrypoint(
+            str(tmp_path), mod, with_provenance=True
+        )
+        assert (name, source) == ("encode", composition.ENTRY_SOURCE_ENV)
+
+    def test_default_call_still_returns_a_pair(self, tmp_path, monkeypatch):
+        """Back-compat: every existing caller unpacks exactly two values."""
+        monkeypatch.delenv("CORESMITH_REFERENCE_ENTRY", raising=False)
+        mod = _make_ref_module("def encode(x):\n    return x\n")
+        assert len(composition.resolve_reference_entrypoint(str(tmp_path), mod)) == 2

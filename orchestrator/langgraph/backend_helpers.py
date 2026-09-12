@@ -2087,30 +2087,48 @@ def run_netgen_lvs(
             if "final result" in line.lower():
                 final_line = line.lower()
                 break
-        if final_line:
-            match = "match uniquely" in final_line
-        else:
-            match = (
-                "match" in stdout.lower()
-                and "do not match" not in stdout.lower()
-                and "failed" not in stdout.lower()
-            )
+        # A netgen that never printed its "Final result" line, or that exited
+        # nonzero, did not COMPLETE a comparison (segfault/kill mid-run): FAIL
+        # CLOSED. The old fallback declared a match on the bare substring
+        # "match" in stdout, which "mismatch"/"unmatched" also satisfy, so an
+        # aborted run full of MISMATCH text signed off as a match.
+        completed = bool(final_line) and result.returncode == 0
+        match = completed and "match uniquely" in final_line
+        if not completed:
+            log("  [LVS] netgen did not complete a comparison "
+                f"(exit={result.returncode}, "
+                f"final-result line: {'yes' if final_line else 'no'}) "
+                "-- verdict FAIL", RED)
 
         # Deterministic benign-pin reconciliation (gate default ON). netgen
         # fails top-level pin matching on the openframe GPIO/power tie bus even
         # for a correct layout; upgrade a raw FAIL to a match ONLY when the
         # report proves the failure is limited to that benign pin set. Reads the
-        # reference power-Verilog to also honor declared constant-ties.
+        # reference power-Verilog to also honor declared constant-ties. Never
+        # runs on an incomplete comparison -- there is nothing to reconcile.
         ref_v = ""
         try:
             if verilog_path and Path(verilog_path).exists():
                 ref_v = Path(verilog_path).read_text(errors="replace")
         except OSError:
             ref_v = ""
-        recon = reconcile_lvs_match(
-            match, combined, top_cell=block_name, reference_verilog_text=ref_v,
-        )
-        match = recon["lvs_match"]
+        if completed:
+            recon = reconcile_lvs_match(
+                match, combined, top_cell=block_name,
+                reference_verilog_text=ref_v,
+            )
+            match = recon["lvs_match"]
+        else:
+            recon = {
+                "lvs_raw_match": False,
+                "lvs_match": False,
+                "benign_reconciled_pins": 0,
+                "benign_reconciled_pin_names": [],
+                "lvs_benign_analysis": (
+                    "netgen comparison did not complete "
+                    f"(exit={result.returncode}); no verdict"
+                ),
+            }
 
         # Parse device/net counts from stdout
         device_delta, net_delta = _parse_lvs_deltas(stdout)

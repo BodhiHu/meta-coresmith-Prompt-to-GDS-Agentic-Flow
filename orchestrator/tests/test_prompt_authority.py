@@ -410,14 +410,6 @@ class TestContractPortTable:
         from orchestrator.langchain.agents import rtl_generator as rg
         assert "data_write_write_enable" in rg.SYSTEM_PROMPT
 
-    def test_block_model_system_prompt_has_port_naming_skill(self):
-        from orchestrator.langchain.agents import block_golden_generator as bgg
-        prompt = bgg.build_system_prompt(
-            block_spec=_REGFILE_SPEC, contracts=_REGFILE_CONTRACTS)
-        assert "data_write_write_enable" in prompt
-        # anti-cheat stays unconditional too
-        assert _anchor("no_stimulus_keyed_memorization") in prompt
-
 
 # ---------------------------------------------------------------------------
 # Task C -- phase truthfulness
@@ -431,11 +423,11 @@ class TestDiagnosisPhaseLabelling:
         msg = build_debug_user_message("blk", "conformance")
         assert "Failed phase: conformance" in msg
         # No artifact PATH that a simulation would have produced is offered...
-        for artifact in ("dump.vcd", "wavekit_audit.json", "sim_build/",
+        for artifact in ("dump.vcd", "sim_build/",
                          "tb/cocotb/"):
             assert artifact not in msg, artifact
         # ...and the agent is told, in as many words, not to go looking.
-        assert "NO VCD" in msg and "NO WaveKit" in msg
+        assert "NO VCD" in msg
         assert "do not look for them" in msg.lower()
         assert "contract_conformance.json" in msg
         assert "interface_contracts.json" in msg
@@ -447,7 +439,7 @@ class TestDiagnosisPhaseLabelling:
         )
         msg = build_debug_user_message("blk", "sim")
         assert "Failed phase: sim" in msg
-        assert "dump.vcd" in msg and "wavekit_audit.json" in msg
+        assert "dump.vcd" in msg
 
     def test_debug_system_prompt_carves_out_pre_sim_phases(self):
         from orchestrator.langchain.agents.debug_agent import (

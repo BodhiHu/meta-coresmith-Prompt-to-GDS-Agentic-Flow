@@ -194,9 +194,11 @@ class ValidationDVGenerator:
             # hole that let a flat-output encoder pass) must be rejected.
             # Structural/latency/trace checks do not count. (FUNC-NNN vectors are
             # retired -- the functional model is the oracle now.)
+            # WP-14b: tolerate multi-line assert statements (an `assert (` whose
+            # golden/expected operand sits on a following line).
             _golden_output_assert = bool(
                 re.search(
-                    r"assert[^\n]*(golden|reference|expected_(?:output|bytes|"
+                    r"assert\b(?:[^\n]|\n(?=[ \t]))*?(golden|reference|expected_(?:output|bytes|"
                     r"bits|value|result|word|state|crc))",
                     testbench,
                     re.IGNORECASE,
