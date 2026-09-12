@@ -585,10 +585,8 @@ def resolve_python_source(python_source_ref: str, project_root=None) -> str:
     file_path, names = _split_source_ref(python_source_ref)
     if not file_path:
         return ""
-    p = Path(file_path)
-    if not p.is_absolute():
-        p = Path(project_root or PROJECT_ROOT) / file_path
-    if not p.exists() or p.is_dir():
+    p = _locate_python_source(file_path, project_root)
+    if p is None:
         return ""
     try:
         text = p.read_text(encoding="utf-8", errors="replace")
@@ -597,16 +595,37 @@ def resolve_python_source(python_source_ref: str, project_root=None) -> str:
     return _slice_python_source(text, names) if names else text
 
 
+def _locate_python_source(file_path: str, project_root=None):
+    """Find a ``python_source`` file the policy named (WP-72).
+
+    A relative ref is tried against the project root, then the owner's
+    ``inputs/`` directory, then the directory of ``CORESMITH_SOURCE_ROOT``:
+    the architecture policy writes ``ax25_golden.py:run`` or
+    ``inputs/ax25_golden.py:run`` interchangeably, and the owner's reference
+    lives under ``inputs/``. Returns an existing file Path or None."""
+    p = Path(file_path)
+    if p.is_absolute():
+        return p if (p.exists() and not p.is_dir()) else None
+    root = Path(project_root or PROJECT_ROOT)
+    candidates = [root / file_path, root / "inputs" / file_path]
+    src_root = os.environ.get("CORESMITH_SOURCE_ROOT", "").strip()
+    if src_root:
+        base = Path(src_root)
+        base = base if base.is_dir() else base.parent
+        candidates.append(base / file_path)
+    for cand in candidates:
+        if cand.exists() and not cand.is_dir():
+            return cand
+    return None
+
+
 def python_source_file(python_source_ref: str, project_root=None):
     """Resolve just the FILE of a ``python_source`` ref (stripping any ``:name``
     slice suffix). Returns a Path that exists, or None."""
     file_path, _ = _split_source_ref(python_source_ref)
     if not file_path:
         return None
-    p = Path(file_path)
-    if not p.is_absolute():
-        p = Path(project_root or PROJECT_ROOT) / file_path
-    return p if (p.exists() and not p.is_dir()) else None
+    return _locate_python_source(file_path, project_root)
 
 
 # ---------------------------------------------------------------------------
