@@ -48,7 +48,8 @@ Post-synthesis, LLM agents drive place-and-route, DRC, GDS export, and LVS — e
 design into per-block *micro-architecture* specs before any RTL is written: each
 block gets its own uArch spec (interfaces, latency/throughput intent, and a
 byte-exact reference model) that the frontend pipeline then implements and verifies
-block-by-block. An Amaranth HDL block-model is written for every block, and functionality is validated in a reference model before RTL is written. 
+block-by-block. A block's declared reference slice, when the task supplies one, is the
+transcription target its uArch spec and RTL are written against.
 
 **Complexity-aware decomposition into memory vs compute.** A deterministic,
 AST-based pass scores each block's reference slice on four axes (flop count, latency,
@@ -142,10 +143,16 @@ PRD (sizing questions)         Testbench + Sim              LVS
 Block Diagram
   |
   v
+Interface Contracts
+  |
+  v
 Constraint Check -> OK2DEV Gate
-  (off by default:
-   Memory Map -> Clock Tree -> Register Spec)
 ```
+
+Acceptance is the task's own checker: a task ships `inputs/task_adapter.py` and its
+verdict outranks the engine's internal requirements. See
+[docs/migration-arm-e.md](docs/migration-arm-e.md) for what a task declares and for
+migrating a project created before that change.
 
 ## Project Structure
 

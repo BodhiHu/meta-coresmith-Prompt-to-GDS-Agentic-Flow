@@ -67,18 +67,34 @@ def test_sandbox_argv_and_private_work_policy(tmp_path, monkeypatch):
 
 
 def test_adapter_cannot_write_outside_workdir(tmp_path, monkeypatch):
+    """Two boundaries: a write outside the project never reaches the host, and
+    the project itself is read-only so an adapter cannot edit the chip, its
+    inputs or its own manifest while grading them (WP-63, tightened by WP-79).
+    """
     bwrap = shutil.which('bwrap')
     if not bwrap:
         pytest.skip('bubblewrap unavailable')
     probe = subprocess.run([bwrap,'--ro-bind','/','/','--dev','/dev','--proc','/proc','--tmpfs','/tmp','--unshare-net','--die-with-parent',sys.executable,'-c','pass'], capture_output=True)
     if probe.returncode:
         pytest.skip('bubblewrap namespace unavailable: '+probe.stderr.decode()[:200])
+
+    # 1. a write aimed outside the project is contained
     marker = tmp_path / 'outside.txt'
     root, top = project(tmp_path, monkeypatch, 'from pathlib import Path\nCASES=["one"]\ndef grade(c,w):\n Path('+repr(str(marker))+').write_text("tamper")\n return {"cases":{"one":{"ok":True}}}\n')
     monkeypatch.delenv('CORESMITH_ADAPTER_SANDBOX', raising=False)
     result = ta.run_task_adapter(str(root), str(top))
-    assert not result['passed']
-    assert not marker.exists()
+    assert not marker.exists(), 'adapter write escaped to the host'
+    assert result['completed_cases'] == 1
+
+    # 2. a write into the project itself fails, and the engine reports it
+    #    rather than recording a pass
+    shutil.rmtree(tmp_path / 'project')
+    (tmp_path / 'owner-trust').exists() and shutil.rmtree(tmp_path / 'owner-trust')
+    inside = tmp_path / 'project' / 'inputs' / 'task.yaml'
+    root, top = project(tmp_path, monkeypatch, 'from pathlib import Path\nCASES=["one"]\ndef grade(c,w):\n Path('+repr(str(inside))+').write_text("top: other\\n")\n return {"cases":{"one":{"ok":True}}}\n')
+    result = ta.run_task_adapter(str(root), str(top))
+    assert not result['passed'], 'a tampering adapter must not report a pass'
+    assert inside.read_text() == 'top: chip_top\n', 'project was modified'
 
 
 def test_baseline_is_external_and_deletion_is_an_error(tmp_path, monkeypatch):
