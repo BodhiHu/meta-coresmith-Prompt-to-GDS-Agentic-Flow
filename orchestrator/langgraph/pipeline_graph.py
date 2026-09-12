@@ -623,8 +623,8 @@ def _reset_conformance_failures(project_root: str, block_name: str) -> None:
         pass
 
 
-def _park_conformance_unrepairable(state: BlockState, block_name: str,
-                                   record: dict, failures: int) -> None:
+async def _park_conformance_unrepairable(state: BlockState, block_name: str,
+                                         record: dict, failures: int) -> dict:
     """PARK when regeneration will not converge on the block's contract.
 
     The stage already told the generator the exact required port names, twice.
@@ -643,14 +643,18 @@ def _park_conformance_unrepairable(state: BlockState, block_name: str,
         "block": block_name, "consecutive_failures": failures,
         "deviations": (record.get("deviations") or [])[:16],
     })
-    interrupt({
+    # WP-74: the in-graph chip lead decides first (it may edit the block RTL
+    # or amend .coresmith/interface_contracts.json and answer `retry`); the
+    # caller re-checks conformance once and parks for a human only if the
+    # block still deviates. Without a chip lead this is the old human park.
+    resp = await _resolve_interrupt({
         "type": "contract_conformance_unrepairable",
         "block_name": block_name,
         "consecutive_failures": failures,
         "deviations": (record.get("deviations") or [])[:16],
         "renames_applied": record.get("renames") or {},
         "expected_ports": record.get("feedback", ""),
-        "supported_actions": ["retry", "proceed"],
+        "supported_actions": ["retry", "proceed", "abort"],
         "outer_agent_guidance": (
             f"'{block_name}' has now failed the deterministic "
             f"contract-conformance check {failures} times AFTER the engine "
@@ -665,6 +669,7 @@ def _park_conformance_unrepairable(state: BlockState, block_name: str,
             f"passes the block only if the RTL actually conforms."
         ),
     })
+    return resp if isinstance(resp, dict) else {}
 
 
 # Constraint sources that survive a fresh block lifecycle: chip-level DV
@@ -2338,19 +2343,47 @@ async def generate_testbench_node(state: BlockState) -> dict:
                                       _conform.get("deviations") or [])[:8],
                                   "consecutive_failures": _cf_n,
                               })
+            _lead_cleared = False
             if _cf_n >= _CONFORMANCE_MAX_FAILURES:
-                # Cap: regeneration is not converging on the contract. PARK
-                # with the exact expected names rather than burn the rest of
-                # the attempt budget rediscovering the same deviation.
-                _park_conformance_unrepairable(state, block_name, _conform,
-                                               _cf_n)
+                # Cap: regeneration is not converging on the contract. The
+                # chip lead decides (WP-74); a human park only if it cannot.
+                _decision = await _park_conformance_unrepairable(
+                    state, block_name, _conform, _cf_n)
                 _reset_conformance_failures(_pr(state), block_name)
-            # PHASE = "conformance" (see the width gate above): pre-TB,
-            # pre-sim, no waveform exists.
-            return {"tb_path": str(tb_path_obj), "sim_passed": False,
-                    "phase": "conformance", "force_regen_tb": False,
-                    "conformance_renames": _renames,
-                    "step_log_paths": existing_logs}
+                _lead_action = str(_decision.get("action", ""))
+                if _lead_action == "retry":
+                    # Re-check once after the chip lead's edits (RTL or contract).
+                    _conform = await asyncio.to_thread(
+                        run_conformance_stage, _pr(state), block_name, rtl_path,
+                        _sibs, str(tb_path_obj),
+                    )
+                    _record_block_conformance(_pr(state), block_name, _conform)
+                    if _conform.get("ran") and _conform.get("ok"):
+                        log(f"  [CONFORM] {block_name}: conforms after the chip "
+                            f"lead's repair ({_conform.get('checked_edges')} "
+                            "edge(s))", GREEN)
+                        _lead_cleared = True
+                    else:
+                        for _d in (_conform.get("deviations") or [])[:8]:
+                            log(f"  [CONFORM] {block_name}: {_d}", RED)
+                        log(f"  [CONFORM] {block_name}: still deviating after the "
+                            "retry -- the block fails this attempt; the next "
+                            "entry re-checks (and parks again after two more "
+                            "failures)", RED)
+                elif _lead_action == "proceed":
+                    log(f"  [CONFORM] {block_name}: chip lead chose `proceed` -- "
+                        "the deviation stays recorded; integration decides "
+                        "whether the chip top can be assembled", YELLOW)
+                    _lead_cleared = True
+                # any other answer (abort, none): the block fails this attempt
+                # exactly as before; the node re-checks on its next entry.
+            if not _lead_cleared:
+                # PHASE = "conformance" (see the width gate above): pre-TB,
+                # pre-sim, no waveform exists.
+                return {"tb_path": str(tb_path_obj), "sim_passed": False,
+                        "phase": "conformance", "force_regen_tb": False,
+                        "conformance_renames": _renames,
+                        "step_log_paths": existing_logs}
         _reset_conformance_failures(_pr(state), block_name)
     elif _conform_on and _conform.get("reason"):
         log(f"  [CONFORM] {block_name}: NOT RUN -- {_conform['reason']}",

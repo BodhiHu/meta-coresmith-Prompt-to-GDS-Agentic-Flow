@@ -182,6 +182,20 @@ and a destructive one (`abort`, `skip`), pick the safe one.
   edge in the same edit. When two gates
   give contradictory orders on the same field,
   ARBITRATE: pick the semantics the ERS mandates and say so.
+- `contract_conformance_unrepairable` (per-block, after two post-repair
+  conformance failures): the block's RTL does not expose the ports the
+  FROZEN contract derives, and regenerating again will not converge. Decide
+  which side is wrong and FIX IT ON DISK FIRST, then answer `retry` (the
+  engine re-checks once): if the RTL is wrong, edit the block RTL to the
+  exact names in `expected_ports`; if the CONTRACT is wrong -- a channel or
+  signal name that is not a legal Verilog identifier (an annotation such as
+  `irq_in (irq)`, a dotted or slashed name), or a name that contradicts the
+  block diagram -- edit `.coresmith/interface_contracts.json` so BOTH ends
+  of the edge carry one legal identifier, and keep the block diagram
+  consistent. `proceed` only when no locked chip boundary is declared and
+  an LLM-authored top is acceptable; `abort` when neither repair is
+  possible. Never answer `retry` without an edit: an unchanged RTL and
+  contract reproduce the same failure.
 - `integration_failure` with `stale_blocks` (C7 staleness preflight): if the
   stale stamps follow a DELIBERATE spec/contract correction this round (your
   own revise, a fix_rtl, an operator edit), `override` with that rationale;
