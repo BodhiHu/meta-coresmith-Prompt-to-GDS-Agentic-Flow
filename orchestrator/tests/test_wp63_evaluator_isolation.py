@@ -29,6 +29,8 @@ def project(tmp_path, monkeypatch, body=None):
 def test_missing_bwrap_fails_closed_and_optout_is_explicit(tmp_path, monkeypatch):
     root, top = project(tmp_path, monkeypatch)
     monkeypatch.delenv('CORESMITH_ADAPTER_SANDBOX', raising=False)
+    monkeypatch.delenv('CORESMITH_BWRAP', raising=False)
+    monkeypatch.setattr(ta, '_SYSTEM_BWRAP', ())   # WP-77: no system bwrap either
     monkeypatch.setattr(shutil, 'which', lambda _: None)
     result = ta.run_task_adapter(str(root), str(top))
     assert result['kind'] == 'infrastructure_error'
@@ -40,6 +42,8 @@ def test_missing_bwrap_fails_closed_and_optout_is_explicit(tmp_path, monkeypatch
 def test_sandbox_argv_and_private_work_policy(tmp_path, monkeypatch):
     root, top = project(tmp_path, monkeypatch)
     monkeypatch.delenv('CORESMITH_ADAPTER_SANDBOX', raising=False)
+    monkeypatch.delenv('CORESMITH_BWRAP', raising=False)
+    monkeypatch.setattr(ta, '_SYSTEM_BWRAP', ())   # WP-77: PATH is the fallback here
     monkeypatch.setattr(shutil, 'which', lambda _: '/fake/bwrap')
     calls = []
     def run(argv, **kwargs):

@@ -153,6 +153,25 @@ def _rows_and_violations(receipt: dict, declared: list[str]) -> tuple[list, list
     return rows, violations, budgets
 
 
+_SYSTEM_BWRAP = ("/usr/bin/bwrap", "/usr/local/bin/bwrap")
+
+
+def _find_bwrap() -> str:
+    """The bubblewrap binary for the adapter boundary (WP-77).
+
+    ``CORESMITH_BWRAP`` wins; otherwise the SYSTEM bubblewrap is preferred over
+    whatever ``PATH`` resolves first: EDA toolchain bundles (oss-cad-suite)
+    ship their own ``bwrap`` that cannot create user namespaces on a normal
+    host, and a run's PATH puts the toolchain first. Empty when none exists."""
+    override = os.environ.get("CORESMITH_BWRAP", "").strip()
+    if override:
+        return override
+    for cand in _SYSTEM_BWRAP:
+        if os.access(cand, os.X_OK):
+            return cand
+    return shutil.which("bwrap") or ""
+
+
 def _sandbox_argv(command: list[str], work: Path) -> list[str]:
     """Only an explicit owner opt-out permits an unsandboxed evaluator."""
     policy = os.environ.get("CORESMITH_ADAPTER_SANDBOX", "bwrap").strip().lower()
@@ -160,7 +179,7 @@ def _sandbox_argv(command: list[str], work: Path) -> list[str]:
         return command
     if policy != "bwrap":
         raise OSError(f"Unknown adapter sandbox policy {policy!r}")
-    bwrap = shutil.which("bwrap")
+    bwrap = _find_bwrap()
     if not bwrap:
         raise OSError("bubblewrap unavailable; adapter sandbox required")
     return [bwrap, "--ro-bind", "/", "/", "--bind", str(work), str(work),
