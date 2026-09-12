@@ -138,6 +138,10 @@ def _setup_disk_fixtures(tmp_path, blocks: list[dict]) -> None:
         (block_dir / "previous_error.txt").write_text("")
 
 
+    from orchestrator.state_store.trust import capture_run_baseline
+    capture_run_baseline(tmp_path)
+
+
 def _block_state(block: dict | None = None, tmp_path: str = "/tmp/test") -> dict:
     """Build a BlockState dict for unit-testing block-level nodes.
 
@@ -363,8 +367,15 @@ class TestGraphConstruction:
         assert output_path.read_text(encoding="utf-8") == generated
 
     def test_validation_dv_retries_on_fix_action(self):
+        # WP-76: an RTL fix invalidates the adopted candidate, so it re-enters
+        # the integration check (re-assembly + re-adoption) before any sim;
+        # a testbench fix re-runs validation DV directly.
         result = route_after_validation_dv({
             "validation_dv_result": {"passed": False, "action_taken": "fix_rtl"},
+        })
+        assert result == "integration_check"
+        result = route_after_validation_dv({
+            "validation_dv_result": {"passed": False, "action_taken": "fix_tb"},
         })
         assert result == "validation_dv"
 
@@ -712,114 +723,17 @@ class TestRouteAfterIntegrationReview:
         assert result["integration_review_failed"] is True
 
     @pytest.mark.asyncio
-    async def test_fixed_uarch_review_honors_explicit_approve_by_default(self, tmp_path, monkeypatch):
-        """Default mode: when issues_fixed>0 and the outer agent explicitly
-        approves, integration_review_node honors the approve. The previous
-        auto-revise on issues_fixed>0 caused a non-terminating loop because
-        the integration-review LLM agent edits specs on every run."""
-        monkeypatch.delenv("CORESMITH_STRICT_INTEGRATION_REVIEW", raising=False)
-        monkeypatch.delenv("CORESMITH_BLOCK_GOLDENS", raising=False)  # full review path
-        from orchestrator.langchain.agents import integration_review_agent
-
-        def fake_init(self, *args, **kwargs):
-            pass
-
-        async def fake_review(self, block_names, project_root):
-            spec_dir = tmp_path / "arch" / "uarch_specs"
-            spec_dir.mkdir(parents=True, exist_ok=True)
-            (spec_dir / "adder32.md").write_text("updated spec", encoding="utf-8")
-            return {
-                "summary": "Fixed status bus layout in adder32 uArch.",
-                "issues_found": 1,
-                "issues_fixed": 1,
-            }
-
-        captured_payload = {}
-
-        def fake_interrupt(payload):
-            captured_payload.update(payload)
-            return {"action": "approve"}
-
-        monkeypatch.setattr(
-            integration_review_agent.IntegrationReviewAgent,
-            "__init__",
-            fake_init,
-        )
-        monkeypatch.setattr(
-            integration_review_agent.IntegrationReviewAgent,
-            "review",
-            fake_review,
-        )
-        monkeypatch.setattr(pipeline_graph, "interrupt", fake_interrupt)
-
-        result = await pipeline_graph.integration_review_node({
-            "project_root": str(tmp_path),
-            "block_queue": [{"name": "adder32", "tier": 1}],
-            "tier_list": [1],
-            "current_tier_index": 0,
-            "completed_blocks": [{"name": "adder32", "success": True}],
-        })
-
-        # Payload still reports the failure for outer-agent visibility.
-        assert captured_payload["review_failed"] is True
-        assert captured_payload["issues_fixed"] == 1
-        assert "Blocking uArch edits" in captured_payload["review_summary"]
-        # But the explicit approve is honored.
+    @pytest.mark.parametrize("strict", ["0", "1"])
+    async def test_explicit_approve_adopts_then_reverifies_without_review_loop(self, tmp_path, monkeypatch, strict):
+        from orchestrator.tests.test_wp62_spec_adoption import setup
+        state, canonical, source, db, review = setup(tmp_path, monkeypatch, "success")
+        monkeypatch.setenv("CORESMITH_STRICT_INTEGRATION_REVIEW", strict)
+        result = await pipeline_graph.integration_review_node(state)
         assert result["integration_review_action"] == "approve"
-        assert result["integration_review_failed"] is True
-
-
-    @pytest.mark.asyncio
-    async def test_fixed_uarch_review_blocks_approve_under_strict_mode(self, tmp_path, monkeypatch):
-        """CORESMITH_STRICT_INTEGRATION_REVIEW=1 restores the original
-        approve->revise auto-conversion when issues_fixed>0."""
-        monkeypatch.setenv("CORESMITH_STRICT_INTEGRATION_REVIEW", "1")
-        from orchestrator.langchain.agents import integration_review_agent
-
-        def fake_init(self, *args, **kwargs):
-            pass
-
-        async def fake_review(self, block_names, project_root):
-            spec_dir = tmp_path / "arch" / "uarch_specs"
-            spec_dir.mkdir(parents=True, exist_ok=True)
-            (spec_dir / "adder32.md").write_text("updated spec", encoding="utf-8")
-            return {
-                "summary": "Fixed status bus layout in adder32 uArch.",
-                "issues_found": 1,
-                "issues_fixed": 1,
-            }
-
-        captured_payload = {}
-
-        def fake_interrupt(payload):
-            captured_payload.update(payload)
-            return {"action": "approve"}
-
-        monkeypatch.setattr(
-            integration_review_agent.IntegrationReviewAgent,
-            "__init__",
-            fake_init,
-        )
-        monkeypatch.setattr(
-            integration_review_agent.IntegrationReviewAgent,
-            "review",
-            fake_review,
-        )
-        monkeypatch.setattr(pipeline_graph, "interrupt", fake_interrupt)
-
-        result = await pipeline_graph.integration_review_node({
-            "project_root": str(tmp_path),
-            "block_queue": [{"name": "adder32", "tier": 1}],
-            "tier_list": [1],
-            "current_tier_index": 0,
-            "completed_blocks": [{"name": "adder32", "success": True}],
-        })
-
-        assert captured_payload["review_failed"] is True
-        assert captured_payload["issues_fixed"] == 1
-        assert "Blocking uArch edits" in captured_payload["review_summary"]
-        assert result["integration_review_action"] == "revise"
-        assert result["integration_review_failed"] is True
+        assert not result["integration_review_failed"]
+        assert canonical.read_text() == "NEW SPEC"
+        assert db.result("leaf", "best") is None
+        assert pipeline_graph.route_after_integration_review(result) == "init_tier"
 
 
 class TestRouteAfterIntegration:

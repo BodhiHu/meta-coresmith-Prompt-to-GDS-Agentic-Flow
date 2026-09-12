@@ -196,6 +196,9 @@ class TestSyntheticCheckpointResume:
         new_root = tmp_path / "resume"
         new_root.mkdir()
         ctx = await sf.materialize_stage(fixture_dir, str(new_root), monkeypatch)
+        # A fixture moved to a new project is a new owner-controlled run boundary.
+        from orchestrator.state_store.trust import capture_run_baseline
+        capture_run_baseline(new_root)
         try:
             # root rewritten across state
             snap = await ctx.aget_state()

@@ -28,7 +28,7 @@ implement unambiguously, emit a violation with check="derived_contract".
 ARCHITECTURE-STAGE OPEN ARTIFACT NOTE:
 This review runs before validation DV and before final signoff vectors are
 generated. Do NOT emit a blocking violation merely because exact golden
-vectors, repository commit hashes, PSNR/bpp numbers, byte arrays, waveform
+vectors, repository commit hashes, quality/rate numbers, byte arrays, waveform
 traces, or measured worst-case corpus values are not already present, provided
 the architecture:
 - names the golden model path or external reference that defines behavior,

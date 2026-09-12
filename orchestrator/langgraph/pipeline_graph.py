@@ -322,6 +322,7 @@ class OrchestratorState(TypedDict):
     integration_review_action: str | None
     # Targeted revise plan from integration_review: {block: reuse_spec}. Only
     # these blocks re-enter the tier on a revise; None = normal entry.
+    integration_approved_specs: Annotated[dict | None, _last]
     revise_blocks: Annotated[dict | None, _last]
 
     # Integration check results ────────────────────────────────────────────
@@ -622,8 +623,8 @@ def _reset_conformance_failures(project_root: str, block_name: str) -> None:
         pass
 
 
-def _park_conformance_unrepairable(state: BlockState, block_name: str,
-                                   record: dict, failures: int) -> None:
+async def _park_conformance_unrepairable(state: BlockState, block_name: str,
+                                         record: dict, failures: int) -> dict:
     """PARK when regeneration will not converge on the block's contract.
 
     The stage already told the generator the exact required port names, twice.
@@ -642,14 +643,18 @@ def _park_conformance_unrepairable(state: BlockState, block_name: str,
         "block": block_name, "consecutive_failures": failures,
         "deviations": (record.get("deviations") or [])[:16],
     })
-    interrupt({
+    # WP-74: the in-graph chip lead decides first (it may edit the block RTL
+    # or amend .coresmith/interface_contracts.json and answer `retry`); the
+    # caller re-checks conformance once and parks for a human only if the
+    # block still deviates. Without a chip lead this is the old human park.
+    resp = await _resolve_interrupt({
         "type": "contract_conformance_unrepairable",
         "block_name": block_name,
         "consecutive_failures": failures,
         "deviations": (record.get("deviations") or [])[:16],
         "renames_applied": record.get("renames") or {},
         "expected_ports": record.get("feedback", ""),
-        "supported_actions": ["retry", "proceed"],
+        "supported_actions": ["retry", "proceed", "abort"],
         "outer_agent_guidance": (
             f"'{block_name}' has now failed the deterministic "
             f"contract-conformance check {failures} times AFTER the engine "
@@ -664,6 +669,7 @@ def _park_conformance_unrepairable(state: BlockState, block_name: str,
             f"passes the block only if the RTL actually conforms."
         ),
     })
+    return resp if isinstance(resp, dict) else {}
 
 
 # Constraint sources that survive a fresh block lifecycle: chip-level DV
@@ -2337,19 +2343,47 @@ async def generate_testbench_node(state: BlockState) -> dict:
                                       _conform.get("deviations") or [])[:8],
                                   "consecutive_failures": _cf_n,
                               })
+            _lead_cleared = False
             if _cf_n >= _CONFORMANCE_MAX_FAILURES:
-                # Cap: regeneration is not converging on the contract. PARK
-                # with the exact expected names rather than burn the rest of
-                # the attempt budget rediscovering the same deviation.
-                _park_conformance_unrepairable(state, block_name, _conform,
-                                               _cf_n)
+                # Cap: regeneration is not converging on the contract. The
+                # chip lead decides (WP-74); a human park only if it cannot.
+                _decision = await _park_conformance_unrepairable(
+                    state, block_name, _conform, _cf_n)
                 _reset_conformance_failures(_pr(state), block_name)
-            # PHASE = "conformance" (see the width gate above): pre-TB,
-            # pre-sim, no waveform exists.
-            return {"tb_path": str(tb_path_obj), "sim_passed": False,
-                    "phase": "conformance", "force_regen_tb": False,
-                    "conformance_renames": _renames,
-                    "step_log_paths": existing_logs}
+                _lead_action = str(_decision.get("action", ""))
+                if _lead_action == "retry":
+                    # Re-check once after the chip lead's edits (RTL or contract).
+                    _conform = await asyncio.to_thread(
+                        run_conformance_stage, _pr(state), block_name, rtl_path,
+                        _sibs, str(tb_path_obj),
+                    )
+                    _record_block_conformance(_pr(state), block_name, _conform)
+                    if _conform.get("ran") and _conform.get("ok"):
+                        log(f"  [CONFORM] {block_name}: conforms after the chip "
+                            f"lead's repair ({_conform.get('checked_edges')} "
+                            "edge(s))", GREEN)
+                        _lead_cleared = True
+                    else:
+                        for _d in (_conform.get("deviations") or [])[:8]:
+                            log(f"  [CONFORM] {block_name}: {_d}", RED)
+                        log(f"  [CONFORM] {block_name}: still deviating after the "
+                            "retry -- the block fails this attempt; the next "
+                            "entry re-checks (and parks again after two more "
+                            "failures)", RED)
+                elif _lead_action == "proceed":
+                    log(f"  [CONFORM] {block_name}: chip lead chose `proceed` -- "
+                        "the deviation stays recorded; integration decides "
+                        "whether the chip top can be assembled", YELLOW)
+                    _lead_cleared = True
+                # any other answer (abort, none): the block fails this attempt
+                # exactly as before; the node re-checks on its next entry.
+            if not _lead_cleared:
+                # PHASE = "conformance" (see the width gate above): pre-TB,
+                # pre-sim, no waveform exists.
+                return {"tb_path": str(tb_path_obj), "sim_passed": False,
+                        "phase": "conformance", "force_regen_tb": False,
+                        "conformance_renames": _renames,
+                        "step_log_paths": existing_logs}
         _reset_conformance_failures(_pr(state), block_name)
     elif _conform_on and _conform.get("reason"):
         log(f"  [CONFORM] {block_name}: NOT RUN -- {_conform['reason']}",
@@ -2561,8 +2595,8 @@ async def generate_testbench_node(state: BlockState) -> dict:
             try:
                 from orchestrator.state_store.trust import check_oracle_manifest
                 _ocheck = check_oracle_manifest(_pr(state))
-            except Exception:  # noqa: BLE001
-                _ocheck = {"ok": True}
+            except Exception as exc:  # noqa: BLE001
+                _ocheck = {"ok": False, "violation": {"detail": f"Oracle baseline check failed: {exc}"}}
             if not _ocheck.get("ok"):
                 sim_passed = False
                 _viol = _ocheck.get("violation") or {}
@@ -3190,37 +3224,12 @@ def _evaluate_ppa_gate(
     return _flag(verdict.reasons, verdict.checks)
 
 
-def _resolve_probe_top(design_name: str, top_txt: str) -> str:
-    """Resolve the module the chip-top synthesizability probe should target.
-
-    C24 originally assumed "the top is conventionally last" -- but the arm-U
-    integration lead declared the real top FIRST and a small glue adapter
-    (`syntax_start_final_frame_adapter`) last, so the gate probed the adapter,
-    counted 1 gate cell, and failed a chip whose real top synthesizes to
-    158k cells with both DV stages green. Preference order:
-
-    1. a Caravel/openframe wrapper module (deterministic assembly tops),
-    2. a module matching ``design_name`` exactly,
-    3. the unique module never instantiated inside the file (a true top has
-       no instantiation sites; helpers appear again at their use),
-    4. the last-declared module (original C24 convention),
-    5. ``design_name`` verbatim when the file declares nothing.
-    """
-    mods = re.findall(r"^\s*module\s+([A-Za-z_]\w*)", top_txt or "", re.M)
-    for pref in ("openframe_project_wrapper", "user_project_wrapper"):
-        if pref in mods:
-            return pref
-    if design_name in mods:
-        return design_name
-    if mods:
-        uninstantiated = [
-            m for m in mods
-            if len(re.findall(rf"\b{re.escape(m)}\b", top_txt)) == 1
-        ]
-        if len(uninstantiated) == 1:
-            return uninstantiated[0]
-        return mods[-1]
-    return design_name
+def _resolve_probe_top(design_name: str, top_txt: str, project_root: str = "") -> str:
+    """Resolve a chip probe only from the validated project manifest."""
+    from orchestrator.harness.top_module import CandidateError, resolve_top
+    if not project_root:
+        raise CandidateError("Chip probe requires a project candidate manifest")
+    return resolve_top(project_root)[0]
 
 
 def _chip_top_synth_ok(
@@ -3239,6 +3248,7 @@ def _chip_top_synth_ok(
     disabled, yosys is absent, or sources are missing -- "cannot judge" never
     fails the chip.
     """
+    from orchestrator.harness.top_module import CandidateError, candidate_for_inputs
     from orchestrator.langgraph.ppa_check import (
         chip_top_min_cells as _cell_floor,
     )
@@ -3251,120 +3261,16 @@ def _chip_top_synth_ok(
     from orchestrator.langgraph.ppa_check import (
         synth_cell_gate_enabled as _cell_gate_on,
     )
-    if not _cell_gate_on() or not top_rtl_path or not Path(top_rtl_path).exists():
+    try:
+        rec = candidate_for_inputs(project_root, top_rtl_path, block_rtl_paths)
+        if rec["defines"] != "none" or rec["parameters"] != "none":
+            raise CandidateError("Cell probe does not support the candidate configuration")
+    except CandidateError as exc:
+        return False, str(exc)
+    if not _cell_gate_on():
         return True, ""
-    sources = [top_rtl_path] + [p for p in (block_rtl_paths or {}).values() if p]
-    try:
-        _all_rtl = "\n".join(
-            Path(p).read_text() for p in sources if p and Path(p).exists()
-        )
-        from orchestrator.langgraph.sram_wrapper import (
-            uses_wrapper as _uses_wrapper,
-        )
-        from orchestrator.langgraph.sram_wrapper import (
-            wrapper_lib_path as _wrapper_lib_path,
-        )
-        if _uses_wrapper(_all_rtl):
-            sources.append(_wrapper_lib_path())
-    except Exception:  # noqa: BLE001 - best effort
-        pass
-    import tempfile as _tf
-    _synth_timeout = int(
-        os.environ.get("CORESMITH_SYNTH_TIMEOUT_S", "300") or "300"
-    )
-    try:
-        from orchestrator.langgraph.integration_helpers import (
-            _dedup_module_sources,
-            _drop_include_provided_sources,
-        )
-        # SYNTH-SCOPED include-provision dedup: yosys EXPANDS `include`s at
-        # read time, so a listed file that another source `include`s
-        # double-defines its modules -> MODDUP. Scoped HERE (not inside
-        # _dedup_module_sources) because the sim assembly must keep the
-        # explicit files: a legacy top may reference block modules directly
-        # while a non-top source carries preprocessor-guarded `include`s the
-        # sim never expands -- dropping the files there MODMISSINGs the sim.
-        _synth_srcs = _drop_include_provided_sources(sources)
-        _dd = Path(_tf.mkdtemp(prefix="chiptop_synth_"))
-        deduped = _dedup_module_sources(_synth_srcs, _dd)
-    except Exception:  # noqa: BLE001 - fall back to raw sources
-        deduped = sources
-    # F1 (canonical chip_top filelist): publish the deduped one-file-per-
-    # module source set the gate actually synthesizes, so downstream tooling
-    # (backend P&R, external graders) consumes an authoritative list instead
-    # of globbing rtl/**/*.v -- the run tree can carry DUPLICATE module copies
-    # (a top/ vs integration/ wrapper variant, an inline vs standalone block),
-    # and a naive glob then MODDUP-collides or picks a stale/stub copy.
-    try:
-        _flist = Path(project_root) / ".coresmith" / "chip_top_sources.f"
-        _flist.parent.mkdir(parents=True, exist_ok=True)
-        _flist.write_text("\n".join(str(_p) for _p in deduped) + "\n")
-    except OSError:
-        pass
-    # C24: yosys `hierarchy -top` needs the ACTUAL top module of the assembled
-    # chip_top, NOT the DESIGN NAME. The deterministic Caravel assembly's top
-    # module is `user_project_wrapper` (or openframe_project_wrapper); passing
-    # design_name (e.g. a `<design>_qspi_rom_top`) made yosys fail "Module <design>
-    # not found" and falsely report EVERY chip as un-synthesizable at the final
-    # gate. Resolve the real top from the assembled RTL: prefer a Caravel
-    # wrapper module, else the last module declared (the top is conventionally
-    # last), else the parsed first module, else fall back to design_name.
-    try:
-        _top_txt = Path(top_rtl_path).read_text(errors="ignore")
-    except OSError:
-        _top_txt = ""
-    _top_name = _resolve_probe_top(design_name, _top_txt)
-    # F3 (audit): a run may DELIVER a separate locked-ABI top at
-    # rtl/chip_top.v (e.g. the ppab_dut chassis contract) that is NOT part of
-    # the assembled manifest -- two near-equivalent tops that silently drift
-    # apart (the reference codec encoder shipped `ppab_dut` while chip_top_sources.f
-    # rooted at `reference_codec_enc_top`). When such a file exists outside the deduped
-    # set and its module names are all novel, co-elaborate it, publish it in
-    # the canonical filelist, and probe it as a SECOND top below so the gate
-    # covers the artifact that actually gets graded. Either way record a
-    # carried-forward defect naming the dual-top drift risk.
-    _delivered_top = None
-    try:
-        import re as _re3
-        _dpath = Path(project_root) / "rtl" / "chip_top.v"
-        _dedup_resolved = {str(Path(_p).resolve()) for _p in deduped}
-        if _dpath.exists() and str(_dpath.resolve()) not in _dedup_resolved:
-            _mod_re = _re3.compile(r"^\s*module\s+([A-Za-z_]\w*)", _re3.MULTILINE)
-            _d_mods = _mod_re.findall(_dpath.read_text(errors="ignore"))
-            _defined: set = set()
-            for _p in deduped:
-                try:
-                    _defined.update(
-                        _mod_re.findall(Path(_p).read_text(errors="ignore")))
-                except OSError:
-                    continue
-            _collisions = [m for m in _d_mods if m in _defined]
-            if _d_mods and not _collisions:
-                deduped = list(deduped) + [str(_dpath)]
-                try:
-                    _flist.write_text(
-                        "\n".join(str(_p) for _p in deduped) + "\n")
-                except (OSError, NameError):
-                    pass
-                _delivered_top = _d_mods[-1]
-                _drift_detail = (
-                    f"delivered ABI top `{_delivered_top}` ({_dpath}) is not "
-                    "part of the assembled manifest -- co-elaborated + probed "
-                    "as a second top; unify on ONE canonical top (a locked-ABI "
-                    "wrapper around the integration module)")
-            else:
-                _drift_detail = (
-                    f"delivered top file {_dpath} redefines manifest modules "
-                    f"{_collisions[:4]} -- cannot co-elaborate, so its drift "
-                    "vs the assembled manifest is UNCHECKED")
-            record_carried_forward_defect(project_root, {
-                "gate": "chip_top_synth",
-                "kind": "canonical_top_drift",
-                "unmodeled": str(_dpath),
-                "detail": _drift_detail,
-            })
-    except Exception:  # noqa: BLE001 - detection is best-effort
-        _delivered_top = None
+    deduped, _top_name = rec["sources"], rec["top_module"]
+    _synth_timeout = int(os.environ.get("CORESMITH_SYNTH_TIMEOUT_S", "300") or "300")
     # C27: probe from the PROJECT ROOT so project-relative $readmemh init
     # files (cs_sram/cs_rom INIT_FILE="inputs/...") resolve; the deduped
     # source copies live in a temp dir but yosys resolves $readmemh against
@@ -3394,31 +3300,6 @@ def _chip_top_synth_ok(
             f"wrapper won assembly dedup). A synthesizable-but-empty top "
             f"is not a working chip_top."
         )
-    # F3: the DELIVERED ABI top (rtl/chip_top.v) must synthesize too -- it is
-    # the artifact that gets graded, and it can drift from the assembled
-    # manifest independently.
-    if _delivered_top and _delivered_top != _top_name:
-        probe2 = _probe_multi(
-            deduped, _delivered_top, timeout_s=_synth_timeout,
-            cwd=project_root,
-        )
-        if probe2 is not None:
-            if probe2.get("elaborated") is False:
-                return False, (
-                    f"delivered ABI top `{_delivered_top}` (rtl/chip_top.v) "
-                    f"did not techmap: {probe2.get('reason', '')} -- the "
-                    "delivered top drifted from the assembled manifest")
-            _cc2 = probe2.get("cell_count")
-            if _cc2 is not None and _cc2 > _ceil:
-                return False, (
-                    f"delivered ABI top `{_delivered_top}` cell count "
-                    f"{_cc2:,} exceeds the max-cell ceiling {_ceil:,}")
-            if _cc2 is not None and _floor > 0 and _cc2 < _floor:
-                return False, (
-                    f"delivered ABI top `{_delivered_top}` collapsed to "
-                    f"{_cc2:,} gate cells (< floor {_floor:,}) -- a "
-                    "synthesizable-but-empty delivered top is not a working "
-                    "chip_top")
     return True, ""
 
 
@@ -3860,7 +3741,7 @@ def _run_gate_sim_gate(
             f"({res.output_bits_compared:,} output bits)", GREEN)
         return (True, res.status, res.reason)
 
-    if res.status == _gs.STATUS_FAIL:
+    if res.status in (_gs.STATUS_FAIL, _gs.STATUS_BOUNDED):
         log(f"  [GATE-SIM] FAIL -- {res.reason}", RED)
         try:
             block_dir = Path(_pr(state)) / ".coresmith" / "blocks" / block_name
@@ -4492,6 +4373,23 @@ async def diagnose_node(state: BlockState) -> dict:
 # Node: decide (deterministic -- no LLM call)
 # ---------------------------------------------------------------------------
 
+def _infrastructure_streak(history: list[dict]) -> int:
+    count = 0
+    for row in reversed(history):
+        category = row.get("category") or (row.get("diagnosis") or {}).get("category")
+        if category != "INFRASTRUCTURE_ERROR":
+            break
+        count += 1
+    return count
+
+
+def _infrastructure_retry_cap() -> int:
+    try:
+        return max(1, int(os.environ.get("CORESMITH_INFRA_MAX_RETRIES", "6") or 6))
+    except ValueError:
+        return 6
+
+
 def _route_decision(debug_result: dict, attempt_history: list[dict],
                     attempt: int, max_attempts: int, phase: str) -> str:
     """Deterministic failure routing based on debug agent output."""
@@ -4554,11 +4452,7 @@ def _route_decision(debug_result: dict, attempt_history: list[dict],
     # meant calling the chip lead (also an LLM) during the same outage,
     # and once it answered it skipped a block over 3 'attempts'.
     if category == "INFRASTRUCTURE_ERROR":
-        try:
-            _infra_max = int(os.environ.get("CORESMITH_INFRA_MAX_RETRIES", "6") or 6)
-        except ValueError:
-            _infra_max = 6
-        if category_counts.get("INFRASTRUCTURE_ERROR", 0) >= _infra_max:
+        if _infrastructure_streak(attempt_history) >= _infrastructure_retry_cap():
             return "ask_human"
         return "retry_rtl"
 
@@ -4643,16 +4537,15 @@ async def decide_node(state: BlockState) -> dict:
                 # after a real backoff. Budget is for design failures.
                 _infra_n = 0
                 try:
-                    _infra_n = sum(
-                        1 for a in (_db(_pr(state)).attempt_history(block_name) or [])
-                        if (a.get("diagnosis") or {}).get("category") == "INFRASTRUCTURE_ERROR"
-                        or a.get("category") == "INFRASTRUCTURE_ERROR")
-                except Exception:  # noqa: BLE001
-                    _infra_n = 1
+                    _infra_n = _infrastructure_streak(_db(_pr(state)).attempt_history(block_name) or [])
+                except Exception:  # unreadable history cannot reset the retry cap
+                    return {"debug_action": "ask_human"}
+                if _infra_n >= _infrastructure_retry_cap():
+                    return {"debug_action": "ask_human"}
                 backoff_s = min(60 * (2 ** max(_infra_n - 1, 0)), 900)
                 log(f"  [RETRY] INFRASTRUCTURE_ERROR -- re-running attempt "
                     f"{state['attempt']} after {backoff_s}s backoff (budget not "
-                    f"consumed; infra failures so far: {_infra_n})", YELLOW)
+                    f"consumed; consecutive infra failures: {_infra_n})", YELLOW)
                 write_graph_event(_pr(state), "Route Decision", "graph_node_exit", {
                     "block": block_name, "decision": action,
                     "infra_retry": True, "backoff_s": backoff_s,
@@ -5343,19 +5236,30 @@ async def _single_context_uarch_stage(
 
 
 def _retire_derived_integration_artifacts(project_root: str) -> list[str]:
-    """Move the engine-assembled integration top out of rtl/integration.
+    """Retire superseded assembler outputs when integration checking re-runs.
 
     Only files the deterministic assembler writes are moved: the assembled
     ``user_project_wrapper.v`` (when the persisted integration record says
     ``caravel_wrapper_assembled``) and ``user_project_wrapper_pads.v``. An
-    LLM-authored or self-assembled top is left alone. Returns the file names
+    LLM-authored or self-assembled top is left alone, as are all sources and
+    dependencies of the current validated candidate. Returns the file names
     moved. Never raises.
     """
     import time as _time
+
+    from orchestrator.harness.top_module import CandidateError, validated_candidate
+
     root = Path(project_root)
     int_dir = root / "rtl" / "integration"
     if not int_dir.is_dir():
         return []
+    protected = set()
+    try:
+        candidate = validated_candidate(root)
+        protected = {Path(p).resolve() for p in
+                     [*candidate["sources"], *candidate["dependencies"]]}
+    except CandidateError:
+        pass
     assembled = False
     try:
         rec = json.loads((root / ".coresmith" / "integration_result.json").read_text())
@@ -5367,7 +5271,7 @@ def _retire_derived_integration_artifacts(project_root: str) -> list[str]:
     dest = int_dir / "_stale" / _time.strftime("%Y%m%dT%H%M%S")
     for n in names:
         f = int_dir / n
-        if f.is_file():
+        if f.is_file() and f.resolve() not in protected:
             try:
                 dest.mkdir(parents=True, exist_ok=True)
                 f.rename(dest / n)
@@ -5429,18 +5333,6 @@ async def init_tier_node(state: OrchestratorState) -> dict:
             current_idx = tier_idx_update = _idx
             tier = tier_list[current_idx]
             tier_blocks = [b for b in block_queue if b.get("tier", 1) == tier]
-    if revise:
-        # WP-31: the assembler's outputs under rtl/integration are rebuilt by
-        # the next integration check; a stale copy misleads the review (the
-        # chip lead cited nets "missing" from a wrapper that had not been
-        # rebuilt, three revise rounds in a row on ax25_9600).
-        _retired = _retire_derived_integration_artifacts(pr)
-        if _retired:
-            log(f"  Targeted revise: retired stale derived artifact(s) "
-                f"{_retired} (rebuilt at the next integration check)", CYAN)
-            write_graph_event(pr, "Init Tier", "derived_artifacts_retired",
-                              {"files": _retired})
-
     # Section 7a: stamp the engine git SHA at run start + WARN in the daemon log
     # if it changes mid-run (a hot-swap that flipped behavior under the run).
     _stamp_engine_sha(pr)
@@ -5590,6 +5482,12 @@ def _revise_named_blocks(response: dict, candidates: list[str]) -> list[str]:
     return [c for c in candidates if c in named]
 
 
+def _adopt_reviewed_specs(pr: str, edited_blocks, reviewed_specs):
+    """Adopt all reviewed files as one fail-closed operation."""
+    from orchestrator.state_store.spec_adoption import adopt_reviewed_specs
+    return adopt_reviewed_specs(_db(pr), edited_blocks, reviewed_specs)
+
+
 def _plan_targeted_revise(
     pr: str,
     response: dict,
@@ -5611,8 +5509,6 @@ def _plan_targeted_revise(
     RTL skip-regen fast path cannot reuse a pass measured against the old spec.
     Blocks outside the scope keep their completed result untouched.
     """
-    import shutil as _shutil
-
     named = _revise_named_blocks(response, block_names)
     edited = [b for b in block_names if b in set(edited_blocks)]
     scope = [b for b in block_names
@@ -5625,20 +5521,10 @@ def _plan_targeted_revise(
                 or review_summary.strip())
     spec_dir = Path(pr) / "arch" / "uarch_specs"
     plan: dict[str, bool] = {}
+    adoption = _adopt_reviewed_specs(pr, edited, reviewed_specs)
+    adopt_failed = set(edited) if not adoption.ok else set()
     for name in scope:
         canonical = spec_dir / f"{name}.md"
-        if name in edited:
-            src = reviewed_specs.get(name)
-            try:
-                if src and Path(src).exists() and Path(src).resolve() != canonical.resolve():
-                    canonical.parent.mkdir(parents=True, exist_ok=True)
-                    _shutil.copy2(src, canonical)
-                    os.utime(canonical, None)  # newer than RTL/TB -> they regenerate
-                    log(f"  [INTEGRATION REVIEW] {name}: adopted the reviewed spec "
-                        f"({src})", YELLOW)
-            except OSError as exc:
-                log(f"  [INTEGRATION REVIEW] {name}: could not adopt reviewed "
-                    f"spec: {exc}", RED)
         # A named block (or an unscoped whole-tier revise) re-specs with the
         # chip lead's findings; an edited-only block implements the reviewed
         # spec as-is; a failed-only block retries its RTL against its spec.
@@ -5654,11 +5540,8 @@ def _plan_targeted_revise(
                     )
             except OSError:
                 pass
-        plan[name] = bool(canonical.exists()) and not needs_respec
-        try:
-            _db(pr).clear_result(name, "best")
-        except Exception:  # noqa: BLE001 - never block the revise on bookkeeping
-            pass
+        plan[name] = bool(canonical.exists()) and not needs_respec and name not in adopt_failed
+        _db(pr).clear_result(name, "best")
     return plan
 
 
@@ -5691,23 +5574,33 @@ async def integration_review_node(state: OrchestratorState) -> dict:
         })
         return {}
 
-    # Under block-goldens the per-tier LLM integration review is REDUNDANT and
-    # actively harmful, so skip it in BOTH passes (defer all cross-block checking
-    # to the real gates):
-    #   - pass 1 ("uarch"): the uarch_integration_gate after all tiers validates
-    #     cross-block coherence on the composed Amaranth chip model (byte-exact vs
-    #     the reference) before any RTL.
-    #   - pass 2 ("rtl"): integration_check (chip_top assembly + lint/wiring),
-    #     integration_dv (RTL == composed chip model) and validation_dv (RTL ==
-    #     golden) are the authoritative RTL-level cross-block gates.
-    # Beyond redundancy, the reviewer EDITS uArch specs on every run; in pass 2
-    # that trips the "stale RTL after spec edit" guard below -> approve routes to
-    # advance_tier but the spec-edit/re-DV churn re-parks here -> an integration-
-    # review REVISE-LOOP that never reaches integration_dv. Skipping it removes
-    # the loop without weakening correctness (the gates above still run). Also
-    # avoids LangGraph re-running the reviewer LLM on every resume (slow / can
-    # hang). Flag off -> unchanged. CORESMITH_STRICT_INTEGRATION_REVIEW=1 forces
-    # the old per-tier review (and its auto-revise) back on for both passes.
+    pending = {k: v for k, v in (state.get("integration_approved_specs") or {}).items()
+               if k in block_names}
+    if pending:
+        import hashlib
+        try:
+            verified = all(
+                hashlib.sha256((Path(pr) / "arch/uarch_specs" / f"{name}.md").read_bytes()).hexdigest() == digest
+                and (_db(pr).result(name, "best") or {}).get("spec_sha256") == digest
+                and (_db(pr).result(name, "best") or {}).get("sim_passed") is True
+                for name, digest in pending.items())
+        except OSError:
+            verified = False
+        if verified:
+            return {"integration_review_action": "approve", "integration_review_failed": False,
+                    "integration_approved_specs": None,
+                    "revise_blocks": {k: v for k, v in (state.get("revise_blocks") or {}).items()
+                                      if k not in block_names} or None}
+        response = await _resolve_interrupt({
+            "type": "uarch_spec_reverification_failed", "tier": tier,
+            "reason": "Approved spec hashes do not have matching successful verification results",
+            "affected_blocks": list(pending), "supported_actions": ["retry", "abort"],
+        })
+        return {"integration_review_action": "revise" if response.get("action") == "retry" else "abort",
+                "integration_review_failed": True, "integration_approved_specs": pending,
+                "revise_blocks": {name: True for name in pending}}
+
+    # Review once; approved edits re-enter verification using their adopted hashes.
     try:
         from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL
         from orchestrator.langchain.agents.integration_review_agent import (
@@ -5752,17 +5645,6 @@ async def integration_review_node(state: OrchestratorState) -> dict:
         review_summary = f"{failure_note}\n\n{review_summary}"
         issues_found = int(issues_found or 0) + len(failed_tier_blocks)
         review_failed = True
-    if issues_fixed:
-        stale_artifact_note = (
-            "Blocking uArch edits: integration review modified current-tier "
-            "uArch specs after RTL/testbench artifacts were generated. The "
-            "affected blocks must be regenerated from uArch before this tier "
-            "can be approved; otherwise stale RTL can falsely pass against the "
-            "old contract."
-        )
-        review_summary = f"{stale_artifact_note}\n\n{review_summary}"
-        review_failed = True
-
     log(f"  [INTEGRATION REVIEW] {review_summary[:200]}", GREEN if issues_found == 0 else YELLOW)
 
     spec_paths = {
@@ -5827,31 +5709,6 @@ async def integration_review_node(state: OrchestratorState) -> dict:
             YELLOW,
         )
         action = "revise"
-    if action == "approve" and issues_fixed:
-        # NOTE: The integration_review agent edits specs on every run, even
-        # cosmetically, so this auto-revise creates an infinite loop:
-        # revise -> restart_block -> integration_review edits again -> revise...
-        # When the outer agent explicitly approves, trust that decision;
-        # the integration_check
-        # node at RTL level will catch any real cross-block lint/wiring
-        # mismatch and surface it as a normal failure. Setting
-        # CORESMITH_STRICT_INTEGRATION_REVIEW=1 restores the old auto-revise.
-        import os as _os
-        if _os.environ.get("CORESMITH_STRICT_INTEGRATION_REVIEW") == "1":
-            log(
-                "  [INTEGRATION REVIEW] Approval rejected because uArch specs "
-                "were edited after block artifacts were generated; treating as revise "
-                "(CORESMITH_STRICT_INTEGRATION_REVIEW=1)",
-                YELLOW,
-            )
-            action = "revise"
-        else:
-            log(
-                "  [INTEGRATION REVIEW] Spec edits were made; honoring explicit "
-                "approve (integration_check at RTL level will catch real mismatches). "
-                "Export CORESMITH_STRICT_INTEGRATION_REVIEW=1 to force revise.",
-                YELLOW,
-            )
     if (action == "revise" and issues_found == 0 and not review_failed
             and _is_content_free_revise(response)):
         # Only downgrade CONTENT-FREE revises (the stale auto-revise churn
@@ -5870,11 +5727,36 @@ async def integration_review_node(state: OrchestratorState) -> dict:
     _carry = {k: v for k, v in (state.get("revise_blocks") or {}).items()
               if k not in block_names}
     revise_blocks: dict | None = _carry or None
+    approved_specs = None
+    if action == "approve":
+        try:
+            if review_failed:
+                raise ValueError(review_summary)
+            adoption = _adopt_reviewed_specs(pr, edited_blocks, reviewed_specs)
+            if not adoption.ok:
+                raise ValueError(adoption.error)
+            revise_blocks = {**_carry, **{name: True for name in adoption.reverify}} or None
+            approved_specs = {name: adoption.hashes[name] for name in adoption.reverify} or None
+        except Exception as exc:
+            review_failed = True
+            response = await _resolve_interrupt({
+                "type": "uarch_spec_adoption_failed", "tier": tier,
+                "affected_blocks": edited_blocks, "reason": str(exc),
+                "supported_actions": ["retry", "abort"],
+            })
+            action = "retry" if response.get("action") == "retry" else "abort"
+            revise_blocks = _carry or None
     if action == "revise":
-        revise_blocks = {**_carry, **_plan_targeted_revise(
-            pr, response, block_names, edited_blocks, reviewed_specs,
-            failed_tier_blocks, review_summary, tier,
-        )}
+        try:
+            revise_blocks = {**_carry, **_plan_targeted_revise(
+                pr, response, block_names, edited_blocks, reviewed_specs,
+                failed_tier_blocks, review_summary, tier,
+            )}
+        except Exception as exc:
+            review_failed = True
+            response = await _resolve_interrupt({"type": "uarch_spec_adoption_failed",
+                "reason": str(exc), "supported_actions": ["retry", "abort"]})
+            action = "retry" if response.get("action") == "retry" else "abort"
     write_graph_event(pr, "Integration Review", "graph_node_exit", {
         "action": action, "issues_found": issues_found,
         "review_failed": review_failed,
@@ -5892,6 +5774,7 @@ async def integration_review_node(state: OrchestratorState) -> dict:
     return {
         "integration_review_action": action,
         "integration_review_failed": review_failed,
+        "integration_approved_specs": approved_specs,
         "revise_blocks": revise_blocks,
     }
 
@@ -5950,14 +5833,19 @@ def route_after_integration_review(state: OrchestratorState) -> str:
               written as gate feedback by integration_review_node)
     """
     action = state.get("integration_review_action", "approve")
-    if action == "abort":
-        return END
+    if action == "retry":
+        return "integration_review"
     if action == "revise":
+        return "init_tier"
+    if action == "abort" or state.get("integration_review_failed"):
+        return END
+    if state.get("integration_approved_specs"):
         return "init_tier"
     return "advance_tier"
 
 
 route_after_integration_review.__edge_labels__ = {
+    "integration_review": "RETRY ADOPTION",
     "advance_tier": "APPROVED",
     "init_tier": "REVISE",
     END: "ABORT",
@@ -6260,27 +6148,115 @@ def _merge_mismatches(
     return merged
 
 
-def _self_assembled_wrapper(wrapper_block: str, modules: dict,
-                            block_rtl_sources: dict) -> bool:
-    """True when the wrapper block already IS the graded top (WP-24).
+async def _park_candidate_failure(pr: str, design_name: str, rtl_paths: dict,
+                                  reason: str, errors: list, top_rtl_path: str,
+                                  *, phase: str = "single_block", deterministic: bool = False) -> dict:
+    """Park a rejected candidate without claiming a chassis assembly failed."""
+    from orchestrator.harness.top_module import invalidate_candidate
+    invalidate_candidate(pr)
+    errors = [str(e) for e in (errors or [])][:24]
+    log(f"  [INTEGRATION] {reason} -- parking", RED)
+    for error in errors[:8]:
+        log(f"      - {error}", RED)
+    payload = {
+        "type": "integration_failure", "phase": phase,
+        "design_name": design_name, "top_rtl_path": top_rtl_path,
+        "block_count": len(rtl_paths), "block_rtl_paths": rtl_paths,
+        "error_count": max(1, len(errors)), "lint_clean": False,
+        "reason": reason, "errors": errors, "deterministic": deterministic,
+        "supported_actions": ["retry", "fix_rtl", "abort"],
+        "outer_agent_guidance": (
+            f"Candidate adoption failed ({reason}; see errors). Fix the task top "
+            "declaration or the block RTL identified by the errors before retrying. "
+            "A declared top must already exist in the selected RTL on the single-block path. "
+            "An unchanged deterministic mismatch will recur on retry."
+        ),
+        "reference_files": {"task": str(Path(pr) / "inputs/task.yaml"),
+                            "top_rtl": top_rtl_path},
+    }
+    write_graph_event(pr, "Integration Check", "candidate_adoption_failed", payload)
+    resp = await _resolve_interrupt(payload)
+    resp = resp if isinstance(resp, dict) else {}
+    action = resp.get("action", "abort")
+    result = {
+        "reason": reason, "candidate_adoption_failed": True,
+        "errors": errors, "lint_clean": False, "top_rtl_path": top_rtl_path,
+        "action_taken": action, "deterministic": deterministic,
+    }
+    if action in ("retry", "fix_rtl"):
+        result["retry_requested"] = True
+        result["fix_applied"] = str(resp.get("rtl_fix_description", ""))
+    else:
+        result.update(aborted=True, skipped=True)
+    write_graph_event(pr, "Integration Check", "graph_node_exit", {
+        "action": action, "phase": phase,
+    })
+    log(f"  [INTEGRATION] {phase} park -> {action}", YELLOW if result.get("retry_requested") else RED)
+    return result
 
-    It must declare the locked Caravel pad boundary (io_in/io_out/io_oeb) and
-    instantiate every other frontend block in its own source.
-    """
-    mod = modules.get(wrapper_block)
-    if mod is None:
-        return False
-    try:
-        names = {str(p.name) for p in mod.ports}
-    except Exception:  # noqa: BLE001
-        return False
-    if not {"io_in", "io_out", "io_oeb"} <= names:
-        return False
-    others = {b for b in modules if b != wrapper_block}
-    if not others:
-        return False
-    from orchestrator.langchain.agents.integration_lead import assert_blocks_instantiated
-    return assert_blocks_instantiated(block_rtl_sources.get(wrapper_block, ""), others) is None
+
+async def _park_caravel_assembly_failure(pr: str, design_name: str, rtl_paths: dict,
+                                         reason: str, errors: list, top_rtl_path: str) -> dict:
+    """WP-45: the deterministic Caravel assembly is the ONLY way to produce the
+    graded `user_project_wrapper`; when it is not clean, park instead of
+    falling back to an LLM-assembled top with a different module name."""
+    from orchestrator.chassis.profile import CARAVEL, declared_chassis
+    if declared_chassis(pr) != CARAVEL:
+        return await _park_candidate_failure(pr, design_name, rtl_paths, reason, errors,
+                                             top_rtl_path, phase="candidate_adoption")
+    errors = [str(e) for e in (errors or [])][:24]
+    log(f"  [INTEGRATION] deterministic Caravel assembly NOT clean ({reason}) -- "
+        "parking (no Integration Lead fallback for a locked Caravel boundary)", RED)
+    for _e in errors[:8]:
+        log(f"      - {_e}", RED)
+    write_graph_event(pr, "Integration Check", "caravel_assembly_failed", {
+        "reason": reason, "errors": errors, "top_rtl_path": top_rtl_path,
+    })
+    payload = {
+        "type": "integration_failure",
+        "phase": "caravel_assembly",
+        "design_name": design_name,
+        "top_rtl_path": top_rtl_path,
+        "block_count": len(rtl_paths or {}),
+        "error_count": max(1, len(errors)),
+        "lint_clean": False,
+        "assembly_reason": reason,
+        "assembly_errors": errors,
+        "block_rtl_paths": rtl_paths,
+        "supported_actions": ["retry", "fix_rtl", "abort"],
+        "outer_agent_guidance": (
+            "The ENGINE assembles the graded `user_project_wrapper` from the "
+            "blocks and the interface contract; that assembly did not come out "
+            f"clean ({reason}; see assembly_errors). There is NO LLM-integrator "
+            "fallback for a locked Caravel boundary: a differently named top "
+            "cannot be graded. Fix the block RTL or port declarations the "
+            "errors point at (fix_rtl), or retry after an engine/operator fix. "
+            "abort only if the block set itself is wrong."
+        ),
+        "reference_files": {"top_rtl": top_rtl_path},
+    }
+    resp = await _resolve_interrupt(payload)
+    action = (resp or {}).get("action", "abort") if isinstance(resp, dict) else "abort"
+    write_graph_event(pr, "Integration Check", "graph_node_exit", {
+        "action": action, "phase": "caravel_assembly",
+    })
+    result = {
+        "reason": f"caravel assembly {reason}",
+        "caravel_assembly_failed": True,
+        "assembly_errors": errors,
+        "top_rtl_path": top_rtl_path,
+        "action_taken": action,
+    }
+    if action in ("retry", "fix_rtl"):
+        result["retry_requested"] = True
+        result["fix_applied"] = str((resp or {}).get("rtl_fix_description", ""))
+        log(f"  [INTEGRATION] caravel assembly park -> {action}; re-running the "
+            "integration check", YELLOW)
+    else:
+        result["aborted"] = True
+        result["skipped"] = True
+        log("  [INTEGRATION] caravel assembly park -> abort", RED)
+    return result
 
 
 async def integration_check_node(state: OrchestratorState) -> dict:
@@ -6389,6 +6365,15 @@ async def integration_check_node(state: OrchestratorState) -> dict:
         log(f"  [INTEGRATION] Found {len(connections)} connections, "
             f"design: {design_name}", CYAN)
         span.set_attribute("connection_count", len(connections))
+
+        # WP-31/68: retire only superseded assembly artifacts, at the point
+        # integration will rebuild them. Tier re-entry and reporting must
+        # preserve the current validated candidate for downstream consumers.
+        retired = _retire_derived_integration_artifacts(pr)
+        if retired:
+            log(f"  [INTEGRATION] Retired superseded derived artifact(s): {retired}", CYAN)
+            write_graph_event(pr, "Integration Check", "derived_artifacts_retired",
+                              {"files": retired})
 
         rtl_paths = await asyncio.to_thread(
             discover_block_rtl, pr, passed_blocks
@@ -6631,39 +6616,60 @@ async def integration_check_node(state: OrchestratorState) -> dict:
             safe_name = f"top_{safe_name}"
         output_path = str(rtl_dir / f"{safe_name}.v")
 
-        # Single-block designs: generate a passthrough wrapper that
-        # instantiates the block and wires all ports to the top level.
-        # This ensures the backend always has an integration top-level
-        # module regardless of block count.
+        # A declared single-block top must already exist in the selected RTL.
+        # Only an undeclared top permits a generated passthrough wrapper.
         if len(modules) == 1:
+            from orchestrator.harness.top_module import (
+                declared_top,
+                module_declared_in,
+                write_candidate_receipt,
+            )
             solo_name, solo_mod = next(iter(modules.items()))
-            top_name = f"{safe_name}_top" if not safe_name.endswith("_top") else safe_name
-            lines = [f"module {top_name} ("]
-            port_decls = []
-            for p in solo_mod.ports:
-                width_str = f"[{p.msb}:{p.lsb}] " if p.width > 1 else ""
-                port_decls.append(f"    {p.direction} wire {width_str}{p.name}")
-            lines.append(",\n".join(port_decls))
-            lines.append(");")
-            lines.append("")
-            inst_conns = [f"        .{p.name}({p.name})" for p in solo_mod.ports]
-            lines.append(f"    {solo_mod.name} u_{solo_name} (")
-            lines.append(",\n".join(inst_conns))
-            lines.append("    );")
-            lines.append("")
-            lines.append("endmodule")
-            wrapper_src = "\n".join(lines) + "\n"
-            Path(output_path).write_text(wrapper_src, encoding="utf-8")
+            try:
+                top_name = declared_top(pr)
+            except (ValueError, OSError) as exc:
+                return {"integration_result": await _park_candidate_failure(
+                    pr, design_name, rtl_paths, "invalid top declaration on the single-block path",
+                    [str(exc)], "")}
+            single_block_wrapper = not top_name
+            top_mod = solo_mod
+            if top_name:
+                declaring_paths = list(dict.fromkeys(
+                    str(Path(path).resolve()) for path in rtl_paths.values()
+                    if module_declared_in(path, top_name)))
+                if len(declaring_paths) != 1:
+                    return {"integration_result": await _park_candidate_failure(
+                        pr, design_name, rtl_paths, "declared top mismatch on the single-block path",
+                        [f"The task declares top {top_name!r}; expected exactly one block RTL file "
+                         f"declaring it, found {len(declaring_paths)}. No wrapper was generated."],
+                        "", deterministic=True)}
+                output_path = declaring_paths[0]
+                top_mod = await asyncio.to_thread(parse_verilog_ports, output_path, top_name)
+                log(f"  [INTEGRATION] Single-block design: using declared top "
+                    f"{top_name} from {output_path}", GREEN)
+            else:
+                top_name = f"{safe_name}_top" if not safe_name.endswith("_top") else safe_name
+                lines = [f"module {top_name} ("]
+                port_decls = []
+                for p in solo_mod.ports:
+                    width_str = f"[{p.msb}:{p.lsb}] " if p.width > 1 else ""
+                    port_decls.append(f"    {p.direction} wire {width_str}{p.name}")
+                lines.append(",\n".join(port_decls))
+                lines.append(");")
+                lines.append("")
+                inst_conns = [f"        .{p.name}({p.name})" for p in solo_mod.ports]
+                lines.append(f"    {solo_mod.name} u_{solo_name} (")
+                lines.append(",\n".join(inst_conns))
+                lines.append("    );")
+                lines.append("")
+                lines.append("endmodule")
+                Path(output_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+                log(f"  [INTEGRATION] Single-block design: generated wrapper "
+                    f"{top_name} for {solo_name}", GREEN)
 
-            log(f"  [INTEGRATION] Single-block design: generated wrapper "
-                f"{top_name} for {solo_name}", GREEN)
-
-            # By NAME: rtl_paths can still carry other blocks' files, and
-            # linting the wrapper against the wrong source is a confusing
-            # failure at best and a wrong chip at worst.
-            solo_rtl_path = rtl_paths.get(solo_name) or list(rtl_paths.values())[0]
             lint_result = await asyncio.to_thread(
-                lint_top_level, output_path, [solo_rtl_path], top_name,
+                lint_top_level, output_path, list(rtl_paths.values()), top_name,
+                top_module=top_name,
                 project_root=_pr(state),
             )
             lint_clean = lint_result.get("clean", False)
@@ -6675,7 +6681,7 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                 "top_module": top_name,
                 "top_rtl_path": output_path,
                 "block_count": 1,
-                "wire_count": len(solo_mod.ports),
+                "wire_count": len(top_mod.ports),
                 "skipped_connections": [],
                 "mismatches": [],
                 "error_count": 0,
@@ -6683,14 +6689,28 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                 "lint_clean": lint_clean,
                 "lint_errors": lint_result.get("errors", ""),
                 "block_rtl_paths": rtl_paths,
-                "single_block_wrapper": True,
+                "single_block_wrapper": single_block_wrapper,
             }
 
+            try:
+                if not lint_clean:
+                    raise ValueError(f"Single-block candidate did not lint cleanly: {lint_result.get('errors', '')}")
+                # The block can be the elaborated root itself. Every other
+                # expected block must still occur as a reachable child cell.
+                expected = [name for name in rtl_paths
+                            if not (name == solo_name and top_name == solo_mod.name
+                                    and not single_block_wrapper)]
+                write_candidate_receipt(pr, top_name, output_path, rtl_paths,
+                                        expected_blocks=expected,
+                                        note="single-block passthrough" if single_block_wrapper else "single-block declared top",
+                                        integration_result=integration_result)
+            except (ValueError, OSError) as exc:
+                return {"integration_result": await _park_candidate_failure(
+                    pr, design_name, rtl_paths, "candidate validation failed on the single-block path",
+                    [str(exc)], output_path)}
             write_graph_event(pr, "Integration Check", "graph_node_exit", {
-                "success": True,
-                "top_module": top_name,
-                "block_count": 1,
-                "single_block_wrapper": True,
+                "success": True, "top_module": top_name, "block_count": 1,
+                "single_block_wrapper": single_block_wrapper,
             })
             return {"integration_result": integration_result}
 
@@ -6701,58 +6721,19 @@ async def integration_check_node(state: OrchestratorState) -> dict:
         # Lead LLM, which named the top after the design and treated the pad
         # adapter as a peer block -- so the daemon never delivered a gradeable
         # wired top and every chip-lead hand-assembled one.
+        from orchestrator.chassis.profile import CARAVEL, declared_chassis
         from orchestrator.langgraph.integration_helpers import (
             detect_wrapper_block,
             generate_caravel_wrapper_top,
             load_interface_contract_edges,
         )
-        _wrapper_block = detect_wrapper_block(modules)
+        # WP-51: the wrapper block is the one named as the task's declared top.
+        _chassis = declared_chassis(pr)
+        _wrapper_block = detect_wrapper_block(modules, _chassis.top_module) if _chassis else None
         # WP-24: the generator may have written the wrapper block as the
         # COMPLETE graded top (pads + every core block instantiated). Re-wrapping
         # it produces wiring hazards and a nested top the QSPI pin-boundary gate
         # rejects; adopt it as the chip top instead.
-        if _wrapper_block is not None and _self_assembled_wrapper(
-                _wrapper_block, modules, block_rtl_sources):
-            _sa_top = rtl_paths[_wrapper_block]
-            _sa_blocks = [p for b, p in rtl_paths.items() if b != _wrapper_block]
-            log(f"  [INTEGRATION] wrapper block '{_wrapper_block}' already IS the "
-                f"graded top (locked pads + {len(_sa_blocks)} blocks instantiated) "
-                f"-- adopting it as chip top", CYAN)
-            lint_result = await asyncio.to_thread(
-                lint_top_level, _sa_top, _sa_blocks, "user_project_wrapper",
-                project_root=_pr(state),
-            )
-            lint_clean = lint_result.get("clean", False)
-            integration_result = {
-                "design_name": design_name,
-                "top_module": modules[_wrapper_block].name or "user_project_wrapper",
-                "top_rtl_path": _sa_top,
-                "block_count": len(modules),
-                "wire_count": 0,
-                "skipped_connections": [],
-                "mismatches": [],
-                "error_count": 0 if lint_clean else 1,
-                "warning_count": 0,
-                "lint_clean": lint_clean,
-                "lint_errors": lint_result.get("errors", ""),
-                "block_rtl_paths": {b: p for b, p in rtl_paths.items() if b != _wrapper_block},
-                "self_assembled_wrapper": True,
-            }
-            try:
-                _ir_path = Path(pr) / ".coresmith" / "integration_result.json"
-                _ir_path.write_text(json.dumps(integration_result, indent=2, default=str))
-            except OSError:
-                pass
-            write_graph_event(pr, "Integration Check", "graph_node_exit", {
-                "success": bool(lint_clean), "top_module": integration_result["top_module"],
-                "block_count": len(modules), "self_assembled_wrapper": True,
-                "lint_clean": lint_clean,
-            })
-            if lint_clean:
-                return {"integration_result": integration_result}
-            log("  [INTEGRATION] self-assembled wrapper does not lint clean -- "
-                "continuing with the deterministic assembly / Integration Lead",
-                YELLOW)
         # The PRD's structured pin map, when present, lets the top route the pads
         # itself -- so the design needs no pin-adapter block and assembly no
         # longer depends on finding one.
@@ -6762,7 +6743,7 @@ async def integration_check_node(state: OrchestratorState) -> dict:
             for _e in _pin_map.errors:
                 log(f"  [INTEGRATION] pin_map: {_e}", RED)
             _pin_map = None
-        if ((_wrapper_block is not None or _pin_map is not None)
+        if (_chassis == CARAVEL and (_wrapper_block is not None or _pin_map is not None)
                 and _deterministic_caravel_top_enabled()):
             if _pin_map is not None:
                 log(f"  [INTEGRATION] pin map declared ({len(_pin_map.entries)} "
@@ -6809,6 +6790,12 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                     "wiring_errors": _wiring_errors[:16],
                     "wiring_errors_path": str(_haz_path),
                 })
+            if _wiring_errors:
+                # WP-45: fail closed -- never hand a locked boundary to the
+                # Integration Lead.
+                return {"integration_result": await _park_caravel_assembly_failure(
+                    pr, design_name, rtl_paths, "wiring hazards",
+                    list(_wiring_errors), "")}
             if not _wiring_errors:
                 top_rtl_path = asm["rtl_path"]
                 # Lint with the pad block's renamed copy swapped in (avoids a
@@ -6816,6 +6803,7 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                 _lint_paths = list(asm["lint_block_paths"].values())
                 lint_result = await asyncio.to_thread(
                     lint_top_level, top_rtl_path, _lint_paths, "user_project_wrapper",
+                    top_module="user_project_wrapper",
                     project_root=_pr(state),
                 )
                 lint_clean = lint_result.get("clean", False)
@@ -6864,20 +6852,26 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                 # Integration Lead + integration_failure interrupt, the same
                 # fail-closed retry path the generic branch uses.
                 if lint_clean and not missing:
-                    # WP-27: persist the record the backend (WP-17b) and the
-                    # graders read; this branch never wrote it, so a stale
-                    # Integration-Lead result named the wrong top.
-                    try:
-                        _ir_path = Path(pr) / ".coresmith" / "integration_result.json"
-                        _ir_path.parent.mkdir(parents=True, exist_ok=True)
-                        _ir_path.write_text(json.dumps(integration_result, indent=2, default=str))
-                    except OSError:
-                        pass
+                    from orchestrator.harness.top_module import write_candidate_receipt
+                    try:   # WP-49/54: the receipt (declared-top check) BEFORE the record
+                        write_candidate_receipt(pr, "user_project_wrapper", top_rtl_path,
+                                                asm["lint_block_paths"], note="caravel assembly",
+                                                expected_blocks=set(modules) - {_dropped},
+                                                integration_result=integration_result)
+                    except (ValueError, OSError) as _exc:
+                        return {"integration_result": await _park_caravel_assembly_failure(
+                            pr, design_name, rtl_paths, "top module mismatch",
+                            [str(_exc)], top_rtl_path)}
                     return {"integration_result": integration_result}
-                log(f"  [INTEGRATION] deterministic Caravel assembly NOT clean "
-                    f"(lint_clean={lint_clean}, missing={missing}) -- "
-                    f"escalating to Integration Lead / fail-closed interrupt",
-                    YELLOW)
+                _errs = [ln for ln in str(lint_result.get("errors", "")).splitlines()
+                         if ln.strip()][:20]
+                if missing:
+                    _errs.append("blocks not instantiated by the assembled wrapper: "
+                                 + ", ".join(missing))
+                return {"integration_result": await _park_caravel_assembly_failure(
+                    pr, design_name, asm["lint_block_paths"],
+                    "lint errors" if not lint_clean else "missing instantiations",
+                    _errs, top_rtl_path)}
             # else: wiring hazards / not-clean assembly -> fall through to the
             # Integration Lead below (which raises the integration_failure
             # interrupt for retry).
@@ -6980,21 +6974,10 @@ async def integration_check_node(state: OrchestratorState) -> dict:
         from orchestrator.langchain.agents.integration_lead import (
             assert_blocks_instantiated,
         )
-        # WP-22: a Caravel-style top is a HIERARCHY (chip top -> wrapper ->
-        # blocks); the assembled wrapper lives next to the top under
-        # rtl/integration. Judge instantiation over the whole hierarchy.
-        _hier_text = chip_top_text
-        try:
-            _int_dir = Path(top_rtl_path).parent if top_rtl_path else None
-            if _int_dir and _int_dir.is_dir():
-                for _vf in sorted(_int_dir.glob("*.v")):
-                    if top_rtl_path and _vf.resolve() == Path(top_rtl_path).resolve():
-                        continue
-                    _hier_text += "\n" + _vf.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            pass
+        _hier_sources = [top_rtl_path, *rtl_paths.values()]
         postcond = assert_blocks_instantiated(
-            _hier_text, set(block_rtl_sources.keys())
+            chip_top_text, set(block_rtl_sources.keys()), source_paths=_hier_sources,
+            top_module=module_name, project_root=pr,
         )
         if postcond:
             log(f"  [INTEGRATION] Postcondition failed: {postcond}", RED)
@@ -7079,7 +7062,7 @@ async def integration_check_node(state: OrchestratorState) -> dict:
         block_rtl_list = list(rtl_paths.values())
         lint_result = await asyncio.to_thread(
             lint_top_level, top_rtl_path, block_rtl_list,
-            design_name, project_root=_pr(state),
+            design_name, project_root=_pr(state), top_module=module_name,
         )
 
         lint_clean = lint_result.get("clean", False)
@@ -7115,15 +7098,15 @@ async def integration_check_node(state: OrchestratorState) -> dict:
             },
         }
 
-        # B3: persist the assembled integration result so the harness
-        # (`coresmith verify chip`) can resolve top_rtl_path + block_rtl_paths
-        # after the daemon parks. Best-effort -- never fails the node.
-        try:
-            _ir_path = Path(pr) / ".coresmith" / "integration_result.json"
-            _ir_path.parent.mkdir(parents=True, exist_ok=True)
-            _ir_path.write_text(json.dumps(integration_result, indent=2, default=str))
-        except Exception:  # noqa: BLE001
-            pass
+        async def adopt_result():
+            from orchestrator.harness.top_module import write_candidate_receipt
+            try:
+                write_candidate_receipt(pr, module_name, top_rtl_path, rtl_paths,
+                                        note="integration lead", integration_result=integration_result)
+                return integration_result
+            except (ValueError, OSError) as exc:
+                return await _park_caravel_assembly_failure(
+                    pr, design_name, rtl_paths, "top module mismatch", [str(exc)], top_rtl_path)
 
         has_issues = len(errors) > 0 or not lint_clean
         if has_issues:
@@ -7346,6 +7329,8 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                     integration_result["aborted"] = True
                     log("  [INTEGRATION] Aborted at re-park", RED)
 
+            if lint_clean and not integration_result.get("aborted") and not integration_result.get("skipped_by_user"):
+                integration_result = await adopt_result()
             return {"integration_result": integration_result}
 
         if (
@@ -7444,8 +7429,13 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                     "  [INTEGRATION] Aborted on warning triage", RED
                 )
 
+            if lint_clean and not integration_result.get("aborted") and not integration_result.get("skipped_by_user"):
+                integration_result = await adopt_result()
             return {"integration_result": integration_result}
 
+        integration_result = await adopt_result()
+        if not integration_result.get("lint_clean") or integration_result.get("aborted"):
+            return {"integration_result": integration_result}
         log(f"\n{'='*60}", GREEN)
         log("  INTEGRATION CHECK PASSED", GREEN)
         log(f"  Top module: {module_name}", GREEN)
@@ -7750,9 +7740,9 @@ def _format_dv_retry_context(previous_result: dict | None) -> str:
 # index/address/counter widths were never exercised at the declared maximum, so
 # a wrap at the 2^n boundary BELOW the max (e.g. a 7-bit column index wrapping
 # at 512 on a 640-wide frame) sailed through integration + validation DV. This
-# gate forces at least one MAX-GEOMETRY test case whenever the design declares
-# any dimensional maximum, and requires the generated testbench to advertise it
-# with a machine-checkable marker.
+# gate requires executed maximum cases only when the owner declares them in
+# inputs/task.yaml. Policy dimensions and testbench markers alone describe
+# scope; without owner cases they are explicitly not owner-certified.
 #
 # DOMAIN-GENERIC by construction: dimension NAMES are DATA read from the
 # design's own machine-readable declarations -- the engine NEVER greps for
@@ -7779,8 +7769,8 @@ _MAXGEO_EQUIV_NVEC_CAP = 4096    # bound the seeded chip-equiv stream length
 
 
 def _maxgeo_gate_enabled() -> bool:
-    """Require a MAX-GEOMETRY DV test when the design declares dimensional
-    maxima. Default ON; ``CORESMITH_MAXGEO_GATE=0`` disables (both branches
+    """Evaluate owner certification of the design's dimensional maxima.
+    Default ON; ``CORESMITH_MAXGEO_GATE=0`` disables (both branches
     tested). Env-gate convention (like :func:`_chip_equiv_enabled`)."""
     return (os.environ.get("CORESMITH_MAXGEO_GATE", "1") or "1") != "0"
 
@@ -8072,134 +8062,102 @@ def _maxgeo_conformance_scope(
     }
 
 
-def _maxgeo_gate_verdict(
-    project_root: str, tb_path: str, tb_result: dict | None = None
-) -> dict | None:
-    """``None`` -> gate disabled or no declared dims (a true no-op).
-    ``{"verdict": "pass", ...}`` -> evaluated and fully covered (callers LOG
-    it). ``{"advisory": True, ...}`` -> covered in scope with a loud recorded
-    gap. Anything else -> violation dict: the design declares dimensional
-    maxima but the testbench's ``# MAXGEO`` marker does not prove a
-    max-geometry case for every declared dimension.
+def _tb_maxgeo_mentions(tb_path: str, dims: dict) -> dict:
+    """Cocotb cases mentioning each dimension, as scope only, never proof.
 
-    NAME-AGNOSTIC: each declared dimension's max VALUE must appear as a marker
-    ``key=value`` pair (the key name is free-form data). Testing at the declared
-    maximum inherently crosses every 2^n index boundary below it -- exactly
-    where a truncated index/address width wraps. NEVER raises (a parse hiccup is
-    non-blocking; the prompt requirement is the primary defense).
+    Inspect source without importing the testbench. Comments, strings and
+    identifiers inside a case can describe scope without exercising it.
+    """
+    import ast
 
-    ``tb_result`` is the generator's own record for this testbench. When it
-    identifies the ENGINE'S deterministic, compute-lane-independent QSPI
-    conformance TB, :func:`_maxgeo_conformance_scope` may return an ADVISORY
-    verdict (``advisory: True``) instead of a failure -- see that function for
-    why that is a scope, not a weakening. Callers MUST treat ``advisory`` as
-    "passed, with a loud recorded gap", and anything else as a failure."""
     try:
-        if not _maxgeo_gate_enabled():
-            return None
-        # run3-followups: single-sourced declared table (byte-equality with
-        # the legacy _declared_dimensions is pinned by test).
-        from orchestrator.langgraph.bfm_lib import maxgeo as _maxgeo_lib
-        dims = _maxgeo_lib.declared_dimensional_maxima(project_root)
+        source = Path(tb_path).read_text(encoding="utf-8", errors="replace")
+        tree = ast.parse(source)
+    except (OSError, SyntaxError, ValueError):
+        return {}
+    lines = source.splitlines()
+    mentions = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        decorators = [d.func if isinstance(d, ast.Call) else d for d in node.decorator_list]
+        if not any((isinstance(d, ast.Attribute) and d.attr == "test")
+                   or (isinstance(d, ast.Name) and d.id == "test") for d in decorators):
+            continue
+        body = "\n".join(lines[node.lineno - 1:node.end_lineno])
+        found = [name for name in dims if re.search(r"(?<![\w./-])" + re.escape(name) + r"(?![\w./-])", body)]
+        if found:
+            mentions[node.name] = found
+    return mentions
+
+
+def _maxgeo_gate_verdict(
+    project_root: str, tb_path: str, tb_result: dict | None = None,
+    *, sim_result: dict | None = None,
+) -> dict | None:
+    """Markers describe scope. Only an executed owner-declared case proves it.
+
+    Owner task.yaml declares ``max_geometry_cases: {case_name: {dimension: max}}``.
+    ``executed_cases`` comes from the simulator's fresh successful XML test rows,
+    never from the generated testbench's own metadata or comments.
+    An absent declaration (or empty mapping) is non-blocking ``not_declared``;
+    policy-authored dimensions cannot impose an owner certification obligation.
+    """
+    if not _maxgeo_gate_enabled():
+        return None
+    try:
+        import yaml
+
+        from orchestrator.langgraph.bfm_lib.maxgeo import declared_dimensional_maxima
+        dims = declared_dimensional_maxima(project_root)
+        task_path = Path(project_root) / "inputs/task.yaml"
+        task = yaml.safe_load(task_path.read_text()) if task_path.exists() else None
+        if task is None:
+            task = {}
+        if not isinstance(task, dict):
+            raise ValueError("inputs/task.yaml must be a mapping")
+        declared = task.get("max_geometry_cases", {})
+        if not isinstance(declared, dict):
+            raise ValueError("max_geometry_cases must map case names to dimension maxima")
+        for name, maxima in declared.items():
+            if (not isinstance(name, str) or not name.strip()
+                    or not isinstance(maxima, dict) or not maxima
+                    or any(not isinstance(key, str) or not key.strip()
+                           or type(value) is not int or value <= 0
+                           for key, value in maxima.items())):
+                raise ValueError(f"Malformed max_geometry_cases entry: {name!r}")
         if not dims:
             return None
-        marker = _tb_maxgeo_pairs(tb_path)
-        # run3-followups: single-sourced demand partition (bfm_lib.maxgeo).
-        # `missing` is provably identical to the old value-set computation;
-        # `value_only` newly NAMES the dims whose only evidence is a value
-        # collision with another marker pair, so the gate's number and the
-        # TB's confession finally agree.
-        _demand = _maxgeo_lib.maxgeo_demand(dims, marker)
-        missing = _demand.missing
-        value_only = _demand.value_only
-        if not missing:
-            # run3-followups: an evaluated PASS is a verdict, not a silence --
-            # the caller logs it so a suppressed gate can never read as green.
-            return {"verdict": "pass", "declared_dims": dims,
-                    "marker_pairs": marker,
-                    "value_only_dims": value_only}
-        scoped = _maxgeo_conformance_scope(
-            project_root, tb_path, tb_result, dims, marker, missing)
-        if scoped is not None:
-            return scoped
-        # WP-25: the engine's own deterministic BFM is DUT-blind and cannot
-        # co-tune around the declared maxima (the co-tuning this gate exists
-        # to catch). A fixed-geometry design (N=256 FFT) attains its maximum on
-        # every case yet never matches the value heuristic. Advisory, loudly.
-        if ((tb_result or {}).get("deterministic_bfm")
-                and (tb_result or {}).get("contract")
-                and not (tb_result or {}).get("conformance_only")):
-            return {
-                "advisory": True,
-                "scope": "deterministic-bfm",
-                "uncovered_dims": missing,
-                "value_only_dims": value_only,
-                "declared_dims": dims,
-                "marker_pairs": marker,
-                "reason": (
-                    "MAX-GEOMETRY gate: the engine's deterministic, DUT-blind "
-                    f"BFM drove this run; declared maxima {sorted(missing)} are "
-                    "not individually proven by marker value -- recorded as a "
-                    "loud advisory gap, not a hard failure."
-                ),
-            }
-        # run3-followups: a functional MAXIMUM-CONFIGURATION case (baked by the
-        # deterministic codegen, advertised via # MAXGEO_CASE) drives the max
-        # config register value and the full IN/OUT payload extents end-to-end
-        # against the golden -- the 2^n index/address wrap class this gate
-        # exists to catch IS exercised. Remaining per-dimension attainment is
-        # downgraded to a LOUD advisory gap (carried-forward defect), the same
-        # treatment as the bus-scoped conformance path. The gate stays HARD
-        # when no such case exists or its extents miss the declared maxima.
-        case = _tb_maxgeo_case(tb_path)
-        if case:
-            dim_values = set(dims.values())
-            attained = all(
-                isinstance(case.get(k), int) and case[k] in dim_values
-                for k in ("cfg0", "in_bytes", "out_bytes")
-            )
+        scope = {"declared_dims": dims, "marker_pairs": _tb_maxgeo_pairs(tb_path),
+                 "testbench_case_mentions": _tb_maxgeo_mentions(tb_path, dims)}
+        if not declared:
+            return {**scope, "verdict": "not_declared",
+                    "reason": "maximum geometry not owner-certified (no max_geometry_cases declared)",
+                    "uncovered_dims": dims, "executed_maximum_cases": []}
+        executed = (sim_result or {}).get("executed_cases") or []
+        if not isinstance(executed, list) or any(not isinstance(name, str) for name in executed):
+            raise ValueError("Executed case evidence must be a list of exact case names")
+        if (sim_result or {}).get("passed") is not True:
+            executed = []
+        covered = {}
+        qualifying = []
+        for name, maxima in declared.items():
+            if name not in executed:
+                continue
+            attained = {key: value for key, value in dims.items()
+                        if type(maxima.get(key)) is int and maxima[key] == value}
             if attained:
-                return {
-                    "advisory": True,
-                    "scope": "functional-max-case",
-                    "uncovered_dims": missing,
-                    "value_only_dims": value_only,
-                    "declared_dims": dims,
-                    "marker_pairs": marker,
-                    "functional_max_case": case,
-                    "reason": (
-                        "MAX-GEOMETRY gate: functional max-configuration case "
-                        f"{case} drives the maximum configuration and full "
-                        "payload extents end-to-end against the golden "
-                        "reference, exercising the 2^n index/address wrap "
-                        "class. Per-dimension attainment for "
-                        f"{sorted(missing)} is not individually proven -- "
-                        "recorded as a loud advisory gap, not a hard failure."
-                    ),
-                }
-        reason = (
-            "MAX-GEOMETRY DV GATE FAILED: the design declares dimensional "
-            "maxima but the testbench does not exercise them. A chip can pass "
-            "every fixed-small-geometry test yet ship a truncated index/address/"
-            "counter width that wraps at a 2^n boundary BELOW the declared "
-            "maximum (the class killer). The testbench MUST include at least one "
-            "MAX-GEOMETRY test case and advertise it with a "
-            "`# MAXGEO: <dim_name>=<value>` marker covering EVERY declared "
-            "dimension at its maximum.\n"
-            f"  declared maxima : {dims}\n"
-            f"  marker pairs    : {marker or '(no # MAXGEO marker found)'}\n"
-            f"  uncovered dims  : {missing}\n"
-            f"  value-collision-only (not individually proven): {value_only}\n"
-            "Fix: regenerate/edit the testbench to drive a max-geometry case "
-            "(sparse/short content at the maximum dimensions is acceptable if a "
-            "full workload is too slow -- the point is to exercise the index/"
-            "address widths at maximum extent) and emit the marker."
-        )
-        return {"reason": reason, "declared_dims": dims,
-                "marker_pairs": marker, "uncovered_dims": missing,
-                "value_only_dims": value_only}
-    except Exception:  # noqa: BLE001
-        return None
+                qualifying.append(name)
+                covered.update(attained)
+        missing = {key: value for key, value in dims.items() if key not in covered}
+        return {"verdict": "unknown" if missing else "pass",
+                "reason": ("MAX-GEOMETRY unknown: no successful executed owner-declared maximum case covers "
+                           f"{missing}; markers describe declared scope only") if missing else
+                          "Executed owner-declared maximum cases cover every declared dimension",
+                **scope,
+                "uncovered_dims": missing, "executed_maximum_cases": qualifying}
+    except Exception as exc:  # malformed declaration/evidence cannot disable the gate
+        return {"verdict": "unknown", "reason": f"Maximum-case evidence unavailable: {exc}"}
 
 
 async def integration_dv_node(state: OrchestratorState) -> dict:
@@ -8417,9 +8375,9 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
                             )
                             if tb_result.get("maxgeo_covered"):
                                 log(
-                                    "  [INTEG-DV] MAX-EXTENT bus coverage: "
-                                    f"{tb_result['maxgeo_covered']} driven at "
-                                    "maximum; NOT covered (no compute oracle): "
+                                    "  [INTEG-DV] Declared MAX-EXTENT bus stimulus scope: "
+                                    f"{tb_result['maxgeo_covered']}; "
+                                    "outside scope (no compute oracle): "
                                     f"{tb_result.get('maxgeo_uncovered', {})}",
                                     YELLOW,
                                 )
@@ -8679,72 +8637,51 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
             design_name, top_rtl_path, block_rtl_paths, tb_path,
             project_root=_pr(state),
         )
+        if _stale_candidate(sim_result):
+            log("  [INTEG-DV] candidate manifest is STALE (RTL changed after "
+                "adoption) -- re-running the integration check to re-adopt "
+                "before simulating", YELLOW)
+            write_graph_event(pr, "Integration DV", "candidate_stale", {
+                "log": str(sim_result.get("log", ""))[:300]})
+            return {"integration_dv_result": _reintegrate_result("integration_dv", sim_result),
+                    "pipeline_done": False}
 
         passed = sim_result.get("passed", False)
         sim_log = sim_result.get("log", "")
 
-        # MAX-GEOMETRY gate (rung3-fixes-2): a green sim is NOT sufficient when
-        # the design declares dimensional maxima but the TB never exercised
-        # them -- that is how a truncated index-width bug ships in a "verified"
-        # chip. Flip the DV to failed -> existing failure interrupt.
+        # Maximum certification is mandatory only for owner-declared cases.
+        # Policy-only dimensions remain explicitly not_declared and non-blocking.
         # run3-followups: the gate runs on EVERY passing cycle, including
         # operator-reused TBs (fix_tb/fix_rtl). "Trusted as-is" silently
         # DISARMED the gate on exactly the cycles that deserve more scrutiny --
         # proven live when a clobbered 2-test TB passed DV with no MAXGEO line
         # at all. Every evaluated outcome logs a verdict; silence now means
         # only "gate disabled or no declared dims".
+        _mg = None
         if passed:
-            _mg = _maxgeo_gate_verdict(pr, tb_path, tb_result)
+            _mg = _maxgeo_gate_verdict(pr, tb_path, tb_result, sim_result=sim_result)
+            if _mg is not None:
+                write_graph_event(pr, "Maximum Geometry", "maxgeo_verdict", _mg)
             if reuse_existing_tb and _mg is not None:
                 log("  [INTEG-DV] MAX-GEOMETRY gate: evaluating an OPERATOR-"
                     "REUSED testbench (fix_tb/fix_rtl) -- operator edits get "
                     "more scrutiny, not less.", YELLOW)
             if _mg is not None and _mg.get("verdict") == "pass":
                 log("  [INTEG-DV] MAX-GEOMETRY gate PASS -- every declared "
-                    f"maximum appears in the TB markers: "
-                    f"{_mg.get('marker_pairs', {})}", GREEN)
+                    f"maximum was covered by executed owner cases: "
+                    f"{_mg.get('executed_maximum_cases', [])}", GREEN)
                 write_graph_event(pr, "Integration DV", "maxgeo_gate_pass", {
                     "gate": "maxgeo",
-                    "marker_pairs": _mg.get("marker_pairs", {}),
+                    "executed_maximum_cases": _mg.get("executed_maximum_cases", []),
                 })
-            elif _mg is not None and _mg.get("advisory"):
-                # SCOPED, not silent. Either the engine's compute-lane-
-                # independent conformance TB drove every BUS maximum and cannot
-                # drive the compute lane, or a functional max-configuration
-                # case covered the wrap class without per-dimension proof; the
-                # gap is logged RED, written to the event stream, and carried
-                # forward as a defect so the final report and validation DV
-                # both see it.
-                _mg_scope = _mg.get("scope", "bus-contract-only")
-                log("  [INTEG-DV] MAX-GEOMETRY gate ADVISORY "
-                    f"(scope={_mg_scope}) -- this is NOT full max-geometry "
-                    f"coverage. NOT COVERED: {_mg['uncovered_dims']}", RED)
-                write_graph_event(pr, "Integration DV", "maxgeo_gate_scoped", {
-                    "gate": "maxgeo",
-                    "scope": _mg_scope,
-                    "bus_covered": _mg.get("bus_covered", {}),
-                    "functional_max_case": _mg.get("functional_max_case", {}),
-                    "uncovered_dims": _mg.get("uncovered_dims", {}),
-                })
-                record_carried_forward_defect(pr, {
-                    "gate": "maxgeo",
-                    "kind": "max_geometry_not_covered",
-                    "advisory": True,
-                    "unmodeled": (
-                        "dimensional maxima never individually driven at "
-                        f"maximum extent: {_mg.get('uncovered_dims', {})} "
-                        f"(scope={_mg_scope})"
-                    ),
-                    "first_divergence_block": "",
-                    "note": _mg["reason"],
-                })
-                sim_log = ((sim_log + "\n\n") if sim_log else "") + _mg["reason"]
+            elif _mg is not None and _mg.get("verdict") == "not_declared":
+                log(f"  [INTEG-DV] MAX-GEOMETRY not_declared -- {_mg['reason']}", YELLOW)
             elif _mg is not None:
                 passed = False
                 sim_log = ((sim_log + "\n\n") if sim_log else "") + _mg["reason"]
                 span.set_attribute("maxgeo_gate_failed", True)
                 log("  [INTEG-DV] MAX-GEOMETRY gate FAILED -- flipping DV to "
-                    f"failed: uncovered={_mg['uncovered_dims']}", RED)
+                    f"failed: uncovered={_mg.get('uncovered_dims', {})}", RED)
 
         # v3 Section 2: CHIP-LEVEL measured throughput. The deterministic-BFM TB
         # wrote integration_throughput.json (op window START-committed -> DONE
@@ -8800,6 +8737,7 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
                     "test_count": test_count,
                     "testbench_path": tb_path,
                     "sim_log_path": sim_result.get("log_path", ""),
+                    "max_geometry": _mg,
                     "design_name": design_name,
                     "measured_cyc_per_op_chip": (chip_tput or {}).get(
                         "measured_cyc_per_op_chip"),
@@ -8842,6 +8780,7 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
             "test_count": test_count,
             "sim_log": sim_log[-3000:],
             "sim_log_path": sim_result.get("log_path", ""),
+            "max_geometry": _mg,
             "block_rtl_paths": block_rtl_paths,
             "contract_audit": contract_audit,
             "contract_audit_path": contract_audit.get("audit_path", ""),
@@ -8927,6 +8866,7 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
                 "testbench_path": tb_path,
                 "tb_writer_flags": _tb_writer_flags(tb_result),
                 "sim_log_path": sim_result.get("log_path", ""),
+                "max_geometry": _mg,
                 "design_name": design_name,
                 "contract_audit": contract_audit,
                 "contract_audit_path": contract_audit.get("audit_path", ""),
@@ -9015,18 +8955,42 @@ async def integration_dv_decision_node(state: OrchestratorState) -> dict:
     }
 
 
+def _stale_candidate(sim_result: dict) -> bool:
+    """WP-76: the authoritative simulation refused a stale candidate manifest
+    (someone edited the RTL after adoption -- typically a chip-lead fix_rtl).
+    That is not a functional failure: the design must be re-integrated and
+    re-adopted, then simulated."""
+    if not isinstance(sim_result, dict) or sim_result.get("passed"):
+        return False
+    return (sim_result.get("kind") == "candidate_mismatch"
+            and "stale" in str(sim_result.get("log", "")).lower())
+
+
+def _reintegrate_result(stage: str, sim_result: dict) -> dict:
+    return {
+        "passed": False, "candidate_stale": True, "action_taken": "reintegrate",
+        "pending_decision": False, "phase": stage,
+        "reason": ("the candidate manifest is stale (RTL changed after adoption); "
+                   "re-running the integration check to re-adopt the design"),
+        "error": str(sim_result.get("log", ""))[:500],
+    }
+
+
 def route_after_integration_dv_decision(state: OrchestratorState) -> str:
     """Route the operator's decision back into integration DV or terminate."""
     result = state.get("integration_dv_result") or {}
     if result.get("action_taken") == "revise":
         return "init_tier"
-    if result.get("action_taken") in ("retry", "fix_rtl", "fix_tb"):
+    if result.get("action_taken") == "fix_rtl":
+        return "integration_check"   # WP-76: edited RTL must be re-adopted first
+    if result.get("action_taken") in ("retry", "fix_tb"):
         return "integration_dv"
     return END
 
 
 route_after_integration_dv_decision.__edge_labels__ = {
-    "integration_dv": "RETRY / FIX",
+    "integration_dv": "RETRY / FIX TB",
+    "integration_check": "FIX RTL (re-adopt)",
     "init_tier": "REVISE",
     END: "DONE",
 }
@@ -9367,9 +9331,11 @@ def route_after_integration_dv(state: OrchestratorState) -> str:
     result = state.get("integration_dv_result") or {}
     if result.get("passed") is True:
         return "validation_dv"
+    if result.get("candidate_stale") or result.get("action_taken") == "fix_rtl":
+        return "integration_check"   # WP-76
     if result.get("pending_decision"):
         return "integration_dv_decision"
-    if result.get("action_taken") in ("retry", "fix_rtl", "fix_tb"):
+    if result.get("action_taken") in ("retry", "fix_tb"):
         return "integration_dv"
     return END
 
@@ -9377,6 +9343,7 @@ def route_after_integration_dv(state: OrchestratorState) -> str:
 route_after_integration_dv.__edge_labels__ = {
     "validation_dv": "Validation DV",
     "integration_dv_decision": "Park for decision",
+    "integration_check": "Re-adopt (RTL changed)",
     "integration_dv": "Retry",
     END: "DONE",
 }
@@ -9416,11 +9383,20 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
         # Honest-skip (recorded, non-blocking) when no artifact/tooling; a
         # divergence/fidelity break FAILS validation_dv with the case evidence.
         try:
+            from orchestrator.harness.task_adapter import run_task_adapter
             from orchestrator.langgraph.acceptance_dv import run_acceptance_dv
 
+            # WP-41: a task ADAPTER (inputs/task_adapter.py) runs the task's
+            # own driver/checker on the candidate and is the acceptance
+            # authority when present; the engine's native stream harness is
+            # the fallback for tasks without one.
             _acc = await asyncio.to_thread(
-                run_acceptance_dv, pr, top_rtl_path, block_rtl_paths,
+                run_task_adapter, pr, top_rtl_path, block_rtl_paths,
             )
+            if _acc is None:
+                _acc = await asyncio.to_thread(
+                    run_acceptance_dv, pr, top_rtl_path, block_rtl_paths,
+                )
             span.set_attribute("acceptance_dv_passed", bool(_acc.get("passed")))
             span.set_attribute("acceptance_dv_skipped", bool(_acc.get("skipped")))
             write_graph_event(pr, "Validation DV", "acceptance_dv", {
@@ -9445,9 +9421,9 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
                     for c in _acc_cases
                 ]
                 _acc_log = (
-                    "RTL ACCEPTANCE DV FAILED (mission-scale stream run + the "
-                    "task's acceptance predicate):\n" + "\n".join(_acc_lines)
-                    + "\nCaptured RTL output streams: "
+                    "TASK ACCEPTANCE FAILED (the task's declared oracle on the "
+                    "assembled candidate):\n" + "\n".join(_acc_lines)
+                    + "\nCaptured oracle artifacts: "
                     + (_acc.get("captured_dir") or str(Path(pr) / ".coresmith" / "acceptance_dv"))
                     + "\nViolations: " + json.dumps(
                         _acc.get("violations", []), default=str)[:1500]
@@ -9461,17 +9437,16 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
                     "affected_blocks": [],
                     "outer_agent_summary": (
                         f"{sum(1 for c in _acc_cases if c.get('ok') is False)}/"
-                        f"{len(_acc_cases)} mission-scale acceptance case(s) fail "
-                        "the task's acceptance predicate (e.g. the external "
-                        "decoder rejects the stream). The block-level and "
-                        "validation testbenches all passed, so the defect is in "
-                        "something they never checked end-to-end: run the task's "
-                        "grader/decoder on the captured stream to localise it."
+                        f"{len(_acc_cases)} acceptance case(s) fail the task's "
+                        "declared oracle (per-case kind/detail above). Earlier "
+                        "block-level checks passed, so the defect is in what they "
+                        "did not measure end-to-end: run the task's checker on the "
+                        "captured artifacts to localise it."
                     ),
                     "suggested_fix": (
-                        "Grade the captured stream(s) offline with the task's "
-                        "grader (inputs/), read its error (which macroblock / "
-                        "sample / field), map that to the responsible block, "
+                        "Run the task's checker offline on the captured "
+                        "artifacts, read its error (which unit / sample / field), "
+                        "map that to the responsible block, "
                         "fix the RTL (fix_rtl) or the block's spec (revise)."
                     ),
                 }
@@ -9502,7 +9477,16 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
                         ("The task's acceptance oracle rejected the chip. Per "
                          "case: status=1 (watchdog) means the case never "
                          "completed within its cycle budget; criterion="
-                         "acceptance_predicate means the output was wrong. This "
+                         "acceptance_predicate / task_adapter_functional means "
+                         "the output was wrong; kind=budget_fail means the "
+                         "output was right but over the task's cycle budget "
+                         "(throughput) -- a real failure of the published "
+                         "grader, fixed in the RTL's architecture, not by "
+                         "changing the budget (and if an internal ERS/KPI "
+                         "requirement demands the slower cadence, THAT "
+                         "requirement is wrong: revise it); kind=boundary_mismatch means "
+                         "the candidate's top module is not the task's graded "
+                         "boundary (fix the integration, never the adapter). This "
                          "is the published grader's verdict class -- there is no "
                          "testbench to relax and fix_tb is not offered. Grade the "
                          "captured output offline, localise the block, fix it "
@@ -9536,8 +9520,54 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
                                       if k != "cases"},
                     "violations": _acc.get("violations", []),
                 }, "pipeline_done": False}
-        except Exception as _exc:  # noqa: BLE001 - never crash the node
-            log(f"  [ACCEPTANCE-DV] gate error (skipped): {_exc}", YELLOW)
+        except Exception as _exc:  # noqa: BLE001
+            # WP-52: a required oracle that RAISES parks as oracle_incomplete;
+            # it never "skips" into the rest of signoff.
+            log(f"  [ACCEPTANCE-DV] gate raised: {_exc!r} -- parking", RED)
+            _exc_acc = {
+                "passed": False, "skipped": False, "oracle_incomplete": True,
+                "kind": "infrastructure_error",
+                "reason": f"acceptance gate raised: {_exc!r}", "cases": [],
+                "violations": [{"type": "acceptance_dv_failure",
+                                "criterion": "acceptance_dv_oracle_incomplete",
+                                "kind": "infrastructure_error",
+                                "suggested_fix": "Not an RTL verdict: the acceptance gate "
+                                                 "itself failed. Fix the adapter / engine, "
+                                                 "then retry."}],
+            }
+            _exc_audit = {
+                "category": "ACCEPTANCE_ORACLE_INCOMPLETE", "local_fix_possible": None,
+                "recommended_action": "retry", "affected_blocks": [],
+                "outer_agent_summary": f"the acceptance gate raised: {str(_exc)[:400]}",
+                "suggested_fix": "retry after the operator fixes the adapter / engine",
+            }
+            write_graph_event(pr, "Validation DV", "graph_node_exit", {
+                "action": "pending_decision", "passed": False,
+                "phase": "acceptance_dv", "error": str(_exc)[:300],
+            })
+            return {"validation_dv_result": {
+                "passed": False, "pending_decision": True,
+                "interrupt_payload": {
+                    "type": "validation_dv_failure", "phase": "acceptance_dv",
+                    "design_name": design_name, "top_rtl_path": top_rtl_path,
+                    "testbench_path": "", "test_count": 0, "requirement_count": 0,
+                    "sim_log": f"acceptance gate raised: {_exc!r}"[-3000:],
+                    "sim_log_path": "", "block_rtl_paths": block_rtl_paths,
+                    "contract_audit": _exc_audit, "contract_audit_path": "",
+                    "acceptance_dv": _exc_acc,
+                    "supported_actions": ["retry", "abort"],
+                    "outer_agent_guidance": (
+                        "The acceptance ORACLE raised an exception (see sim_log). "
+                        "This is NOT an RTL verdict: do not change RTL for it; the "
+                        "operator fixes the adapter / engine, then retry."),
+                    "reference_files": {"top_rtl": top_rtl_path},
+                },
+                "error": f"acceptance gate raised: {_exc!r}",
+                "phase": "acceptance_dv", "test_count": 0, "requirement_count": 0,
+                "testbench_path": "", "design_name": design_name,
+                "contract_audit": _exc_audit, "contract_audit_path": "",
+                "acceptance_dv": _exc_acc, "violations": _exc_acc["violations"],
+            }, "pipeline_done": False}
 
         if not top_rtl_path or not Path(top_rtl_path).exists():
             msg = "No top-level RTL available for Validation DV"
@@ -9760,61 +9790,48 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
             design_name, top_rtl_path, block_rtl_paths, tb_path,
             sim_scope="validation", project_root=_pr(state),
         )
+        if _stale_candidate(sim_result):
+            log("  [VALIDATION-DV] candidate manifest is STALE (RTL changed after "
+                "adoption) -- re-running the integration check to re-adopt "
+                "before simulating", YELLOW)
+            write_graph_event(pr, "Validation DV", "candidate_stale", {
+                "log": str(sim_result.get("log", ""))[:300]})
+            return {"validation_dv_result": _reintegrate_result("validation_dv", sim_result),
+                    "pipeline_done": False}
 
         passed = sim_result.get("passed", False)
         sim_log = sim_result.get("log", "")
 
-        # MAX-GEOMETRY gate (rung3-fixes-2): validation DV must exercise the
-        # declared dimensional maxima, not just a directed small-geometry prefix
-        # -- otherwise a geometry-dependent index/address-width truncation ships
-        # verified. Flip to failed -> existing failure interrupt. Operator-reused
-        # TBs are trusted.
+        # Same owner-certification contract as integration DV: not_declared is
+        # scope evidence only and never flips a passing simulation to failed.
         # run3-followups: same contract as integration_dv -- the gate runs on
         # EVERY passing cycle (operator-reused TBs get MORE scrutiny) and every
         # evaluated outcome logs a verdict; a pass returns a dict, never None.
+        _mg = None
         if passed:
-            _mg = _maxgeo_gate_verdict(pr, tb_path, tb_result)
+            _mg = _maxgeo_gate_verdict(pr, tb_path, tb_result, sim_result=sim_result)
+            if _mg is not None:
+                write_graph_event(pr, "Maximum Geometry", "maxgeo_verdict", _mg)
             if reuse_existing_tb and _mg is not None:
                 log("  [VALIDATION-DV] MAX-GEOMETRY gate: evaluating an "
                     "OPERATOR-REUSED testbench (fix_tb/fix_rtl) -- operator "
                     "edits get more scrutiny, not less.", YELLOW)
             if _mg is not None and _mg.get("verdict") == "pass":
                 log("  [VALIDATION-DV] MAX-GEOMETRY gate PASS -- every "
-                    f"declared maximum appears in the TB markers: "
-                    f"{_mg.get('marker_pairs', {})}", GREEN)
+                    f"declared maximum was covered by executed owner cases: "
+                    f"{_mg.get('executed_maximum_cases', [])}", GREEN)
                 write_graph_event(pr, "Validation DV", "maxgeo_gate_pass", {
                     "gate": "maxgeo",
-                    "marker_pairs": _mg.get("marker_pairs", {}),
+                    "executed_maximum_cases": _mg.get("executed_maximum_cases", []),
                 })
-            elif _mg is not None and _mg.get("advisory"):
-                _mg_scope = _mg.get("scope", "bus-contract-only")
-                log("  [VALIDATION-DV] MAX-GEOMETRY gate ADVISORY "
-                    f"(scope={_mg_scope}) -- NOT full max-geometry coverage. "
-                    f"NOT COVERED: {_mg['uncovered_dims']}", RED)
-                write_graph_event(pr, "Validation DV", "maxgeo_gate_scoped", {
-                    "gate": "maxgeo",
-                    "scope": _mg_scope,
-                    "uncovered_dims": _mg.get("uncovered_dims", {}),
-                })
-                record_carried_forward_defect(pr, {
-                    "gate": "maxgeo",
-                    "kind": "max_geometry_not_covered",
-                    "advisory": True,
-                    "unmodeled": (
-                        "dimensional maxima never individually driven at "
-                        f"maximum extent: {_mg.get('uncovered_dims', {})} "
-                        f"(scope={_mg_scope})"
-                    ),
-                    "first_divergence_block": "",
-                    "note": _mg["reason"],
-                })
-                sim_log = ((sim_log + "\n\n") if sim_log else "") + _mg["reason"]
+            elif _mg is not None and _mg.get("verdict") == "not_declared":
+                log(f"  [VALIDATION-DV] MAX-GEOMETRY not_declared -- {_mg['reason']}", YELLOW)
             elif _mg is not None:
                 passed = False
                 sim_log = ((sim_log + "\n\n") if sim_log else "") + _mg["reason"]
                 span.set_attribute("maxgeo_gate_failed", True)
                 log("  [VALIDATION-DV] MAX-GEOMETRY gate FAILED -- flipping DV "
-                    f"to failed: uncovered={_mg['uncovered_dims']}", RED)
+                    f"to failed: uncovered={_mg.get('uncovered_dims', {})}", RED)
 
         if passed:
             # Chip-top synthesizability gate (fix #5 + #2): pipeline_done is
@@ -9841,6 +9858,7 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
                         "passed": True,
                         "chip_top_synthesizable": False,
                         "synth_fail_reason": _synth_reason,
+                        "max_geometry": _mg,
                         "test_count": test_count,
                         "design_name": design_name,
                     },
@@ -9879,6 +9897,7 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
                         "passed": True,
                         "die_budget_ok": False,
                         "die_rollup_reason": _roll.reason,
+                        "max_geometry": _mg,
                         "die_total_mm2": round(_roll.total_um2 / 1e6, 4),
                         "die_budget_mm2": _roll.die_budget_mm2,
                         "test_count": test_count,
@@ -9911,6 +9930,7 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
                     "requirement_count": requirement_count,
                     "testbench_path": tb_path,
                     "sim_log_path": sim_result.get("log_path", ""),
+                    "max_geometry": _mg,
                     "design_name": design_name,
                     "chip_top_synthesizable": True,
                 },
@@ -9951,6 +9971,7 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
             "requirement_count": requirement_count,
             "sim_log": sim_log[-3000:],
             "sim_log_path": sim_result.get("log_path", ""),
+            "max_geometry": _mg,
             "block_rtl_paths": block_rtl_paths,
             "contract_audit": contract_audit,
             "contract_audit_path": contract_audit.get("audit_path", ""),
@@ -10006,6 +10027,7 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
                 "testbench_path": tb_path,
                 "tb_writer_flags": _tb_writer_flags(tb_result),
                 "sim_log_path": sim_result.get("log_path", ""),
+                "max_geometry": _mg,
                 "design_name": design_name,
                 "contract_audit": contract_audit,
                 "contract_audit_path": contract_audit.get("audit_path", ""),
@@ -10081,13 +10103,16 @@ def route_after_validation_dv_decision(state: OrchestratorState) -> str:
     result = state.get("validation_dv_result") or {}
     if result.get("action_taken") == "revise":
         return "init_tier"
-    if result.get("action_taken") in ("retry", "fix_rtl", "fix_tb"):
+    if result.get("action_taken") == "fix_rtl":
+        return "integration_check"   # WP-76: edited RTL must be re-adopted first
+    if result.get("action_taken") in ("retry", "fix_tb"):
         return "validation_dv"
     return END
 
 
 route_after_validation_dv_decision.__edge_labels__ = {
-    "validation_dv": "RETRY / FIX",
+    "validation_dv": "RETRY / FIX TB",
+    "integration_check": "FIX RTL (re-adopt)",
     "init_tier": "REVISE",
     END: "DONE",
 }
@@ -10096,15 +10121,18 @@ route_after_validation_dv_decision.__edge_labels__ = {
 def route_after_validation_dv(state: OrchestratorState) -> str:
     """Route after validation DV: terminal frontend pipeline."""
     result = state.get("validation_dv_result") or {}
+    if result.get("candidate_stale") or result.get("action_taken") == "fix_rtl":
+        return "integration_check"   # WP-76
     if result.get("pending_decision"):
         return "validation_dv_decision"
-    if result.get("action_taken") in ("retry", "fix_rtl", "fix_tb"):
+    if result.get("action_taken") in ("retry", "fix_tb"):
         return "validation_dv"
     return END
 
 
 route_after_validation_dv.__edge_labels__ = {
     "validation_dv_decision": "Park for decision",
+    "integration_check": "Re-adopt (RTL changed)",
     "validation_dv": "Retry",
     END: "DONE",
 }
@@ -10127,6 +10155,8 @@ async def final_report_node(state: OrchestratorState) -> dict:
     artifact. Never raises: a report failure must not fail the pipeline.
     """
     pr = _pr(state)
+    # Candidate records belong to adoption/invalidation, and must survive
+    # reporting so both automatic and later explicit backend starts can read them.
     try:
         from orchestrator.langgraph.final_report import (
             build_final_report,
@@ -10261,6 +10291,7 @@ def build_pipeline_graph(checkpointer=None):
             "validation_dv": "validation_dv",
             "integration_dv": "integration_dv",
             "integration_dv_decision": "integration_dv_decision",
+            "integration_check": "integration_check",
             END: "final_report",
         },
     )
@@ -10268,6 +10299,7 @@ def build_pipeline_graph(checkpointer=None):
         "integration_dv_decision", route_after_integration_dv_decision,
         {
             "integration_dv": "integration_dv",
+            "integration_check": "integration_check",
             "init_tier": "init_tier",
             END: "final_report",
         },
@@ -10277,6 +10309,7 @@ def build_pipeline_graph(checkpointer=None):
         {
             "validation_dv": "validation_dv",
             "validation_dv_decision": "validation_dv_decision",
+            "integration_check": "integration_check",
             END: "final_report",
         },
     )
@@ -10284,6 +10317,7 @@ def build_pipeline_graph(checkpointer=None):
         "validation_dv_decision", route_after_validation_dv_decision,
         {
             "validation_dv": "validation_dv",
+            "integration_check": "integration_check",
             "init_tier": "init_tier",
             END: "final_report",
         },

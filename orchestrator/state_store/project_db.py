@@ -34,6 +34,7 @@ Design rules
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -637,6 +638,11 @@ class ProjectDB:
         return _uj(row["value_json"], None) if row else None
 
     def set_result(self, block: str, kind: str, value: dict, report_path: str | None = None) -> None:
+        if kind == "best" and "spec_sha256" not in value:
+            import hashlib
+            spec = self.root / "arch/uarch_specs" / f"{block}.md"
+            if spec.is_file():
+                value = {**value, "spec_sha256": hashlib.sha256(spec.read_bytes()).hexdigest()}
         with self._tx() as db:
             db.execute(
                 "INSERT INTO results(block, kind, value_json, report_path, ts) VALUES (?, ?, ?, ?, ?) "
@@ -662,6 +668,26 @@ class ProjectDB:
         if kind == "best":
             self.export_block_views(block)
 
+    def invalidate_results_for_specs(self, spec_hashes: dict[str, str]) -> list[str]:
+        """Archive and clear best results for different (or unrecorded) spec bytes."""
+        invalidated = []
+        with self._tx() as db:
+            for block, digest in spec_hashes.items():
+                row = db.execute("SELECT value_json FROM results WHERE block=? AND kind='best'",
+                                 (block,)).fetchone()
+                best = _uj(row["value_json"], {}) if row else None
+                if best is None or best.get("spec_sha256") == digest:
+                    continue
+                archived = {"previous_best": best, "adopted_spec_sha256": digest,
+                            "reason": "reviewed spec changed; verification required"}
+                db.execute("INSERT OR REPLACE INTO results(block,kind,value_json,ts) VALUES(?,?,?,?)",
+                           (block, "spec_invalidated", _j(archived), time.time()))
+                db.execute("DELETE FROM results WHERE block=? AND kind='best'", (block,))
+                invalidated.append(block)
+        for block in invalidated:
+            self.export_block_views(block)
+        return invalidated
+
     def results(self, block: str | None = None) -> list[dict]:
         with self._conn() as db:
             if block:
@@ -680,18 +706,65 @@ class ProjectDB:
         os.chmod(tmp, 0o444)
         os.replace(tmp, target)
 
+    # WP-75: the registry views are read-only by convention, but the chip lead
+    # (and operators) edit them with file tools -- the prompts tell them to fix
+    # `.coresmith/interface_contracts.json` on disk. Re-exporting the database
+    # over such an edit silently restored 24 illegal port names on a live run.
+    # An edited view is therefore IMPORTED into the database before the views
+    # are regenerated, so the on-disk edit becomes canonical instead of lost.
+    def _adopt_external_view_edit(self, target: Path, importer, kind) -> bool:
+        if not target.exists():
+            return False
+        try:
+            data = target.read_bytes()
+        except OSError:
+            return False
+        recorded = self.get_setting(f"view_sha:{target.name}")
+        if not recorded:
+            return False  # never exported by this database: nothing to compare
+        current = hashlib.sha256(data).hexdigest()
+        if current == recorded:
+            return False
+        try:
+            parsed = json.loads(data.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return False  # unparsable edit: the database wins, the file is regenerated
+        if not isinstance(parsed, kind):
+            return False
+        importer(parsed)
+        self.set_setting(f"view_adopted:{target.name}", current)
+        return True
+
+    def _export_view(self, target: Path, value) -> None:
+        self._write_view(target, value)
+        self.set_setting(f"view_sha:{target.name}",
+                         hashlib.sha256(target.read_bytes()).hexdigest())
+
     def export_views(self) -> None:
-        """Regenerate the read-only registry views from the database."""
-        cdir = self.path.parent
-        bd = self.block_diagram()
-        if bd:
-            self._write_view(cdir / "block_diagram.json", bd)
-        specs = self.block_specs()
-        if specs:
-            self._write_view(cdir / "block_specs.json", specs)
-        contracts = self.contracts()
-        if contracts:
-            self._write_view(cdir / "interface_contracts.json", contracts)
+        """Regenerate the read-only registry views from the database, after
+        adopting any on-disk edit made to them since the last export (WP-75)."""
+        if getattr(self, "_exporting_views", False):
+            return
+        self._exporting_views = True
+        try:
+            cdir = self.path.parent
+            self._adopt_external_view_edit(cdir / "block_diagram.json",
+                                           self.import_block_diagram, dict)
+            self._adopt_external_view_edit(cdir / "block_specs.json",
+                                           self.import_block_specs, list)
+            self._adopt_external_view_edit(cdir / "interface_contracts.json",
+                                           self.import_contracts, dict)
+            bd = self.block_diagram()
+            if bd:
+                self._export_view(cdir / "block_diagram.json", bd)
+            specs = self.block_specs()
+            if specs:
+                self._export_view(cdir / "block_specs.json", specs)
+            contracts = self.contracts()
+            if contracts:
+                self._export_view(cdir / "interface_contracts.json", contracts)
+        finally:
+            self._exporting_views = False
         note = cdir / "STATE.md"
         if not note.exists():
             note.write_text(

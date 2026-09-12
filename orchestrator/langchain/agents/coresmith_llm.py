@@ -293,6 +293,37 @@ def _llm_log_root() -> str:
     )
 
 
+# One argv string is capped by the kernel (MAX_ARG_STRLEN, 128 KiB on Linux).
+# The uArch / RTL system prompts run to several hundred KB and made ``Popen``
+# fail with ``[Errno 7] Argument list too long`` on the Claude CLI path.
+_CLAUDE_INLINE_PROMPT_LIMIT = 65536
+
+
+def _claude_system_prompt_args(system_prompt: str, log_root: str = "") -> list[str]:
+    """``--system-prompt`` argv for the Claude CLI (WP-71).
+
+    Prompts up to ``_CLAUDE_INLINE_PROMPT_LIMIT`` bytes stay inline (byte-identical
+    to the old behaviour). Larger prompts are written once, content-addressed,
+    under ``<log root>/.coresmith/llm_prompts/`` and passed with
+    ``--system-prompt-file`` so the argv never carries them.
+    """
+    import hashlib
+
+    data = system_prompt.encode("utf-8")
+    if len(data) <= _CLAUDE_INLINE_PROMPT_LIMIT:
+        return ["--system-prompt", system_prompt]
+    base = (Path(log_root) / ".coresmith" / "llm_prompts" if log_root
+            else Path(tempfile.gettempdir()) / "coresmith-llm-prompts")
+    base.mkdir(parents=True, exist_ok=True)
+    path = base / f"system-{hashlib.sha256(data).hexdigest()[:16]}.md"
+    if not path.exists() or path.read_bytes() != data:
+        fd, tmp = tempfile.mkstemp(dir=base, prefix=".system-", suffix=".tmp")
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+        os.replace(tmp, path)
+    return ["--system-prompt-file", str(path)]
+
+
 def _get_llm_tracer():
     """Lazy import to avoid circular deps at module load time."""
     try:
@@ -1539,7 +1570,7 @@ class ClaudeLLM:
             ])
 
         if system_prompt:
-            cmd.extend(["--system-prompt", system_prompt])
+            cmd.extend(_claude_system_prompt_args(system_prompt, _llm_log_root()))
 
         logger.debug(
             f"Claude CLI invocation: model={resolved_model}, "
@@ -1713,8 +1744,16 @@ class ClaudeLLM:
         resume_session_id: str | None = None,
         supported_flags: frozenset[str] | None = None,
         reasoning_effort: str = "",
+        project_root: str | None = None,
     ) -> list[str]:
         """Construct the ``codex exec [resume <id>]`` argv (testable, no I/O).
+
+        WP-50: the sandbox is REAL unless the operator opts out with
+        ``CORESMITH_CODEX_SANDBOX=danger-full-access``. ``workspace-write``
+        confines the worker's writes to its cwd (a scratch dir inside the
+        project) plus the project root (``--add-dir``); the engine checkout
+        and the home directory are read-only at the OS level. ``project_root``
+        ``None`` resolves ``CORESMITH_PROJECT_ROOT``; "" adds no dir.
 
         ``reasoning_effort`` overrides the model_reasoning_effort tier for this
         call (the architecture specialists pass "xhigh"); empty falls back to
@@ -1735,14 +1774,24 @@ class ClaudeLLM:
         """
         head: list[str] = [codex_path, "exec"]
         is_resume = bool(resume_session_id) and ClaudeLLM._codex_resume_enabled()
+        _bypass_early = (sandbox or "").strip() == "danger-full-access"
+        if (is_resume and supported_flags is not None and not _bypass_early
+                and not {"--sandbox", "--add-dir"} <= set(supported_flags)):
+            # WP-56: never resume WITHOUT the write boundary. A CLI whose
+            # `exec resume` cannot carry --sandbox/--add-dir gets a fresh call.
+            is_resume = False
         if is_resume:
             head += ["resume", resume_session_id]
 
         # (flag, value-or-None) in the original argv order.
+        if project_root is None:
+            project_root = os.environ.get("CORESMITH_PROJECT_ROOT", "").strip()
+        _bypass = (sandbox or "").strip() == "danger-full-access"
         tail_spec: list[tuple[str, str | None]] = [
             ("--json", None),
-            ("--dangerously-bypass-approvals-and-sandbox", None),
+            *([("--dangerously-bypass-approvals-and-sandbox", None)] if _bypass else []),
             ("--sandbox", sandbox),
+            *([("--add-dir", project_root)] if (project_root and not _bypass) else []),
             ("--skip-git-repo-check", None),
             ("-C", workdir),
             ("-c", "model_reasoning_effort=" + (
@@ -1773,6 +1822,7 @@ class ClaudeLLM:
         "--json",
         "--dangerously-bypass-approvals-and-sandbox",
         "--sandbox",
+        "--add-dir",
         "--skip-git-repo-check",
         "-C",
         "-c",

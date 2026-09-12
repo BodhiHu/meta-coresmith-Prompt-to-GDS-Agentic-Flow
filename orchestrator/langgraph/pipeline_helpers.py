@@ -585,10 +585,8 @@ def resolve_python_source(python_source_ref: str, project_root=None) -> str:
     file_path, names = _split_source_ref(python_source_ref)
     if not file_path:
         return ""
-    p = Path(file_path)
-    if not p.is_absolute():
-        p = Path(project_root or PROJECT_ROOT) / file_path
-    if not p.exists() or p.is_dir():
+    p = _locate_python_source(file_path, project_root)
+    if p is None:
         return ""
     try:
         text = p.read_text(encoding="utf-8", errors="replace")
@@ -597,16 +595,37 @@ def resolve_python_source(python_source_ref: str, project_root=None) -> str:
     return _slice_python_source(text, names) if names else text
 
 
+def _locate_python_source(file_path: str, project_root=None):
+    """Find a ``python_source`` file the policy named (WP-72).
+
+    A relative ref is tried against the project root, then the owner's
+    ``inputs/`` directory, then the directory of ``CORESMITH_SOURCE_ROOT``:
+    the architecture policy writes ``ax25_golden.py:run`` or
+    ``inputs/ax25_golden.py:run`` interchangeably, and the owner's reference
+    lives under ``inputs/``. Returns an existing file Path or None."""
+    p = Path(file_path)
+    if p.is_absolute():
+        return p if (p.exists() and not p.is_dir()) else None
+    root = Path(project_root or PROJECT_ROOT)
+    candidates = [root / file_path, root / "inputs" / file_path]
+    src_root = os.environ.get("CORESMITH_SOURCE_ROOT", "").strip()
+    if src_root:
+        base = Path(src_root)
+        base = base if base.is_dir() else base.parent
+        candidates.append(base / file_path)
+    for cand in candidates:
+        if cand.exists() and not cand.is_dir():
+            return cand
+    return None
+
+
 def python_source_file(python_source_ref: str, project_root=None):
     """Resolve just the FILE of a ``python_source`` ref (stripping any ``:name``
     slice suffix). Returns a Path that exists, or None."""
     file_path, _ = _split_source_ref(python_source_ref)
     if not file_path:
         return None
-    p = Path(file_path)
-    if not p.is_absolute():
-        p = Path(project_root or PROJECT_ROOT) / file_path
-    return p if (p.exists() and not p.is_dir()) else None
+    return _locate_python_source(file_path, project_root)
 
 
 # ---------------------------------------------------------------------------
@@ -1128,13 +1147,27 @@ async def generate_uarch_specs_single_context(
                 pass
     call_start = _time.time()
     agent = UarchSpecGenerator(temperature=0.2)
-    await agent.generate_many(
-        blocks=blocks,
-        python_sources=python_sources,
-        feedback=feedback_by_block,
-        previous_specs=previous_specs,
-        project_root=str(PROJECT_ROOT),
-    )
+    try:
+        await agent.generate_many(
+            blocks=blocks,
+            python_sources=python_sources,
+            feedback=feedback_by_block,
+            previous_specs=previous_specs,
+            project_root=str(PROJECT_ROOT),
+        )
+    except Exception:
+        # WP-58: a spec file written before the generator raised is a PARTIAL
+        # artifact; quarantine it so a later existence check cannot adopt it.
+        for b in blocks:
+            name = b["name"]
+            p = spec_dir / f"{name}.md"
+            try:
+                if p.exists() and (name not in pre_mtime
+                                   or p.stat().st_mtime_ns != pre_mtime[name]):
+                    p.rename(p.with_name(f"{name}.md.rejected-{int(call_start)}"))
+            except OSError:
+                pass
+        raise
     session_id = getattr(getattr(agent, "llm", None), "last_session_id", "") or ""
     written: list[str] = []
     missing: list[str] = []
@@ -1540,26 +1573,26 @@ def _build_products_present(sim_dir: Path) -> bool:
 
 
 def clear_build_products(sim_dir: Path) -> bool:
-    """Wipe cocotb/Verilator BUILD products under ``sim_dir`` (obj dir + outputs).
+    """Wipe nested and top-level cocotb/Verilator build products.
 
-    Removes the ``sim_build/`` obj dir and the ``dump.vcd`` / ``dump.fst`` /
-    ``results.xml`` outputs, leaving config inputs (Makefile, TB, fingerprint)
-    intact so the next ``make`` does a clean rebuild with the current flags.
+    Top-level objects can be reused through VPATH by a nested cocotb make.
+    Leave Makefile, TB, staged inputs, fingerprint and timeout state intact;
+    never traverse staged directories or follow product symlinks.
     Best-effort; returns True when it removed something."""
     removed = False
-    try:
-        obj = sim_dir / "sim_build"
-        if obj.is_dir():
-            shutil.rmtree(obj, ignore_errors=True)
-            removed = True
-        for out in ("dump.vcd", "dump.fst", "results.xml"):
+    for pattern in (
+        "sim_build", "obj_dir", "*.o", "*.a", "*.d", "*.mk", "V*",
+        "verilator.*", "dump.*", "results.xml",
+    ):
+        for product in sim_dir.glob(pattern):
             try:
-                (sim_dir / out).unlink()
+                if product.is_dir() and not product.is_symlink():
+                    shutil.rmtree(product)
+                else:
+                    product.unlink()
                 removed = True
             except OSError:
                 pass
-    except Exception:  # noqa: BLE001
-        pass
     return removed
 
 
@@ -1582,8 +1615,8 @@ def apply_build_fingerprint(
     We fingerprint the build inputs -- the full Makefile text (which embeds
     ``EXTRA_ARGS``, ``WAVES``, ``TOPLEVEL`` and the ``VERILOG_SOURCES`` list) plus
     the bytes of every source file -- into ``<sim_dir>/.build_fingerprint``. On a
-    mismatch we wipe the stale build products (cocotb's ``sim_build/`` obj dir and
-    the ``dump.vcd`` / ``results.xml`` outputs) so the next ``make`` does a clean
+    mismatch we wipe the stale build products (including scope-level objects
+    visible through VPATH) so the next ``make`` does a clean
     rebuild with the new flags. Returns True when a stale build was cleared.
     Best-effort: any error leaves the tree untouched (make's own mtime logic still
     applies) so this can never wedge a build.

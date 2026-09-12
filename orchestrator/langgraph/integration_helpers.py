@@ -30,7 +30,6 @@ from orchestrator.langgraph.pipeline_helpers import (
     _write_step_log,
     _write_step_log_error,
     apply_build_fingerprint,
-    clear_build_products,
     log,
 )
 
@@ -115,6 +114,10 @@ def parse_verilog_ports(rtl_path: str, module: str | None = None) -> VerilogModu
     # Strip comments (line and block)
     source = re.sub(r'//.*?$', '', source, flags=re.MULTILINE)
     source = re.sub(r'/\*.*?\*/', '', source, flags=re.DOTALL)
+    # WP-45: see the lint/sim configuration (no defines): `ifdef USE_POWER_PINS
+    # port sections are not ports, and `endif is never a pin name.
+    from orchestrator.langgraph.contract_conformance import strip_preprocessor
+    source = strip_preprocessor(source)
 
     # Narrow to the requested module, else the file stem -- the same precedence
     # rtl_module_name uses. Sliced to its endmodule so a later module's
@@ -931,25 +934,19 @@ def _is_power_pin(port_name: str) -> bool:
     return bool(_POWER_PIN_RE.match(port_name))
 
 
-def detect_wrapper_block(modules: dict[str, VerilogModule]) -> str | None:
-    """Identify the pad-adapter / Caravel wrapper block among the parsed modules.
-
-    Prefers a block literally named ``user_project_wrapper``; else the block
-    whose ports carry the Caravel GPIO pad vector (io_in / io_out / io_oeb); else
-    a block whose *module* name is ``user_project_wrapper``. Returns the block
-    key or None (non-Caravel design)."""
-    if CARAVEL_TOP_MODULE in modules:
-        return CARAVEL_TOP_MODULE
-    for bn, mod in modules.items():
-        names = {p.name for p in mod.ports}
-        if all(io in names for io in _PAD_IO_PORTS):
-            return bn
-    for bn, mod in modules.items():
-        if mod.name == CARAVEL_TOP_MODULE:
-            return bn
+def detect_wrapper_block(modules: dict[str, VerilogModule], top_name: str = "") -> str | None:
+    """The block that IS the declared chassis top (WP-51): matched by name
+    only -- the block key or its module name equals ``top_name`` (default: the
+    Caravel chassis top). No port-pattern inference."""
+    if not top_name:
+        return None        # WP-55: no declared top, no wrapper block (no default chassis)
+    want = top_name
+    if want in modules:
+        return want
+    for name, mod in modules.items():
+        if mod.name == want:
+            return name
     return None
-
-
 def _contract_signal_names(edge: dict) -> list[str]:
     """Every signal a contract edge declares: payload fields + sideband.
 
@@ -957,18 +954,23 @@ def _contract_signal_names(edge: dict) -> list[str]:
     concluded the contract did not record signal names at all. Their union is
     the channel's port set.
     """
-    out: list[str] = []
-    for f in (edge.get("fields") or []):
-        n = f.get("name") if isinstance(f, dict) else f
-        if n:
-            out.append(str(n))
-    for s in (edge.get("sideband_signals") or []):
-        n = s.get("name") if isinstance(s, dict) else s
-        if n:
-            out.append(str(n))
+    declared = [f.get("name") if isinstance(f, dict) else f
+                for f in (edge.get("fields") or [])] + \
+               [s.get("name") if isinstance(s, dict) else s
+                for s in (edge.get("sideband_signals") or [])]
+    from orchestrator.langgraph.contract_conformance import signal_specs as _specs
+    if not any(declared) and not _specs(edge):
+        return []          # a legacy edge: the name-keyed fallback applies
+    # WP-46: ONE derivation shared with the conformance gate and the RTL
+    # prompt (signal_specs): fields + sidebands + the handshake strobes the
+    # protocol implies (WP-21). Binding only the declared fields left the
+    # synthesized `valid` to the bare-name stage, which merged it with a
+    # same-named port of another block (ax25_9600: START resolved to X).
+    from orchestrator.langgraph.contract_conformance import signal_specs
     seen, uniq = set(), []
-    for n in out:
-        if n not in seen:
+    for spec in signal_specs(edge):
+        n = str(spec.get("name") or "")
+        if n and n not in seen:
             seen.add(n)
             uniq.append(n)
     return uniq
@@ -1084,23 +1086,23 @@ def load_interface_contract_edges(project_root: str) -> list[dict]:
         cb = c.get("consumer_block") or c.get("to_block")
         if not pb or not cb or pb == cb:
             continue
-        edges.append({
+        # WP-53: keep EVERY declared key (handshake_protocol, flow_control_policy,
+        # aliases ...): the shared projection derives the valid/ready strobes from
+        # handshake_protocol, and dropping it here left every loaded valid_only edge
+        # without its strobe -- the assembler then tied `start_valid` to 1'b0
+        # with zero hazards.
+        e = dict(c)
+        e.update({
             "producer_block": pb,
             "consumer_block": cb,
             "producer_port": c.get("producer_port") or c.get("from_port") or "",
             "consumer_port": c.get("consumer_port") or c.get("to_port") or "",
             "data_width": c.get("data_width_bits") or c.get("data_width") or 0,
             "edge_id": c.get("edge_id") or f"{pb}__to__{cb}",
-            # Carry the channel SIGNAL LIST through. The contract declares every
-            # signal on the edge (fields = payload, sideband_signals =
-            # everything else, union = the port set); dropping them here forced
-            # the assembler to re-derive the port set from a naming convention
-            # and to pair the two ends positionally against each other. With the
-            # list present each end resolves against the CONTRACT instead, so
-            # the two ends never have to agree on spelling.
             "fields": c.get("fields") or [],
             "sideband_signals": c.get("sideband_signals") or [],
         })
+        edges.append(e)
     return edges
 
 
@@ -1197,7 +1199,8 @@ def generate_caravel_wrapper_top(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if wrapper_block is None:
-        wrapper_block = detect_wrapper_block(modules)
+        # the Caravel assembler IS the Caravel plugin: its own top name applies
+        wrapper_block = detect_wrapper_block(modules, CARAVEL_TOP_MODULE)
 
     # A declared pin map REPLACES the pin-adapter block. The adapter existed
     # only to translate pad bits into named signals, and the top now does that
@@ -1350,6 +1353,9 @@ def generate_caravel_wrapper_top(
         return out
 
     edge_bound: set[frozenset] = set()
+    # WP-46: ports the CONTRACT stage bound; the legacy name-keyed stage
+    # must never re-union them (or any two same-direction ports).
+    bound_ports: set[tuple[str, str]] = set()
     for e in edges:
         pb, cb = e.get("producer_block"), e.get("consumer_block")
         if pb not in modules or cb not in modules or pb == cb:
@@ -1365,6 +1371,7 @@ def generate_caravel_wrapper_top(
                 continue
             for pp, cp in _paired:
                 uf.union((pb, pp.name), (cb, cp.name))
+                bound_ports.update({(pb, pp.name), (cb, cp.name)})
             if _paired:
                 edge_bound.add(frozenset((pb, cb)))
             continue
@@ -1419,6 +1426,7 @@ def generate_caravel_wrapper_top(
             continue
         for pp, cp in paired:
             uf.union((pb, pp.name), (cb, cp.name))
+            bound_ports.update({(pb, pp.name), (cb, cp.name)})
         if paired:
             edge_bound.add(frozenset((pb, cb)))
 
@@ -1433,6 +1441,17 @@ def generate_caravel_wrapper_top(
         a, b = tuple(pair)
         for key in sorted(set(keyed[a]) & set(keyed[b])):
             pa, pbp = keyed[a][key], keyed[b][key]
+            # WP-46: a port the contract already bound is never re-unioned by
+            # name (modem_controller.start_valid <- regmap vs hdlc_framer.
+            # start_valid <- modem_controller.stage_start_valid share a NAME,
+            # not a net), and two inputs / two outputs are never a connection.
+            if any((a, p.name) in bound_ports for p in pa) or \
+                    any((b, p.name) in bound_ports for p in pbp):
+                continue
+            if (len(pa) == 1 and len(pbp) == 1
+                    and pa[0].direction == pbp[0].direction
+                    and pa[0].direction != "inout"):
+                continue
             if len(pa) != 1 or len(pbp) != 1:
                 if frozenset((a, b)) not in edge_bound:
                     wiring_errors.append(
@@ -1464,6 +1483,24 @@ def generate_caravel_wrapper_top(
             wiring_errors.append(
                 f"wire group {sorted(members)} mixes widths {sorted(widths)} -- "
                 f"refusing to short different-width nets")
+            continue
+        # WP-46: exactly one driver per net. Two outputs on one net (or none)
+        # is a wiring hazard -- with a locked Caravel boundary it parks (WP-45)
+        # instead of shipping a wrapper that resolves to X.
+        _dirs = {(bn, pn): (modules[bn].port_by_name(pn).direction
+                            if modules[bn].port_by_name(pn) else "")
+                 for (bn, pn) in members}
+        _drv = sorted(k for k, d in _dirs.items() if d == "output")
+        _inout = [k for k, d in _dirs.items() if d == "inout"]
+        if len(_drv) > 1:
+            wiring_errors.append(
+                f"wire group {sorted(members)} is driven by {len(_drv)} outputs "
+                f"{_drv} -- refusing a multiply-driven net")
+            continue
+        if not _drv and not _inout:
+            wiring_errors.append(
+                f"wire group {sorted(members)} has no driver (inputs only) -- "
+                "refusing to short two inputs")
             continue
         width = max(widths) if widths else 1
         rb, rp = root
@@ -1688,6 +1725,7 @@ def lint_top_level(
     block_rtl_paths: list[str],
     design_name: str = "integration",
     project_root=None,
+    top_module: str = "",
 ) -> dict:
     """Run Verilator lint on the top-level module with all block RTL files.
 
@@ -1743,7 +1781,7 @@ def lint_top_level(
     cmd = [
         "verilator", "--lint-only", "-Wall", "-Wno-fatal",
         "-Wno-EOFNEWLINE",
-        "--top-module", Path(top_rtl_path).stem,
+        "--top-module", top_module or Path(top_rtl_path).stem,   # WP-49: explicit
         *lint_sources,
     ]
 
@@ -1774,32 +1812,21 @@ def lint_top_level(
 
 
 def _existing_top_module(int_dir: Path, preferred: str = "") -> str:
-    """Name of the real top module in an existing ``rtl/integration`` file.
+    """The recorded candidate top living in ``int_dir``, or "" (WP-49).
 
-    Preference: ``preferred`` when declared; a module matching the file stem;
-    the unique module never instantiated in the file; else the last declared
-    module. ``""`` when no file declares a module. The ``module`` keyword is
-    matched anywhere (a top declared behind a same-line comment still counts).
+    WP-17 inferred it from file contents (stem, first module, the module
+    nobody instantiates); that was one of five disagreeing guesses. The only
+    source now is the candidate receipt / integration record.
     """
-    if not int_dir.is_dir():
+    from orchestrator.harness.top_module import resolve_top
+    try:
+        mod, path = resolve_top(Path(int_dir).parent.parent)
+    except Exception:  # noqa: BLE001
         return ""
-    for vf in sorted(int_dir.glob("*.v")):
-        try:
-            src = vf.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        mods = re.findall(r"\bmodule\s+([A-Za-z_]\w*)", src)
-        if not mods:
-            continue
-        if preferred and preferred in mods:
-            return preferred
-        if vf.stem in mods:
-            return vf.stem
-        uninst = [m for m in mods if len(re.findall(rf"\b{re.escape(m)}\b", src)) == 1]
-        if len(uninst) == 1:
-            return uninst[0]
-        return mods[-1]
+    if mod and path and Path(path).parent.resolve() == Path(int_dir).resolve():
+        return mod
     return ""
+
 
 def load_architecture_connections(project_root: str) -> tuple[list[dict], str]:
     """Load block-to-block connections from architecture state.
@@ -2231,79 +2258,17 @@ def _dedup_module_sources(
 
 
 def chip_rtl_sources(
-    top_rtl_path: str,
-    block_rtl_paths: dict[str, str],
-    dedup_dir=None,
+    top_rtl_path: str, block_rtl_paths: dict[str, str], dedup_dir=None,
+    top_module: str = "", *, project_root=None,
 ) -> list[str]:
-    """Every Verilog source needed to elaborate the ASSEMBLED chip, top first.
-
-    Single definition on purpose. The integration/validation DV sims and the
-    chip_top gate-sim's REFERENCE run must elaborate the identical source set:
-    the gate compares the flat netlist against that reference, so a reference
-    built from a different source list is not a reference at all -- it is a
-    second design, and any verdict against it is meaningless.
-
-    Top-first ordering matters: callers resolve the Verilator TOPLEVEL from the
-    first entry.
-    """
-    sources = [top_rtl_path]
-    # A block file that RE-DECLARES the top's own module is an alias-carrier:
-    # the generated pad block ships a thin `module user_project_wrapper` alias
-    # plus stub declarations of its sibling blocks. Include it and the MODDUP
-    # dedup keeps the stubs (they sort first) and strips the real logic -- the
-    # reference then elaborates a hollow chip and honestly fails, so the gate
-    # reports not_run on a design that is fine. The top provides its own
-    # module; a file re-declaring it leaves the list, stubs and all.
-    _top_mod = ""
-    try:
-        _top_text = Path(top_rtl_path).read_text(errors="replace")
-        _m = re.search(r"\bmodule\s+([A-Za-z_]\w*)", _top_text)
-        _top_mod = _m.group(1) if _m else ""
-    except OSError:
-        pass
-    for bp in block_rtl_paths.values():
-        if not Path(bp).exists() or bp == top_rtl_path:
-            continue
-        if _top_mod:
-            try:
-                if re.search(r"\bmodule\s+" + re.escape(_top_mod) + r"\b",
-                             Path(bp).read_text(errors="replace")):
-                    continue
-            except OSError:
-                pass
-        sources.append(bp)
-    # Include the generic SRAM wrapper lib if any block instantiates cs_sram, so
-    # the chip-level Verilator build can resolve cs_sram_1rw/1rw1r (without it
-    # the sim hard-fails with "Cannot find module cs_sram_1rw1r"). Best-effort.
-    try:
-        from orchestrator.langgraph.sram_wrapper import (
-            uses_wrapper as _uses_wrapper,
-        )
-        from orchestrator.langgraph.sram_wrapper import (
-            wrapper_lib_path as _wrapper_lib_path,
-        )
-        _all_rtl = "".join(
-            Path(p).read_text(errors="replace")
-            for p in sources if Path(p).exists()
-        )
-        _wlib = _wrapper_lib_path()
-        if _uses_wrapper(_all_rtl) and _wlib not in sources:
-            sources.append(_wlib)
-    except Exception:
-        pass
-    # A deterministically-assembled Caravel top and the pad-adapter BLOCK it was
-    # built from both declare `module user_project_wrapper`, and blocks commonly
-    # each bundle the same shared macro. Two compilation units defining one
-    # module is a Verilator MODDUP abort before any transaction runs, so a caller
-    # that hands this list straight to a simulator must dedup. Pass a scratch dir
-    # to get an elaborable list back; omit it to get raw paths.
-    if dedup_dir is not None:
-        # _dedup_module_sources WRITES the stripped copies and does not create
-        # its own output dir, so a caller passing a fresh scratch path would get
-        # back paths to files that do not exist.
-        Path(dedup_dir).mkdir(parents=True, exist_ok=True)
-        sources = _dedup_module_sources(sources, dedup_dir)
-    return sources
+    """Return the adopted sources verbatim; never deduplicate or discover RTL."""
+    from orchestrator.harness.top_module import CandidateError, candidate_for_inputs
+    if project_root is None:
+        raise CandidateError("A project manifest and explicit top are required")
+    rec = candidate_for_inputs(project_root, top_rtl_path, block_rtl_paths)
+    if not top_module or top_module != rec["top_module"]:
+        raise CandidateError("An explicit top matching the candidate manifest is required")
+    return list(rec["sources"])
 
 
 _DV_SPECIAL_TESTS = (
@@ -2423,6 +2388,33 @@ bounded_waveform: $(SIM_BUILD)/Vtop
 
 
 
+def _recreate_sim_dir(sim_dir: Path) -> None:
+    """Start an authoritative build with only engine retry bookkeeping.
+
+    A partial clean leaves objects visible to the nested make through VPATH.
+    Read the small state files first, then recreate the entire directory;
+    cleanup errors must stop the build, never fall back to a contaminated tree.
+    Step logs/attempt numbers and the verifier's flock live outside this tree.
+    """
+    import shutil
+
+    bookkeeping = {}
+    if sim_dir.is_dir() and not sim_dir.is_symlink():
+        for name in (".build_fingerprint", "sim_timeout_state.json"):
+            path = sim_dir / name
+            if path.is_file() and not path.is_symlink():
+                bookkeeping[name] = path.read_bytes()
+        prior = sorted(p.name for p in sim_dir.iterdir() if p.name not in bookkeeping)
+        if prior:
+            log(f"  [SIM] Recreating {sim_dir}: discarding prior contents: {', '.join(prior)}")
+        shutil.rmtree(sim_dir)
+    elif sim_dir.is_symlink() or sim_dir.exists():
+        sim_dir.unlink()
+    sim_dir.mkdir(parents=True)
+    for name, content in bookkeeping.items():
+        (sim_dir / name).write_bytes(content)
+
+
 def _stage_project_inputs(sim_dir: Path, root: Path) -> None:
     """Expose ``<root>/inputs`` inside the simulation directory.
 
@@ -2441,6 +2433,22 @@ def _stage_project_inputs(sim_dir: Path, root: Path) -> None:
     except OSError:
         pass
 
+
+def _successful_sim_cases(path: Path) -> list[str]:
+    """Read only freshly emitted executed test cases, excluding skipped/failures."""
+    import xml.etree.ElementTree as ET
+    try:
+        root = ET.parse(path).getroot()
+    except (OSError, ET.ParseError):
+        return []
+    rows = list(root.iter("testcase"))
+    # Duplicate names with any failing/skipped instance do not certify that case.
+    names = {row.get("name") for row in rows if row.get("name")}
+    return sorted(name for name in names if all(
+        not any(row.find(tag) is not None for tag in ("failure", "error", "skipped"))
+        for row in rows if row.get("name") == name))
+
+
 def run_integration_simulation(
     design_name: str,
     top_rtl_path: str,
@@ -2457,11 +2465,11 @@ def run_integration_simulation(
 
     ``sim_scope`` namespaces the sim build dir and the step log so the
     integration_dv and validation_dv runs (both driven by this function) do not
-    clobber each other. It defaults to ``"integration"`` (byte-identical to the
-    historical behavior); validation_dv passes ``"validation"`` so it gets
+    clobber each other. It defaults to ``"integration"``;
+    validation_dv passes ``"validation"`` so it gets
     ``sim_build/validation`` + ``step_logs/integration/validation_sim_attempt<N>.log``
-    -- preserving the integration run's raw sim log for forensics and avoiding
-    build-fingerprint churn between the two runs.
+    -- preserving the integration run's raw sim log for forensics. Each attempt
+    recreates its scope directory, retaining only engine retry bookkeeping.
 
     ``project_root`` anchors ``sim_build/<scope>`` (and the sim PYTHONPATH) at
     the RUN directory; it defaults to the module-level ``PROJECT_ROOT``
@@ -2480,42 +2488,23 @@ def run_integration_simulation(
         _parse_cocotb_summary,
     )
 
-    # Distinct sim build dir per scope (avoids fingerprint churn: the two runs
-    # differ only in MODULE, which would otherwise trigger a full rebuild on
-    # every integration<->validation switch through a shared dir).
+    # Each scope owns its build tree and artifacts independently.
     root = Path(project_root) if project_root else PROJECT_ROOT
     sim_dir = root / "sim_build" / sim_scope
-    sim_dir.mkdir(parents=True, exist_ok=True)
-    _stage_project_inputs(sim_dir, root)
     # Distinct step-log name per scope (validation -> validation_sim_attempt<N>.log)
     # so validation_dv never overwrites integration_dv's raw sim log.
     _log_step = f"{sim_scope}_sim"
 
-    all_sources = chip_rtl_sources(top_rtl_path, block_rtl_paths)
-    # Dedup shared macro modules (e.g. SRAM) bundled by multiple blocks, else
-    # Verilator MODDUP-aborts elaboration before any transaction.
-    all_sources = _dedup_module_sources(all_sources, sim_dir)
-    sources_str = " ".join(all_sources)
-
-    # The integration file may deliberately contain more than one wrapper
-    # module (for example a 44-pad OpenFrame parent and the graded Caravel
-    # user_project_wrapper).  A filename-derived TOPLEVEL always selects the
-    # first/file-stem wrapper even when the pipeline explicitly chose the real
-    # graded module. Honor design_name when that module is declared in the file;
-    # retain the historical file-stem fallback for ordinary generated tops.
-    safe_name = Path(top_rtl_path).stem
+    from orchestrator.harness.top_module import CandidateError, candidate_for_inputs
     try:
-        _top_source = Path(top_rtl_path).read_text(
-            encoding="utf-8", errors="replace"
-        )
-        if re.search(
-            rf"^\s*module\s+{re.escape(design_name)}\b",
-            _top_source,
-            re.MULTILINE,
-        ):
-            safe_name = design_name
-    except OSError:
-        pass
+        rec = candidate_for_inputs(root, top_rtl_path, block_rtl_paths)
+        if rec["defines"] != "none" or rec["parameters"] != "none":
+            raise CandidateError("Integration simulator does not support the declared candidate configuration")
+    except CandidateError as exc:
+        return {"passed": False, "returncode": -1, "log": str(exc), "kind": exc.kind}
+    all_sources = rec["sources"]
+    sources_str = " ".join(all_sources)
+    safe_name = rec["top_module"]
 
     # TRACE stays on for the integration/validation sim path: the VCD is the
     # debug agent's and the chip lead's evidence. (WP-10a removed the WaveKit
@@ -2536,17 +2525,11 @@ def run_integration_simulation(
     makefile_content = _compose_dv_makefile(
         sim_scope, _tb_source, sources_str, safe_name, Path(tb_path).stem,
     )
-    # Pre-run hygiene: the INTEGRATION/VALIDATION sims are engine-authoritative,
-    # rare, and correctness-critical (their PASS verdict hard-requires a WaveKit
-    # VCD audit). Unconditionally wipe any pre-existing build products in this dir
-    # before writing our traced Makefile: an agent's in-context `verify` (or an
-    # earlier aborted run) may have left a stale/traceless Vtop here, and cocotb's
-    # make would REUSE it (its mtime predates our fresh Makefile), emit no
-    # dump.vcd, and fail-close the mandatory audit on a phantom-missing VCD
-    # (2026-07-02 integration-DV failure). Per-block sims (run_simulation) keep the
-    # fingerprint fast-path -- they are frequent and cheap; only this path forces a
-    # clean rebuild.
-    clear_build_products(sim_dir)
+    # No prior object, generated source or binary may reach make, including
+    # through the nested obj dir's parent VPATH. Block DV retains fingerprint
+    # reuse; these authoritative scopes always start fresh before staging inputs.
+    _recreate_sim_dir(sim_dir)
+    _stage_project_inputs(sim_dir, root)
     # Fingerprint the (now clean) build inputs so a later flag/source change is
     # still caught by the mismatch path (and so the fingerprint file stays current).
     apply_build_fingerprint(sim_dir, makefile_content, all_sources)
@@ -2654,7 +2637,15 @@ def run_integration_simulation(
                 or (summary["tests_total"] > 0 and summary["tests_failed"] == 0)
             )
         )
+        from orchestrator.harness.top_module import validated_candidate
+        try:
+            if validated_candidate(root)["candidate_sha"] != rec["candidate_sha"]:
+                raise CandidateError("Candidate changed during simulation")
+        except CandidateError as exc:
+            return {"passed": False, "kind": exc.kind, "log": str(exc), "executed_cases": []}
         return {
+            "candidate_sha": rec["candidate_sha"],
+            "executed_cases": _successful_sim_cases(sim_dir / "results.xml") if passed else [],
             "passed": passed,
             "log": output,
             "returncode": result.returncode,

@@ -16,6 +16,7 @@ import pytest
 
 import orchestrator.harness.gate_sim as gs
 from orchestrator.langgraph.backend_graph import _run_chip_top_gate_sim
+from orchestrator.tests.candidate_fixtures import adopt
 
 
 @pytest.fixture()
@@ -24,6 +25,7 @@ def run_dir(tmp_path):
     (tmp_path / "sim_build" / "integration" / "test_my_chip.py").write_text(
         "# integration testbench\n")
     (tmp_path / "my_chip.v").write_text("module my_chip(input clk);\nendmodule\n")
+    adopt(tmp_path, tmp_path / "my_chip.v", name="my_chip")
     return tmp_path
 
 

@@ -11,6 +11,11 @@ top-level RTL, block RTL files, ERS, and any referenced golden model files
 from disk. Write the validation testbench to the path specified in the user
 message.
 
+In-context verification (including manual make/Verilator commands) must use
+your own scratch build directory, e.g. `sim_build/agent_<name>/`,
+never `sim_build/integration` or `sim_build/validation`; the engine owns those
+scope directories and recreates them for every authoritative attempt.
+
 CONTEXT:
 You will receive:
 1. The top-level Verilog source and path
@@ -24,7 +29,7 @@ VALIDATION STRATEGY:
    or an assertion inside a test.
 3. Exercise the design end-to-end with realistic application-level stimuli.
 4. Measure each preserved KPI directly in simulation when possible. Examples:
-   latency cycles, sustained throughput, output error, PSNR, compression ratio,
+   latency cycles, sustained throughput, output error or quality metric, compression ratio,
    frame/sample count, packet ordering, mode selection, reset behavior.
 5. Compare every measured KPI against the ERS acceptance criterion.
 6. Log a concise requirement coverage line for every ERS requirement checked.
@@ -106,20 +111,21 @@ COCOTB RULES:
 - Default RTL validation must finish in minutes, not tens of minutes. Unless
   the ERS explicitly says "run an exhaustive full-frame RTL simulation" as a
   hard acceptance criterion, cap repeated-structure RTL tests to a directed
-  prefix such as 1-2 rows/stripes/tiles plus boundary transitions. For codecs,
-  do not iterate all macroblocks of a 640x360 frame in validation DV; mark
-  exhaustive frame PSNR/bitrate/terminal-frame equivalence as deferred to the
-  RD/golden sweep and validate a bounded prefix in RTL.
+  prefix such as 1-2 rows/stripes/tiles plus boundary transitions. For large
+  repeated structures (whole frames, images, long streams), do not iterate the
+  entire structure in validation DV; mark the exhaustive quality / rate /
+  terminal-state equivalence as deferred to the golden sweep and validate a
+  bounded prefix in RTL.
 - Derive watchdogs and expected completion windows from the documented ERS,
   uArch, and RTL latency/throughput contracts. Do not use a fixed "short"
   watchdog for requirements that must traverse an iterative or feedback-coupled
-  pipeline. For example, if one block documents ~N cycles per macroblock and a
-  feedback dependency serializes macroblocks, a first-stripe watchdog must scale
-  with `macroblocks_in_stripe * N` plus input/output margin. A validation test
+  pipeline. For example, if one block documents ~N cycles per coding unit and a
+  feedback dependency serializes coding units, a first-stripe watchdog must scale
+  with `units_in_stripe * N` plus input/output margin. A validation test
   may fail latency only against an explicit ERS KPI or a latency budget derived
   from the architecture, not against an arbitrary constant.
 - Hard guard: if a test waits for all items in a repeated structure such as
-  `macroblocks_in_stripe`, `tiles_per_frame`, packets in a burst, or tokens in
+  `units_in_stripe`, `tiles_per_frame`, packets in a burst, or tokens in
   a sequence, compute `watchdog >= count * documented_per_item_latency + fixed
   pipeline_fill_margin + output_stall_margin`. Do not use the same short
   watchdog for "first item appears" and "all items complete". If the ERS has a
@@ -127,7 +133,7 @@ COCOTB RULES:
   all-items completion watchdog.
 - Cadence, initiation-interval (II), and sustained-throughput are STEADY-STATE
   WITHIN-UNIT properties, NOT global adjacent-sample invariants. A design
-  processes work in natural units -- a block, frame, macroblock, packet, burst,
+  processes work in natural units -- a block, frame, coding unit, packet, burst,
   stripe, or token group. Inside one unit, consecutive outputs may be required to
   arrive every `<= II` cycles; BETWEEN units there is a LEGAL, generally UNBOUNDED
   refill/setup/drain gap (fetch the next unit, reload a table, flush a pipeline).
@@ -190,8 +196,9 @@ FUNCTIONAL CORRECTNESS IS NON-DEFERRABLE (critical):
   must FAIL here -- if your "bounded prefix" check would pass such a design, it
   is not a functional check.
 - You may mark ONLY the exhaustive / random / full-dataset extension of a
-  functional requirement (e.g. full-frame PSNR sweep, all-macroblock iteration,
-  multi-frame bitrate ranges, fuzzing) as `deferred_to_golden_sweep`. You may
+  functional requirement (e.g. a full-dataset quality sweep, exhaustive
+  iteration over every unit, multi-run rate ranges, fuzzing) as
+  `deferred_to_golden_sweep`. You may
   NEVER defer the bounded directed output-equals-reference equivalence itself.
   If the design has no external reference, compute the expected output inline
   from the requirement's definition and assert against it -- it is not
@@ -250,9 +257,9 @@ VCD WAVEFORM -- MANDATORY:
   context, reconstructed feedback, entropy/adaptive state, packet/frame index,
   and context update handshakes as applicable.
 - If a final KPI fails, the testbench should log enough per-transaction context
-  to identify the first divergence against the golden reference. For codecs,
-  this means logging frame/block index, selected mode, emitted coefficients or
-  symbols, reconstructed block quality, and feedback/context update evidence
+  to identify the first divergence against the golden reference. For stateful
+  pipelines, this means logging the unit index, selected mode, emitted
+  symbols, reconstructed-state quality, and feedback/context update evidence
   when those signals are available.
 - Log the ERS requirement IDs next to the transactions that exercise them so
   waveform inspection can tie each requirement to observed signals.

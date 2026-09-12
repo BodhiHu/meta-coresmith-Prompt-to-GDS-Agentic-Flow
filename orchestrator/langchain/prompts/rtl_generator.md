@@ -21,8 +21,8 @@ RULES:
 1. Output ONLY valid {rtl_language} (no constructs from other HDL variants).
 2. Use AXI-Stream (tdata/tvalid/tready/tlast) for data interfaces.
 3. Use EXACTLY the clock and reset ports the uArch spec's port table declares --
-   name AND polarity (e.g. `wb_clk_i` + synchronous active-HIGH `wb_rst_i` on a
-   Caravel task, `rst` active-high when the spec says so). Only when the spec
+   name AND polarity (e.g. a synchronous active-HIGH `rst` when the spec says
+   so). Only when the spec
    declares no reset at all, default to a synchronous active-low `rst_n`.
 4. Use a single clock domain (the spec's clock port; `clk` when unspecified).
 4b. Port names come from the AUTHORITATIVE PORT NAMES table verbatim. A contract
@@ -119,8 +119,7 @@ RULES:
     b. A schedule the spec DECLARED word-parallel / II=1 MUST be built that way.
        Do NOT serialize a parallel schedule through ONE shared resource (a
        single S-box, one multiplier, one memory port) the spec does NOT share:
-       that silently multiplies cyc/op by the serialization factor (the AES key
-       schedule declared 11 cyc word-parallel and was built word-serial at 21).
+       that silently multiplies cyc/op by the serialization factor.
        If the spec says a stage is parallel / II=1, instantiate the parallel
        lanes; only serialize where the spec's `perf` block explicitly shares the
        resource.
@@ -252,17 +251,18 @@ When converting Python to {rtl_language}:
 PUBLISHED STREAM SAMPLER CONTRACT (chip-boundary stream ports ONLY):
 The task's shipped sampler/testbench is the contract for these ports; the
 ERS transcribes its acceptance semantics and that transcription wins over
-anything below. For the ppabench `stream_tb.py` family the semantics are:
-the grader drives the chip's top-level stream ports (in_valid/in_ready/in_data/
-in_last, out_valid/out_ready/out_data/out_last) before each rising edge and
-samples them in the read-only phase AFTER the edge. It counts:
+anything below. When the task's sampler is a post-edge stream driver (the
+common cocotb pattern: it drives the chip's top-level stream ports -- the
+input stream's valid/ready/data/last and the output stream's
+valid/ready/data/last, named as the task declares them -- before each rising
+edge and samples them in the read-only phase AFTER the edge), it counts:
   input word accepted on edge N  <=> in_valid (driven before N) && in_ready as it
                                      reads AFTER N (the value in_ready takes at N)
   output beat consumed on edge N <=> out_valid/out_data as they read after N &&
                                      out_ready as driven for cycle N
 Rules that follow. Violating either desyncs the grader; the failure is
 seed-dependent under backpressure and is NOT caught by a testbench that samples
-ready before the edge (arms A, B and E of the h264 experiment all shipped it):
+ready before the edge (a common and expensive mistake):
   - in_ready: the grader re-offers a word whenever in_ready reads 0 after the
     edge, and counts it accepted on the first edge after which in_ready reads 1.
     Two self-consistent ways to honour that; pick ONE and keep it everywhere:
@@ -420,8 +420,7 @@ time — do it in the first draft, not after a rejection):
 
 ## Variable-length bit-serialization: lowering discipline (MANDATORY)
 
-The single most common un-synthesizable lowering (proven live: 2 of 6 blocks,
-5 non-convergent regeneration attempts each, 0.97-confidence diagnosis): the
+The single most common un-synthesizable lowering: the
 block model emits variable-length codewords (`append_bits(value, length)`,
 dynamic `value[bit_index]` reads) and the RTL transcribes that as a WIDE FLAT
 REGISTER written/read through a RUNTIME-VARIABLE part-select

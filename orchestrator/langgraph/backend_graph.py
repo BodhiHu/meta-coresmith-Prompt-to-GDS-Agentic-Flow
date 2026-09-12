@@ -392,99 +392,11 @@ def _resolve_netlist(state: BackendState) -> tuple[str, str]:
 # ---------------------------------------------------------------------------
 
 
-def _file_top_module(src: str) -> str:
-    """The real top module declared in one RTL file.
-
-    WP-17b: ``module`` is matched anywhere (a top declared behind a same-line
-    comment counts); among several modules the unique one never instantiated
-    in the file wins, else the last declared one. ``""`` when none.
-    """
-    mods = re.findall(r"\bmodule\s+([A-Za-z_]\w*)", src or "")
-    if not mods:
-        return ""
-    if len(mods) == 1:
-        return mods[0]
-    uninst = [m for m in mods if len(re.findall(rf"\b{re.escape(m)}\b", src)) == 1]
-    if len(uninst) == 1:
-        return uninst[0]
-    return mods[-1]
-
-
 def _recorded_integration_top(root: Path) -> tuple[str, str]:
-    """(top_file, top_module) recorded by the Integration Check, or ("", "").
-
-    Only when the recorded file still exists on disk; the module falls back
-    to the recorded design_name, then to the file's own top module.
-    """
-    try:
-        rec = json.loads((root / ".coresmith" / "integration_result.json").read_text())
-    except (OSError, ValueError):
-        return "", ""
-    top = str(rec.get("top_rtl_path") or "")
-    if not top or not Path(top).exists():
-        return "", ""
-    mod = str(rec.get("top_module") or rec.get("design_name") or "")
-    if not mod:
-        try:
-            mod = _file_top_module(Path(top).read_text(encoding="utf-8", errors="replace"))
-        except OSError:
-            mod = ""
-    return top, mod
-
-def _select_integration_top(integration_dir: Path) -> tuple[str, str]:
-    """Return (top_file, top_module) for the real integration top.
-
-    The top is the module that instantiates other integration modules and is
-    itself instantiated by none (no parent). Falls back to the file with the
-    most child instantiations, then to sorted-first, so a single-file or
-    unparseable dir still yields a top. Returns ("", "") only for an empty dir.
-    """
-    files = sorted(integration_dir.glob("*.v"))
-    if not files:
-        return "", ""
-    mod_of: dict[str, str] = {}         # file -> its module name
-    text_of: dict[str, str] = {}
-    for f in files:
-        try:
-            src = f.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        text_of[str(f)] = src
-        _top_in_file = _file_top_module(src)
-        if _top_in_file:
-            mod_of[str(f)] = _top_in_file
-    if not mod_of:
-        return str(files[0]), ""
-    all_mods = set(mod_of.values())
-    # For each file: which OTHER integration modules does it instantiate, and
-    # is its OWN module instantiated by some other file?
-    instantiates: dict[str, int] = {}
-    instantiated_by_other: set[str] = set()
-    for fp, src in text_of.items():
-        my_mod = mod_of.get(fp, "")
-        cnt = 0
-        for other_mod in all_mods:
-            if other_mod == my_mod:
-                continue
-            if re.search(rf"(?<![\w]){re.escape(other_mod)}\s+(?:#\s*\([^;]*?\)\s*)?[\w\\]+\s*\(",
-                         src):
-                cnt += 1
-        instantiates[fp] = cnt
-        # a module is "used" if another file names it as an instance type
-        for fp2, src2 in text_of.items():
-            if fp2 == fp:
-                continue
-            if re.search(rf"(?<![\w]){re.escape(my_mod)}\s+(?:#\s*\([^;]*?\)\s*)?[\w\\]+\s*\(",
-                         src2):
-                instantiated_by_other.add(fp)
-                break
-    # Prefer a root (no parent); among those, the one instantiating the most
-    # children. Deterministic tie-break by sorted file order.
-    roots = [fp for fp in mod_of if fp not in instantiated_by_other]
-    pool = roots or list(mod_of)
-    _order = {str(f): i for i, f in enumerate(files)}
-    best = max(pool, key=lambda fp: (instantiates.get(fp, 0), -_order.get(fp, 0)))
-    return best, mod_of.get(best, "")
+    """The current manifest's top; never consult an independent integration record."""
+    from orchestrator.harness.top_module import resolve_top
+    mod, path = resolve_top(root)
+    return path, mod
 
 
 async def init_design_node(state: BackendState) -> dict:
@@ -493,12 +405,11 @@ async def init_design_node(state: BackendState) -> dict:
     Sets ``current_block`` to a synthetic block representing the flat design
     for legacy compatibility with downstream nodes.
     """
-    from orchestrator.langgraph.integration_helpers import discover_block_rtl
+    from orchestrator.harness.top_module import CandidateError, validated_candidate
 
     pr = _pr(state)
     root = Path(pr)
     design_name = state.get("design_name", "chip_top")
-    frontend_blocks = state.get("frontend_blocks") or state.get("block_queue", [])
 
     write_graph_event(pr, "Init Design", "graph_node_enter", {
         "design_name": design_name, "graph": "backend",
@@ -507,42 +418,15 @@ async def init_design_node(state: BackendState) -> dict:
     with _tracer.start_as_current_span(f"Init Design [{design_name}]") as span:
         span.set_attribute("design_name", design_name)
 
-    # Discover all block RTL (source + glue)
-    block_rtl = discover_block_rtl(pr, frontend_blocks)
-
-    # Find integration top-level RTL and extract actual module name. Choose
-    # the ACTUAL top -- the module that instantiates the others and is
-    # instantiated by none -- not sorted(glob)[0]: the alphabetically-first
-    # wrapper is often a leaf GPIO adapter (openframe_project_wrapper) that
-    # instantiates nothing, and hardening that empty shell reported
-    # "COMPLETE 1/1" while never touching the real design.
-    integration_dir = root / "rtl" / "integration"
-    integration_top = ""
-    # WP-17b: the top the frontend DV'd is recorded by the Integration Check;
-    # trust it over directory heuristics (observed: a stale first-round top
-    # file sorted first and was synthesized instead of the re-emitted chip).
-    _rec_top, _rec_mod = _recorded_integration_top(root)
-    if _rec_top:
-        integration_top = _rec_top
-        if _rec_mod:
-            design_name = _rec_mod
-    elif integration_dir.is_dir():
-        _top_f, _top_mod = _select_integration_top(integration_dir)
-        if _top_f:
-            integration_top = str(_top_f)
-            if _top_mod:
-                design_name = _top_mod
-
-    # Single-block designs now always have an integration top-level wrapper
-    # generated by integration_check_node, so no special bypass is needed.
-    # The flat_top_synthesis_node will synthesize the wrapper + block together.
-
-    # Also pick up glue block .v files from the integration dir
-    if integration_dir.is_dir():
-        for f in integration_dir.glob("*.v"):
-            stem = f.stem
-            if stem not in block_rtl and str(f) != integration_top:
-                block_rtl[stem] = str(f)
+    integration_top, block_rtl, manifest_error = "", {}, ""
+    try:
+        rec = validated_candidate(root)
+        integration_top, design_name = rec["top_rtl_path"], rec["top_module"]
+        block_rtl = {f"source_{i}": path for i, path in enumerate(rec["sources"])
+                     if path != integration_top}
+    except CandidateError as exc:
+        manifest_error = str(exc)
+        log(f"  [BACKEND] candidate unavailable: {exc}", RED)
 
     log(f"\n{'='*60}", CYAN)
     log(f"  Backend Lead: {design_name}", CYAN)
@@ -585,10 +469,8 @@ async def init_design_node(state: BackendState) -> dict:
     }
 
     if not integration_top:
-        out["previous_error"] = (
-            f"No integration top-level RTL found in {integration_dir}. "
-            "Run the frontend pipeline integration_check first."
-        )
+        out["previous_error"] = manifest_error
+        out["phase"] = "candidate"
 
     write_graph_event(pr, "Init Design", "graph_node_exit", {
         "design_name": design_name,
@@ -598,6 +480,10 @@ async def init_design_node(state: BackendState) -> dict:
     })
 
     return out
+
+
+def route_after_init_design(state: BackendState) -> str:
+    return "ask_human" if state.get("previous_error") else "flat_top_synthesis"
 
 
 def _format_constraints(state: BackendState) -> str:
@@ -706,27 +592,15 @@ def _run_chip_top_gate_sim(state: "BackendState", netlist: str) -> tuple:
     # was read here originally and is NOT a BackendState field: nothing in the
     # flow ever set it, so this gate reported not_run on every real run while
     # its unit test passed by injecting the value itself.
-    from orchestrator.langgraph.integration_helpers import chip_rtl_sources
-
-    # Accept EITHER name. `integration_top_path` is what the backend graph's
-    # own init_design_node produces; `top_rtl_path` is what the frontend state
-    # and .coresmith/integration_result.json call the same artifact. The bug was
-    # never a misspelled key -- it was that NEITHER was populated here, so the
-    # gate silently self-disabled. Reading both, and failing loudly on neither,
-    # is what makes that impossible to reintroduce.
-    top_rtl_path = (state.get("integration_top_path", "")
-                    or state.get("top_rtl_path", "") or "")
-    block_rtl = state.get("block_rtl_paths", {}) or {}
-    if not top_rtl_path:
-        reason = ("no integration top on disk -- the assembled chip's RTL is "
-                  "the gate's reference; without it there is nothing to compare "
-                  "the flat netlist against")
-        log(f"  [CHIP-GATE-SIM] not run -- {reason}", YELLOW)
-        return (None, _gs.STATUS_NOT_RUN, reason)
-    # Dedup: on a Caravel design the assembled top and the pad-adapter block
-    # both declare `module user_project_wrapper`, which is a MODDUP abort.
-    rtl_sources = chip_rtl_sources(
-        top_rtl_path, block_rtl, dedup_dir=root / "sim_build" / "chip_gate_sim_srcs")
+    from orchestrator.harness.top_module import CandidateError, candidate_for_inputs
+    top_rtl_path = state.get("integration_top_path") or state.get("top_rtl_path") or ""
+    try:
+        rec = candidate_for_inputs(root, top_rtl_path, state.get("block_rtl_paths", {}))
+        if rec["defines"] != "none" or rec["parameters"] != "none":
+            raise CandidateError("Chip gate reference does not support the candidate configuration")
+        rtl_sources, design = rec["sources"], rec["top_module"]
+    except CandidateError as exc:
+        return (False, _gs.STATUS_NOT_RUN, str(exc))
 
     log(f"  [CHIP-GATE-SIM] Replaying integration-DV vectors through the FLAT "
         f"chip netlist ({len(rtl_sources)} reference source file(s))...", YELLOW)
@@ -747,7 +621,7 @@ def _run_chip_top_gate_sim(state: "BackendState", netlist: str) -> tuple:
             f"chip RTL ({res.cycles_compared} cycles, "
             f"{res.output_bits_compared} output bits)", GREEN)
         return (True, res.status, res.reason)
-    if res.status == _gs.STATUS_FAIL:
+    if res.status in (_gs.STATUS_FAIL, _gs.STATUS_BOUNDED):
         log(f"  [CHIP-GATE-SIM] FAIL -- {res.reason}", RED)
         return (False, res.status, res.reason)
     log(f"  [CHIP-GATE-SIM] not run -- {res.reason}", YELLOW)
@@ -765,14 +639,6 @@ async def flat_top_synthesis_node(state: BackendState) -> dict:
     pr = _pr(state)
     design_name = state.get("design_name", _block_name(state))
 
-    existing_netlist = state.get("flat_netlist_path", "")
-    if existing_netlist and Path(existing_netlist).exists():
-        log(f"  [FLAT-SYNTH] Using existing netlist: {existing_netlist}", GREEN)
-        write_graph_event(pr, "Flat Top Synthesis", "graph_node_exit", {
-            "design_name": design_name, "skipped": True, "graph": "backend",
-        })
-        return {"phase": "synth"}
-
     integration_top = state.get("integration_top_path", "")
     block_rtl = state.get("block_rtl_paths", {})
 
@@ -780,18 +646,15 @@ async def flat_top_synthesis_node(state: BackendState) -> dict:
         "design_name": design_name, "graph": "backend",
     })
 
-    if not integration_top or not Path(integration_top).exists():
-        error_msg = f"No integration top-level RTL for flat synthesis: {integration_top}"
-        log(f"  [FLAT-SYNTH] FAILED: {error_msg}", RED)
-        write_graph_event(pr, "Flat Top Synthesis", "graph_node_exit", {
-            "design_name": design_name, "success": False, "graph": "backend",
-        })
-        return {
-            "phase": "synth",
-            "previous_error": error_msg,
-            "flat_netlist_path": "",
-            "flat_sdc_path": "",
-        }
+    from orchestrator.harness.top_module import CandidateError, candidate_for_inputs
+    try:
+        rec = candidate_for_inputs(pr, integration_top, block_rtl)
+        if rec["defines"] != "none" or rec["parameters"] != "none":
+            raise CandidateError("Backend synthesis does not support the candidate configuration")
+        design_name = rec["top_module"]
+    except CandidateError as exc:
+        return {"phase": "candidate", "previous_error": str(exc),
+                "flat_netlist_path": "", "flat_sdc_path": ""}
 
     target_clock = state.get("target_clock_mhz", 50.0)
     period_ns = 1000.0 / target_clock
@@ -799,12 +662,8 @@ async def flat_top_synthesis_node(state: BackendState) -> dict:
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     result_json_path = str(Path(output_dir) / "synth_result.json")
 
-    input_lines = [f"- Top-level: `{integration_top}`"]
-    _input_paths = [integration_top]
-    for bname, bpath in block_rtl.items():
-        if bpath != integration_top and Path(bpath).exists():
-            input_lines.append(f"- Block `{bname}`: `{bpath}`")
-            _input_paths.append(bpath)
+    _input_paths = rec["sources"]
+    input_lines = [f"- Selected source: `{path}`" for path in _input_paths]
 
     # Part B: the backend/PD synth selects the SRAM MACRO impl on the cs_sram
     # wrappers (gated by CORESMITH_SRAM_MACRO, default ON). If the design
@@ -835,10 +694,8 @@ async def flat_top_synthesis_node(state: BackendState) -> dict:
             _lib = _wrapper_lib_path()
             _already_defined = bool(re.search(r"\bmodule\s+cs_(?:sram|mem|rom|fpmem)",
                                               _combined))
-            if _lib and Path(_lib).exists() and not _already_defined \
-                    and _lib not in _input_paths:
-                input_lines.append(f"- SRAM wrapper library: `{_lib}`")
-                _sram_wrapper_lib = _lib
+            if _lib and not _already_defined and _lib not in _input_paths:
+                raise CandidateError("SRAM source is outside the candidate manifest")
     except Exception as _exc:  # noqa: BLE001 - macro selection is best-effort
         log(f"  [FLAT-SYNTH] SRAM-macro directive setup skipped: {_exc!r}", YELLOW)
 
@@ -1157,6 +1014,8 @@ def route_after_flat_synth(state: BackendState) -> str:
     state, so ending is not the same as hiding.
     """
     netlist = state.get("flat_netlist_path", "")
+    if state.get("phase") == "candidate":
+        return "ask_human"
     if state.get("stop_after_gate_sim"):
         log("  [BACKEND] stopping after flat synthesis + chip gate-sim "
             f"(gate-sim={state.get('chip_gate_sim_status', 'n/a')}); P&R/DRC/LVS "
@@ -2396,7 +2255,7 @@ async def decide_node(state: BackendState) -> dict:
     """
     block = state["current_block"]
     block_name = block["name"]
-    debug_result = state.get("debug_result", {})
+    debug_result = state.get("debug_result") or {}
     attempt = state["attempt"]
     max_attempts = state["max_attempts"]
 
@@ -2441,7 +2300,7 @@ async def ask_human_node(state: BackendState) -> dict:
     """Pause the graph and surface failure details to the outer agent."""
     block = state["current_block"]
     block_name = block["name"]
-    debug_result = state.get("debug_result", {})
+    debug_result = state.get("debug_result") or {}
 
     write_graph_event(_pr(state), "Ask Human", "graph_node_enter", {
         "block": block_name, "attempt": state["attempt"], "graph": "backend",
@@ -2489,6 +2348,8 @@ async def ask_human_node(state: BackendState) -> dict:
         ],
     }
 
+    if state.get("phase") == "candidate":
+        payload["supported_actions"] = ["retry", "abort"]
     response = interrupt(payload)
 
     write_graph_event(_pr(state), "Ask Human", "graph_node_exit", {
@@ -3019,6 +2880,8 @@ route_decision.__edge_labels__ = {
 def route_after_human(state: BackendState) -> str:
     """Route based on the human's resume action."""
     action = (state.get("human_response") or {}).get("action", "retry")
+    if state.get("phase") == "candidate":
+        return "init_design" if action == "retry" else END
     if action == "accept":
         _phase = state.get("phase", "")
         if _phase == "drc":
@@ -3151,7 +3014,7 @@ def build_backend_graph(checkpointer=None):
 
     # Happy path: init -> synth -> PnR -> DRC -> LVS -> timing -> precheck -> advance
     graph.add_edge(START, "init_design")
-    graph.add_edge("init_design", "flat_top_synthesis")
+    graph.add_conditional_edges("init_design", route_after_init_design)
     graph.add_conditional_edges("flat_top_synthesis", route_after_flat_synth)
     graph.add_conditional_edges("run_pnr", route_after_pnr)
 

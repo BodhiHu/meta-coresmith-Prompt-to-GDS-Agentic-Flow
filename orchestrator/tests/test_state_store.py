@@ -138,19 +138,20 @@ class TestOracleManifest:
         self._seed(pr)
         manifest = write_oracle_manifest(pr)
         assert manifest is not None
-        assert (pr / ".coresmith" / "oracle_manifest.json").exists()
+        from orchestrator.state_store.trust import _manifest_path
+        assert _manifest_path(pr).exists()
         # golden + requirements + ers should all be hashed
         assert any("golden.py" in k for k in manifest["files"])
         res = check_oracle_manifest(pr)
         assert res["ok"] is True
         assert res["checked"] is True
 
-    def test_no_manifest_is_non_blocking(self, pr):
+    def test_no_manifest_fails_closed(self, pr):
         self._seed(pr)
         res = check_oracle_manifest(pr)
-        assert res["ok"] is True
+        assert res["ok"] is False
         assert res["checked"] is False
-        assert res["violation"] is None
+        assert res["violation"]["kind"] == "infrastructure_error"
 
     def test_tampered_golden_flags_oracle_tamper(self, pr):
         self._seed(pr)

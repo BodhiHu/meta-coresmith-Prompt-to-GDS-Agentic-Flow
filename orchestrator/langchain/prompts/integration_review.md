@@ -29,13 +29,21 @@ For EVERY connection in the block diagram:
    packed `tdata` bus and is NOT a mismatch -- do not "fix" it.
 4. **Clock/reset naming**: All blocks must use the same clock and reset port
    names and the same reset polarity, as the requirements / locked interface
-   define them (Caravel tasks: `wb_clk_i` + active-high `wb_rst_i`; otherwise
+   define them (a locked interface's declared names and polarity; otherwise
    the ERS's names; `clk` + active-low `rst_n` only when nothing is specified),
    unless multiple clock domains exist. Flag a block whose reset polarity or
    name differs from its own spec.
 5. **Stub coherence**: The Section 9 Verilog Interface Stub of each block
    must match its own Section 2 port table exactly.
-6. **Memory feasibility**: When a block carries a priced memory ledger
+6. **Pad-adapter scope** (locked-boundary tasks): the block named as the
+   task's declared `top` is a PAD ADAPTER, a leaf exposing the locked
+   boundary pins plus its inward contract ports. The ENGINE
+   assembles the chip top from the blocks and the contract after RTL
+   generation, and its conformance gate rejects a block that instantiates a
+   sibling. "The wrapper does not instantiate the other blocks" / "edges are
+   not routed in the wrapper" are therefore NOT issues -- never count them,
+   never edit a spec to demand a structural top.
+7. **Memory feasibility**: When a block carries a priced memory ledger
    (`.coresmith/blocks/<block>/mem_price.json`), surface it — each declared
    `# MEM` element's priced area (mm²) and its dependency-window justification.
    Flag any storage element whose justification does not defend its depth
@@ -48,7 +56,7 @@ For EVERY connection in the block diagram:
 1. Read `.coresmith/block_diagram.json` to get the full connection list.
 2. Read each uArch spec from `arch/uarch_specs/*.md`.
 3. For each connection, extract the relevant ports from both blocks'
-   Section 9 stubs and verify the 5 checks above.
+   Section 9 stubs and verify the checks above.
 4. If a mismatch is found, **edit the uArch spec file on disk** to fix it.
    Prefer changing the block whose stub contradicts the block diagram's
    `data_width` or `interface` fields. Update both Section 2 (port table)

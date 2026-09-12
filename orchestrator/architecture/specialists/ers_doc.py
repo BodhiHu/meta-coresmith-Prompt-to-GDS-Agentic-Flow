@@ -202,19 +202,10 @@ async def generate_ers_doc(
             return result
 
         except Exception as e:
+            # WP-73: never hand the graph a stub ERS. The ERS is the
+            # validation authority; a failed generation stops the run.
             span.set_attribute("error", str(e))
-            return {
-                "ers": {
-                    "title": "ERS (generation failed)",
-                    "summary": f"ERS generation failed: {e}",
-                    "functional_requirements": [],
-                    "per_block_requirements": [],
-                    "constraints": [],
-                    "verification_requirements": [],
-                    "open_items": [f"ERS generation error: {e}"],
-                },
-                "phase": "ers_complete",
-            }
+            raise RuntimeError(f"ERS generation failed: {e}") from e
 
 
 def _parse_response(content: str) -> dict[str, Any]:

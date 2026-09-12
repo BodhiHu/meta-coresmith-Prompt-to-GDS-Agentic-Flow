@@ -1117,19 +1117,16 @@ async def engineering_requirements_node(state: ArchGraphState) -> dict:
                 project_root=project_root,
             )
             _persist_ers(project_root, ers_result)
-        except Exception:
-            import logging
-
-            logging.getLogger(__name__).warning(
-                "Failed to generate ERS before the constraint gate; the "
-                "cross-artifact consistency check will run without it.",
-                exc_info=True,
-            )
+        except Exception as exc:
+            # WP-73: the ERS is the validation authority; a run must not
+            # continue past a failed generation with no ERS (the review then
+            # accepts an empty stub and validation DV has nothing to check).
             span.set_attribute("ers_generated", False)
             _event(state, "Engineering Requirements", "graph_node_exit", {
                 "round": state["round"], "ers_generated": False,
+                "error": str(exc)[:500],
             })
-            return {"phase": "ers"}
+            raise RuntimeError(f"ERS generation failed: {exc}") from exc
 
         span.set_attribute("ers_generated", True)
         _event(state, "Engineering Requirements", "graph_node_exit", {

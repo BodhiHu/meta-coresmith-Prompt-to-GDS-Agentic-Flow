@@ -138,21 +138,22 @@ def _build_design(tmp_path):
 
 def test_detect_wrapper_by_name(tmp_path):
     modules, _e, _p = _build_design(tmp_path)
-    assert detect_wrapper_block(modules) == "user_project_wrapper"
+    assert detect_wrapper_block(modules, "user_project_wrapper") == "user_project_wrapper"
+    assert detect_wrapper_block(modules) is None      # WP-55: no declared name, no wrapper
 
 
-def test_detect_wrapper_by_io_pads(tmp_path):
-    # Rename the block key so name-match fails; detection falls back to the
-    # io_in/io_out/io_oeb pad vector.
+def test_detect_wrapper_by_module_name_not_pads(tmp_path):
+    # WP-51/55: the block key may differ; the MODULE name must equal the declared top.
     modules, _e, _p = _build_design(tmp_path)
     modules["pad_ring"] = modules.pop("user_project_wrapper")
-    assert detect_wrapper_block(modules) == "pad_ring"
+    assert detect_wrapper_block(modules, "user_project_wrapper") == "pad_ring"
+    assert detect_wrapper_block(modules, "pad_ring") == "pad_ring"
 
 
 def test_detect_none_for_non_caravel(tmp_path):
     modules, _e, _p = _build_design(tmp_path)
     del modules["user_project_wrapper"]  # no io pads left
-    assert detect_wrapper_block(modules) is None
+    assert detect_wrapper_block(modules, "user_project_wrapper") is None
 
 
 # ---------------------------------------------------------------------------

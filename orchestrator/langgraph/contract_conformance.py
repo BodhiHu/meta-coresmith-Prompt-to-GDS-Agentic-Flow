@@ -56,10 +56,14 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+
 #: A block whose module declares the full Caravel pad boundary has externally
 #: MANDATED port names (io_in/io_out/io_oeb[37:0] are fixed by the shuttle), so
 #: the <channel>_<field> convention cannot apply to it.
-_LOCKED_BOUNDARY_PORTS = ("io_in", "io_out", "io_oeb")
+def _locked_boundary_ports(project_root) -> tuple[str, ...]:
+    """WP-51: the task's chassis says which pad ports are locked."""
+    from orchestrator.chassis.profile import locked_boundary_ports
+    return locked_boundary_ports(project_root)
 
 _logger = logging.getLogger(__name__)
 
@@ -199,6 +203,48 @@ def canonical_port(chan: str, signal) -> tuple[str, str]:
     if not chan or sig == chan or sig.startswith(chan + "_"):
         return sig, sig
     return f"{chan}_{sig}", sig
+
+
+def illegal_edge_end_names(edge: dict, chan_raw) -> list[dict]:
+    """The names on ONE END of an edge whose derived port is not a legal
+    Verilog identifier (WP-44). Each entry: {edge_id, channel, signal,
+    derived, message}. Empty when every derived name is declarable."""
+    out: list[dict] = []
+    eid = edge.get("edge_id")
+    chan = channel_base(chan_raw)
+    if chan and not is_legal_identifier(chan):
+        out.append({"edge_id": eid, "channel": str(chan_raw), "signal": "<channel>",
+                    "derived": chan,
+                    "message": (f"edge {eid!r}: channel {chan_raw!r} reduces to "
+                                f"{chan!r}, which is not a legal Verilog identifier "
+                                "-- revise the CONTRACT (a dotted or otherwise "
+                                "undeclarable name cannot be a port)")})
+        return out
+    for spec in signal_specs(edge):
+        port, _bare = canonical_port(chan, spec["name"])
+        if port and not is_legal_identifier(port):
+            out.append({"edge_id": eid, "channel": str(chan_raw), "signal": str(spec["name"]),
+                        "derived": port,
+                        "message": (f"edge {eid!r}: signal {spec['name']!r} on channel "
+                                    f"{chan_raw!r} derives port {port!r}, which is not a "
+                                    "legal Verilog identifier -- revise the CONTRACT")})
+    return out
+
+
+def illegal_contract_names(edges) -> list[dict]:
+    """Every undeclarable derived name across a contract set (both ends of
+    every edge), for the interface-definition structural gate (WP-44)."""
+    out: list[dict] = []
+    for edge in edges or []:
+        if not isinstance(edge, dict):
+            continue
+        for key, end in (("producer_port", "producer"), ("consumer_port", "consumer")):
+            raw = edge.get(key)
+            if not raw:
+                continue
+            for bad in illegal_edge_end_names(edge, raw):
+                out.append({**bad, "end": end})
+    return out
 
 
 def channel_signals(edge: dict, chan_raw) -> list[dict]:
@@ -493,6 +539,58 @@ def format_contract_port_table(project_root, block_name: str) -> str:
     return "\n".join(lines)
 
 
+_PP_RE = re.compile(r"^[ \t]*`(ifdef|ifndef|elsif|else|endif|define|undef|include|timescale|default_nettype|resetall)\b[ \t]*([A-Za-z_][A-Za-z0-9_]*)?[^\n]*$")
+
+
+def strip_preprocessor(text: str, defines=()) -> str:
+    """Evaluate Verilog compiler directives the way lint/sim sees the file
+    with ``defines`` set (default: none), and drop the directive lines (WP-45).
+
+    `ifdef X` keeps its body only when X is defined; `ifndef X` the reverse;
+    `else`/`elsif` switch; nesting is honoured. Without this, a pad block's
+    `ifdef USE_POWER_PINS ... `endif port section was parsed as ports and the
+    assembled Caravel wrapper instantiated a pin named `endif`.
+    """
+    defined = set(defines or ())
+    out: list[str] = []
+    # stack of (this_branch_active, any_branch_taken, parent_active)
+    stack: list[list[bool]] = []
+
+    def _active() -> bool:
+        return all(fr[0] for fr in stack)
+
+    for line in str(text).splitlines(keepends=True):
+        m = _PP_RE.match(line)
+        if not m:
+            if _active():
+                out.append(line)
+            continue
+        kw, name = m.group(1), m.group(2) or ""
+        if kw == "ifdef":
+            parent = _active()
+            take = parent and name in defined
+            stack.append([take, take, parent])
+        elif kw == "ifndef":
+            parent = _active()
+            take = parent and name not in defined
+            stack.append([take, take, parent])
+        elif kw == "elsif":
+            if stack:
+                fr = stack[-1]
+                take = fr[2] and not fr[1] and name in defined
+                fr[0], fr[1] = take, fr[1] or take
+        elif kw == "else":
+            if stack:
+                fr = stack[-1]
+                take = fr[2] and not fr[1]
+                fr[0], fr[1] = take, True
+        elif kw == "endif":
+            if stack:
+                stack.pop()
+        # define/undef/include/timescale/... : dropped, never a port
+    return "".join(out)
+
+
 _PORT_RE = re.compile(r"\b(?:input|output|inout)\b([^;)]*)", re.MULTILINE)
 
 
@@ -506,6 +604,7 @@ def declared_ports(rtl_text: str, module: str | None = None) -> set[str]:
     them, while the top module itself has only the Caravel boundary. Defaults to
     the FIRST module, which is the one the file is named for.
     """
+    rtl_text = strip_preprocessor(rtl_text)   # WP-45
     text = re.sub(r"/\*.*?\*/", " ", rtl_text, flags=re.S)
     text = re.sub(r"//[^\n]*", " ", text)
     if module:
@@ -568,7 +667,8 @@ def check_block(project_root, block_name: str, rtl_path,
     # at all. The architecture specifies a pin ADAPTER with ports; the RTL
     # produced a competing top. Nothing can wire that, which is why the
     # deterministic assembler always fell back to an LLM-authored integration.
-    res.locked_boundary = all(p in ports for p in _LOCKED_BOUNDARY_PORTS)
+    _locked = _locked_boundary_ports(project_root)
+    res.locked_boundary = bool(_locked) and all(p in ports for p in _locked)
 
     bare_owner: dict[str, str] = {}      # bare port -> channel that claimed it
     accepted: set[str] = set()
@@ -586,6 +686,12 @@ def check_block(project_root, block_name: str, rtl_path,
             # or signal spelled as a slash enumeration/alias is reduced here,
             # never concatenated into an unparseable name.
             chan = channel_base(chan_raw)
+            # WP-44: an undeclarable derived name fails the block with the
+            # reason instead of vanishing from the port set (channel_signals
+            # still drops it from the rows, so the generator is never asked
+            # to declare it).
+            for _bad in illegal_edge_end_names(edge, chan_raw):
+                res.ambiguous.append((chan or chan_raw, _bad["message"]))
             for row in channel_signals(edge, chan_raw):
                 prefixed, bare = row["port"], row["bare"]
                 has_p = prefixed in ports
@@ -632,7 +738,7 @@ def check_block(project_root, block_name: str, rtl_path,
                 if base:
                     channels.add(base)
     for port in sorted(ports):
-        if port in accepted or port in _LOCKED_BOUNDARY_PORTS:
+        if port in accepted or port in _locked:
             continue
         for chan in channels:
             if port.startswith(chan + "_"):

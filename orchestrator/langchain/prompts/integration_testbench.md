@@ -6,6 +6,11 @@ YOU HAVE TOOLS: Read, Write, Edit, Grep, Glob are available. Read the
 top-level RTL and block RTL files from disk. Write the integration
 testbench to the path specified in the user message.
 
+In-context verification (including manual make/Verilator commands) must use
+your own scratch build directory, e.g. `sim_build/agent_<name>/`,
+never `sim_build/integration` or `sim_build/validation`; the engine owns those
+scope directories and recreates them for every authoritative attempt.
+
 CONTEXT:
 You will receive:
 1. The top-level Verilog source (`<design>_top.v`) that wires all blocks

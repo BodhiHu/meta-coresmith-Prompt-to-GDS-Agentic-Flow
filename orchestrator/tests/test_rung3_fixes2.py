@@ -140,27 +140,25 @@ class TestDeclaredDimensions:
 # Defect 1 (b): the deterministic marker gate verdict.
 # ===========================================================================
 class TestMaxgeoGateVerdict:
-    def test_missing_marker_when_dims_declared_is_rejected(self, tmp_path):
+    def test_missing_marker_without_owner_cases_is_uncertified(self, tmp_path):
         _write_ers(tmp_path, _VIDEO_DIMS_DOC)
         tb = _write_tb(tmp_path / "tb" / "t.py", "import cocotb\n# no marker\n")
         v = pipeline_graph._maxgeo_gate_verdict(str(tmp_path), tb)
         assert v is not None
         assert v["uncovered_dims"] == {"frame_width": 640, "frame_height": 352}
 
-    def test_marker_covering_all_dims_passes(self, tmp_path):
+    def test_marker_covering_all_dims_is_unexecuted(self, tmp_path):
         _write_ers(tmp_path, _VIDEO_DIMS_DOC)
         tb = _write_tb(
             tmp_path / "tb" / "t.py",
             "import cocotb\n# MAXGEO: frame_width=640 frame_height=352\n",
         )
         v = pipeline_graph._maxgeo_gate_verdict(str(tmp_path), tb)
-        # run3-followups: an evaluated PASS is a verdict the caller LOGS,
-        # not a silent None (None now means only "gate disabled or no
-        # declared dims").
-        assert v is not None and v.get("verdict") == "pass"
+        # Complete markers still have no execution evidence.
+        assert v is not None and v.get("verdict") == "not_declared"
         assert v["marker_pairs"] == {"frame_width": 640, "frame_height": 352}
 
-    def test_partial_marker_is_rejected(self, tmp_path):
+    def test_partial_marker_without_owner_cases_is_uncertified(self, tmp_path):
         _write_ers(tmp_path, _VIDEO_DIMS_DOC)
         tb = _write_tb(
             tmp_path / "tb" / "t.py",
@@ -168,7 +166,7 @@ class TestMaxgeoGateVerdict:
         )
         v = pipeline_graph._maxgeo_gate_verdict(str(tmp_path), tb)
         assert v is not None
-        assert v["uncovered_dims"] == {"frame_height": 352}
+        assert v["uncovered_dims"] == {"frame_width": 640, "frame_height": 352}
 
     def test_no_dims_declared_is_noop(self, tmp_path):
         _write_ers(tmp_path, _NO_DIMS_DOC)
@@ -178,7 +176,7 @@ class TestMaxgeoGateVerdict:
     def test_gate_disabled_env_is_noop(self, tmp_path, monkeypatch):
         _write_ers(tmp_path, _VIDEO_DIMS_DOC)
         tb = _write_tb(tmp_path / "tb" / "t.py", "import cocotb\n# no marker\n")
-        # Enabled (default) -> rejected; disabled -> no-op. Both branches.
+        # Enabled (default) -> scope record; disabled -> no-op. Both branches.
         assert pipeline_graph._maxgeo_gate_verdict(str(tmp_path), tb) is not None
         monkeypatch.setenv("CORESMITH_MAXGEO_GATE", "0")
         assert not pipeline_graph._maxgeo_gate_enabled()
@@ -190,7 +188,7 @@ class TestMaxgeoGateGenericNonVideo:
     IDENTICALLY on a non-video dimension class (FIFO depth / max burst / address
     range) with zero video vocabulary anywhere in the design."""
 
-    def test_nonvideo_missing_marker_rejected(self, tmp_path):
+    def test_nonvideo_missing_marker_without_owner_cases_is_uncertified(self, tmp_path):
         _write_ers(tmp_path, _NONVIDEO_DIMS_DOC)
         tb = _write_tb(tmp_path / "tb" / "t.py", "import cocotb\n")
         v = pipeline_graph._maxgeo_gate_verdict(str(tmp_path), tb)
@@ -199,7 +197,7 @@ class TestMaxgeoGateGenericNonVideo:
             "cmd_fifo": 512, "max_burst_len": 256, "addr_range": 1024,
         }
 
-    def test_nonvideo_marker_covering_all_passes(self, tmp_path):
+    def test_nonvideo_marker_covering_all_is_unexecuted(self, tmp_path):
         _write_ers(tmp_path, _NONVIDEO_DIMS_DOC)
         tb = _write_tb(
             tmp_path / "tb" / "t.py",
@@ -207,9 +205,9 @@ class TestMaxgeoGateGenericNonVideo:
             "# MAXGEO: cmd_fifo=512 max_burst_len=256 addr_range=1024\n",
         )
         v = pipeline_graph._maxgeo_gate_verdict(str(tmp_path), tb)
-        assert v is not None and v.get("verdict") == "pass"
+        assert v is not None and v.get("verdict") == "not_declared"
 
-    def test_nonvideo_partial_marker_rejected(self, tmp_path):
+    def test_nonvideo_partial_marker_without_owner_cases_is_uncertified(self, tmp_path):
         _write_ers(tmp_path, _NONVIDEO_DIMS_DOC)
         tb = _write_tb(
             tmp_path / "tb" / "t.py",
@@ -217,7 +215,7 @@ class TestMaxgeoGateGenericNonVideo:
         )
         v = pipeline_graph._maxgeo_gate_verdict(str(tmp_path), tb)
         assert v is not None
-        assert v["uncovered_dims"] == {"max_burst_len": 256}
+        assert v["uncovered_dims"] == {"cmd_fifo": 512, "max_burst_len": 256, "addr_range": 1024}
 
 
 # ===========================================================================
@@ -268,10 +266,14 @@ def _wire_integration_node(monkeypatch, tmp_path, *, tb_body):
 
 class TestMaxgeoNodeWiring:
     @pytest.mark.asyncio
-    async def test_integration_dv_flips_to_failed_when_marker_missing(
+    async def test_integration_dv_flips_to_failed_when_owner_cases_unexecuted(
         self, tmp_path, monkeypatch
     ):
         _write_ers(tmp_path, _VIDEO_DIMS_DOC)
+        (tmp_path / "inputs").mkdir()
+        (tmp_path / "inputs/task.yaml").write_text(json.dumps({"max_geometry_cases": {
+            "owner_max": {"frame_width": 640, "frame_height": 352},
+        }}))
         interrupts = []
 
         def fake_interrupt(payload):
@@ -336,7 +338,7 @@ class TestMaxgeoFunctionalMaxCase:
         assert case == {"name": "big_case", "cfg0": 256,
                         "in_bytes": 512, "out_bytes": 1024}
 
-    def test_attaining_case_downgrades_to_advisory(self, tmp_path):
+    def test_marker_case_is_still_unexecuted(self, tmp_path):
         _write_ers(tmp_path, _NONVIDEO_DIMS_DOC)
         tb = _write_tb(
             tmp_path / "tb" / "t.py",
@@ -345,13 +347,15 @@ class TestMaxgeoFunctionalMaxCase:
             "# MAXGEO_CASE: name=big cfg0=256 in_bytes=512 out_bytes=1024\n",
         )
         v = pipeline_graph._maxgeo_gate_verdict(str(tmp_path), tb)
-        assert v is not None and v.get("advisory") is True
-        assert v.get("scope") == "functional-max-case"
-        assert v["uncovered_dims"] == {"cmd_fifo": 512, "max_burst_len": 256}
-        assert "functional_max_case" in v
+        assert v is not None and v["verdict"] == "not_declared"
+        assert v["uncovered_dims"] == {"cmd_fifo": 512, "max_burst_len": 256, "addr_range": 1024}
 
     def test_non_attaining_case_stays_hard(self, tmp_path):
         _write_ers(tmp_path, _NONVIDEO_DIMS_DOC)
+        (tmp_path / "inputs").mkdir()
+        (tmp_path / "inputs/task.yaml").write_text(json.dumps({"max_geometry_cases": {
+            "small": {"cmd_fifo": 7, "max_burst_len": 256, "addr_range": 1024},
+        }}))
         tb = _write_tb(
             tmp_path / "tb" / "t.py",
             "import cocotb\n"
@@ -360,5 +364,5 @@ class TestMaxgeoFunctionalMaxCase:
         )
         v = pipeline_graph._maxgeo_gate_verdict(str(tmp_path), tb)
         assert v is not None and not v.get("advisory")
-        assert v.get("verdict") != "pass"
+        assert v.get("verdict") == "unknown"
         assert "uncovered_dims" in v

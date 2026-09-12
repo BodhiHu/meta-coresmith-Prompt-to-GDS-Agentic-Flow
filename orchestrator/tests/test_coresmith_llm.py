@@ -737,7 +737,9 @@ class TestCommandConstruction:
             assert "--json" in cmd
             assert "-m" in cmd
             assert cmd[cmd.index("-m") + 1] == "gpt-5.6-sol"
-            assert "--dangerously-bypass-approvals-and-sandbox" in cmd
+            # WP-50: the sandbox is real by default
+            assert "--dangerously-bypass-approvals-and-sandbox" not in cmd
+            assert cmd[cmd.index("--sandbox") + 1] == "workspace-write"
 
 
 class TestWatchdogBehaviour:
@@ -882,7 +884,6 @@ class TestBuildCodexCmdFlagFiltering:
         expected = [
             "/x/codex", "exec",
             "--json",
-            "--dangerously-bypass-approvals-and-sandbox",
             "--sandbox", "workspace-write",
             "--skip-git-repo-check",
             "-C", "/wd",
@@ -893,7 +894,7 @@ class TestBuildCodexCmdFlagFiltering:
         # A supported_flags set that would drop everything must NOT affect fresh.
         cmd = ClaudeLLM._build_codex_cmd(
             "/x/codex", "gpt-5.5", "/wd", "workspace-write",
-            None, supported_flags=frozenset(),
+            None, supported_flags=frozenset(), project_root="",
         )
         assert cmd == expected
 
@@ -906,21 +907,30 @@ class TestBuildCodexCmdFlagFiltering:
         assert cmd[2:4] == ["resume", "sess"]
         assert "--sandbox" in cmd  # None -> no filtering
 
-    def test_resume_drops_unsupported_flags(self, monkeypatch):
+    def test_resume_without_sandbox_support_starts_fresh(self, monkeypatch):
+        """WP-56: a resume that cannot carry the write boundary is not a resume."""
         monkeypatch.setenv("CORESMITH_CODEX_RESUME", "1")
         supported = frozenset({"--json", "-C", "-m"})
         cmd = ClaudeLLM._build_codex_cmd(
             "/x/codex", "gpt-5.5", "/wd", "workspace-write",
-            "sess", supported_flags=supported,
+            "sess", supported_flags=supported, project_root="/proj",
+        )
+        assert cmd[:2] == ["/x/codex", "exec"] and "resume" not in cmd
+        assert cmd[cmd.index("--sandbox") + 1] == "workspace-write"
+        assert cmd[cmd.index("--add-dir") + 1] == "/proj"
+        assert "--dangerously-bypass-approvals-and-sandbox" not in cmd
+        assert cmd[-1] == "-"
+
+    def test_resume_keeps_flags_when_supported(self, monkeypatch):
+        monkeypatch.setenv("CORESMITH_CODEX_RESUME", "1")
+        supported = frozenset({"--json", "-C", "-m", "--sandbox", "--add-dir", "-c",
+                               "--skip-git-repo-check"})
+        cmd = ClaudeLLM._build_codex_cmd(
+            "/x/codex", "gpt-5.5", "/wd", "workspace-write",
+            "sess", supported_flags=supported, project_root="/proj",
         )
         assert cmd[2:4] == ["resume", "sess"]
-        assert "--sandbox" not in cmd
-        assert "workspace-write" not in cmd  # dropped flag's value gone too
-        assert "--dangerously-bypass-approvals-and-sandbox" not in cmd
-        assert "--json" in cmd
-        assert cmd[cmd.index("-m") + 1] == "gpt-5.5"
-        assert cmd[cmd.index("-C") + 1] == "/wd"
-        assert cmd[-1] == "-"
+        assert cmd[cmd.index("--add-dir") + 1] == "/proj"
 
     def test_resume_flags_dropped_helper(self):
         dropped = ClaudeLLM._resume_flags_dropped(frozenset({"--json", "-C", "-m"}))
@@ -1013,8 +1023,8 @@ class TestCodexResumeReprobe:
         first_cmd = mw.call_args_list[0][0][0]
         second_cmd = mw.call_args_list[1][0][0]
         assert "--sandbox" in first_cmd            # the failing argv
-        assert second_cmd[2] == "resume"           # retried as a RESUME, not fresh
-        assert "--sandbox" not in second_cmd       # filtered after re-probe
+        assert second_cmd[2] != "resume"           # WP-56: no resume without the write boundary
+        assert "--sandbox" in second_cmd           # the fresh call keeps the boundary
         assert model.last_session_id == "s2"
 
     @patch("orchestrator.langchain.agents.coresmith_llm._find_codex_binary")
@@ -1075,7 +1085,8 @@ class TestCodexResumeCwd:
             coresmith_llm, "_codex_resume_supported_flags",
             lambda p: frozenset({
                 "--json", "--dangerously-bypass-approvals-and-sandbox",
-                "--sandbox", "--skip-git-repo-check", "-c", "-m",
+                "--sandbox",
+                "--add-dir", "--skip-git-repo-check", "-c", "-m",
             }),
         )
 

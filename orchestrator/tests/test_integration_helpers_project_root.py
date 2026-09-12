@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 
 from orchestrator.langgraph import integration_helpers as ih
+from orchestrator.tests.candidate_fixtures import adopt
 
 
 class _Stop(Exception):
@@ -98,6 +99,7 @@ class TestRunIntegrationSimulationProjectRoot:
 
         monkeypatch.setattr(ih.subprocess, "Popen", _fake_popen)
         top = _top(run_root)
+        adopt(kwargs.get("project_root", ih.PROJECT_ROOT), top)
         tb = run_root / "test_chip_top.py"
         tb.write_text("import cocotb\n")
         with pytest.raises(_Stop):

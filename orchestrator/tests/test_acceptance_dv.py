@@ -22,6 +22,7 @@ from orchestrator.langgraph.acceptance_dv import (
     map_stimulus,
     run_acceptance_dv,
 )
+from orchestrator.tests.candidate_fixtures import adopt
 
 FRAMED_HEADER = """
 module toy_top (
@@ -62,16 +63,17 @@ class TestContractDiscovery:
 class TestStimulusMapping:
     _contract = classify_contract(discover_ports(FRAMED_HEADER))
 
-    def test_dict_with_substring_sideband(self):
-        m = map_stimulus({"pixels": [1, 2, 3], "offset": 7}, self._contract)
+    _mapping = {"payload": "pixels", "input_width": 8, "output_width": 8,
+                "packing": "bytes", "byte_order": "little", "sidebands": {"cfg_offset": "offset"}}
+
+    def test_declared_sideband_mapping(self):
+        m = map_stimulus({"pixels": [1, 2, 3], "offset": 7}, self._contract, mapping=self._mapping)
         assert m["payload"] == [1, 2, 3]
         assert m["sidebands"] == {"cfg_offset": 7}
         assert m["unmapped"] == []
 
     def test_flat_list(self):
-        m = map_stimulus([9, 8], self._contract)
-        assert m["payload"] == [9, 8]
-        assert m["sidebands"] == {}
+        assert map_stimulus([9, 8], self._contract) is None
 
     def test_unmappable(self):
         assert map_stimulus({"qp": 20}, self._contract) is None  # no payload
@@ -291,6 +293,11 @@ endmodule
 
 def _write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    if path.name == "acceptance_stimulus.py":
+        width = 32 if text == WORD_ACCEPTANCE else 8
+        mapping = {"payload": "pixels", "input_width": width, "output_width": width,
+                   "packing": "bytes", "byte_order": "little", "sidebands": {"cfg_offset": "offset"}}
+        text += f"\nAXIS_MAPPING = {mapping!r}\n"
     path.write_text(text, encoding="utf-8")
 
 
@@ -319,6 +326,7 @@ class TestAcceptanceDVEndToEnd:
     def test_correct_dut_passes(self, tmp_path, monkeypatch):
         _env(monkeypatch)
         root, top = _project(tmp_path)
+        adopt(root, top, name="toy_top")
         res = run_acceptance_dv(str(root), str(top))
         assert not res["skipped"], res["reason"]
         assert res["passed"], res
@@ -329,6 +337,7 @@ class TestAcceptanceDVEndToEnd:
     def test_wrong_dut_diverges_with_offset(self, tmp_path, monkeypatch):
         _env(monkeypatch)
         root, top = _project(tmp_path, bug="+ 8'd1")
+        adopt(root, top, name="toy_top")
         res = run_acceptance_dv(str(root), str(top))
         assert not res["skipped"], res["reason"]
         assert not res["passed"]
@@ -340,6 +349,7 @@ class TestAcceptanceDVEndToEnd:
         _env(monkeypatch)
         root, top = _project(tmp_path)
         (root / "inputs" / "acceptance_stimulus.py").unlink()
+        adopt(root, top, name="toy_top")
         res = run_acceptance_dv(str(root), str(top))
         assert res["skipped"]
         assert "acceptance stimulus" in res["reason"]
@@ -352,6 +362,7 @@ class TestAcceptanceDVEndToEnd:
         root, top = _project(tmp_path)
         _write(root / "inputs" / "toy_golden.py",
                'def run(stim):\n    raise ValueError("boom")\n')
+        adopt(root, top, name="toy_top")
         res = run_acceptance_dv(str(root), str(top))
         assert res["skipped"], res
         assert not res["passed"]
@@ -367,6 +378,7 @@ class TestAcceptanceDVEndToEnd:
                '    off = stim.get("offset", 0)\n'
                '    return np.asarray([(v + off) & 0xFF for v in stim["pixels"]],\n'
                '                      dtype=np.uint8)\n')
+        adopt(root, top, name="toy_top")
         res = run_acceptance_dv(str(root), str(top))
         assert not res["skipped"], res["reason"]
         assert res["passed"], res
@@ -381,6 +393,7 @@ class TestAcceptanceDVEndToEnd:
         _write(top, NO_TLAST_DUT)
         _write(root / "inputs" / "toy_golden.py", REFERENCE)
         _write(root / "inputs" / "acceptance_stimulus.py", ACCEPTANCE)
+        adopt(root, top, name="toy_top")
         res = run_acceptance_dv(str(root), str(top))
         assert not res["skipped"], res["reason"]
         assert res["passed"], res
@@ -390,6 +403,7 @@ class TestAcceptanceDVEndToEnd:
         _env(monkeypatch)
         monkeypatch.setenv("CORESMITH_ACCEPTANCE_DV", "0")
         root, top = _project(tmp_path)
+        adopt(root, top, name="toy_top")
         res = run_acceptance_dv(str(root), str(top))
         assert res["skipped"]
 
@@ -402,6 +416,7 @@ class TestAcceptanceDVEndToEnd:
         _write(top, DROP_DUT)
         _write(root / "inputs" / "toy_golden.py", REFERENCE)
         _write(root / "inputs" / "acceptance_stimulus.py", ACCEPTANCE)
+        adopt(root, top, name="toy_top")
         res = run_acceptance_dv(str(root), str(top))
         assert not res["skipped"], res["reason"]
         assert not res["passed"], "backpressure must expose the dropped beat"
@@ -416,6 +431,7 @@ class TestAcceptanceDVEndToEnd:
         _write(top, DROP_DUT)
         _write(root / "inputs" / "toy_golden.py", REFERENCE)
         _write(root / "inputs" / "acceptance_stimulus.py", ACCEPTANCE)
+        adopt(root, top, name="toy_top")
         res = run_acceptance_dv(str(root), str(top))
         assert not res["skipped"], res["reason"]
         assert res["passed"], "no-backpressure harness misses the drop (blind spot)"
@@ -430,6 +446,7 @@ class TestAcceptanceDVEndToEnd:
         _write(top, WORD_DUT)
         _write(root / "inputs" / "toy_golden.py", WORD_REFERENCE)
         _write(root / "inputs" / "acceptance_stimulus.py", WORD_ACCEPTANCE)
+        adopt(root, top, name="toy_top")
         res = run_acceptance_dv(str(root), str(top))
         assert not res["skipped"], res["reason"]
         assert res["passed"], res
@@ -444,6 +461,7 @@ class TestAcceptanceDVEndToEnd:
                                      "s_axis_tdata + cfg_offset + 32'h100"))
         _write(root / "inputs" / "toy_golden.py", WORD_REFERENCE)
         _write(root / "inputs" / "acceptance_stimulus.py", WORD_ACCEPTANCE)
+        adopt(root, top, name="toy_top")
         res = run_acceptance_dv(str(root), str(top))
         assert not res["skipped"], res["reason"]
         assert not res["passed"], "wrong upper-byte offset must be caught"
@@ -494,35 +512,17 @@ endmodule
 
 
 class TestShapeDerivedSidebands:
-    """dv-hardening-24 (armD defect #10): width/height sidebands must be
-    derived from the payload's 2D shape when the stimulus doesn't name them --
-    unmapped sidebands drove 0 and the chip waited forever on a 0x0 frame."""
+    def test_undeclared_array_geometry_is_not_inferred(self):
+        contract = {"sidebands": {"cfg_frame_width": 8, "cfg_frame_height": 8}}
+        assert map_stimulus({"frames": [[1, 2], [3, 4]]}, contract) is None
 
-    def test_width_height_from_2d_shape(self):
-        import numpy as np
-
-        from orchestrator.langgraph.acceptance_dv import map_stimulus
-
-        contract = {
-            "sidebands": {"cfg_frame_width": 8, "cfg_frame_height": 8,
-                          "cfg_qp": 6},
-        }
-        stim = {"frames": np.zeros((1, 144, 176), dtype=np.uint8), "qp": 28}
-        m = map_stimulus(stim, contract)
-        assert m is not None
-        assert m["sidebands"]["cfg_frame_width"] == 176
-        assert m["sidebands"]["cfg_frame_height"] == 144
-        assert m["sidebands"]["cfg_qp"] == 28
-        assert m["unmapped"] == []
-
-    def test_explicit_values_not_overridden(self):
-        from orchestrator.langgraph.acceptance_dv import map_stimulus
-
-        contract = {"sidebands": {"cfg_frame_width": 8}}
-        stim = {"frames": [[1, 2], [3, 4]], "frame_width": 99}
-        m = map_stimulus(stim, contract)
-        assert m is not None
-        assert m["sidebands"]["cfg_frame_width"] == 99
+    def test_explicit_sidebands_are_used_verbatim(self):
+        contract = {"s_axis": {"data_width": 8}, "m_axis": {"data_width": 8},
+                    "sidebands": {"cfg_frame_width": 8}}
+        mapping = {"payload": "samples", "input_width": 8, "output_width": 8,
+                   "packing": "bytes", "byte_order": "little", "sidebands": {"cfg_frame_width": "width"}}
+        mapped = map_stimulus({"samples": [1, 2, 3, 4], "width": 99}, contract, mapping=mapping)
+        assert mapped["sidebands"] == {"cfg_frame_width": 99}
 
 
 class TestMultiInputStreamHonestSkip:

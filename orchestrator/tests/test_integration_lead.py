@@ -18,6 +18,7 @@ Coverage:
 from __future__ import annotations
 
 import json
+import shutil
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -478,6 +479,13 @@ class TestIntegrationCheckNode:
         # asserted error/warning counts. Its own behaviour is covered in
         # test_integration_compat_wiring.py, so disable it here.
         monkeypatch.setenv("CORESMITH_DETERMINISTIC_INTEGRATION_CHECK", "0")
+        monkeypatch.setattr("orchestrator.harness.top_module.write_candidate_receipt", lambda *a, **k: {})
+        # These routing tests mock file IO; elaboration is covered with real
+        # sources and fake tool receipts in test_wp59_elaborated_hierarchy.
+        monkeypatch.setattr(
+            "orchestrator.langchain.agents.integration_lead.assert_blocks_instantiated",
+            lambda *a, **k: None)
+
 
     def _make_completed_blocks(self, names: list[str]) -> list[dict]:
         return [
@@ -1038,6 +1046,13 @@ class TestIntegrationCheckWarningTriage:
         # error-severity findings on the degenerate fixtures and change the
         # interrupt path. Covered separately in test_integration_compat_wiring.py.
         monkeypatch.setenv("CORESMITH_DETERMINISTIC_INTEGRATION_CHECK", "0")
+        monkeypatch.setattr("orchestrator.harness.top_module.write_candidate_receipt", lambda *a, **k: {})
+        # These routing tests mock file IO; elaboration is covered with real
+        # sources and fake tool receipts in test_wp59_elaborated_hierarchy.
+        monkeypatch.setattr(
+            "orchestrator.langchain.agents.integration_lead.assert_blocks_instantiated",
+            lambda *a, **k: None)
+
 
     def _state(self):
         return {
@@ -1295,6 +1310,7 @@ class TestIntegrationHelpers:
 # assert_blocks_instantiated postcondition
 # ---------------------------------------------------------------------------
 
+@pytest.mark.skipif(not shutil.which("yosys"), reason="requires yosys")
 class TestAssertBlocksInstantiated:
     """Postcondition for Integration Lead's chip_top output.
 
@@ -1310,7 +1326,9 @@ module chip_top (input clk, input rst_n);
 endmodule
 """
         assert assert_blocks_instantiated(
-            chip_top, {"block_a", "block_b"}
+            chip_top, {"block_a", "block_b"}, top_module="chip_top",
+            sources=["module block_a(input clk, input rst_n); endmodule",
+                     "module block_b(input clk, input rst_n); endmodule"]
         ) is None
 
     def test_missing_block_fails(self):
@@ -1344,21 +1362,14 @@ module chip_top;
     block_a #(.WIDTH(8)) u_a (.clk(clk));
 endmodule
 """
-        assert assert_blocks_instantiated(chip_top, {"block_a"}) is None
+        assert assert_blocks_instantiated(
+            chip_top, {"block_a"}, top_module="chip_top",
+            sources=["module block_a #(parameter WIDTH=1)(input clk); endmodule"]) is None
 
     def test_empty_chip_top_with_no_blocks_passes(self):
         assert assert_blocks_instantiated("", set()) is None
 
-    def test_accepts_exact_openframe_pad_adapter_instance(self):
-        chip_top = """\
-module chip_top;
-    reference_codec_openframe_pad_adapter u_openframe_project_wrapper ();
-endmodule
-"""
-        assert assert_blocks_instantiated(
-            chip_top, {"openframe_project_wrapper"}
-        ) is None
-
+    # WP-55: the codec-named pad-adapter waiver is gone; hierarchy is judged from the top.
     def test_rejects_misnamed_openframe_pad_adapter_instance(self):
         chip_top = """\
 module chip_top;

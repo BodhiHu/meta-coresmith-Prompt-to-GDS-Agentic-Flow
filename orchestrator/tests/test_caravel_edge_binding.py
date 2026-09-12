@@ -9,6 +9,9 @@ the channel to constants."""
 from __future__ import annotations
 
 import re
+import shutil
+
+import pytest
 
 from orchestrator.langgraph.integration_helpers import (
     generate_caravel_wrapper_top,
@@ -123,6 +126,7 @@ def test_unnamed_edge_still_falls_back(tmp_path):
     assert not any("does not resolve" in w for w in asm["wiring_errors"])
 
 
+@pytest.mark.skipif(not shutil.which("yosys"), reason="requires yosys")
 class TestBlocksInstantiatedCollision:
     def test_top_named_block_satisfied_by_pads_rename(self):
         from orchestrator.langchain.agents.integration_lead import (
@@ -135,7 +139,9 @@ class TestBlocksInstantiatedCollision:
             "  fft_engine u_fft (.clk(wb_clk_i));\n"
             "endmodule\n")
         assert assert_blocks_instantiated(
-            top, ["user_project_wrapper", "fft_engine"]) is None
+            top, ["user_project_wrapper", "fft_engine"], top_module="user_project_wrapper",
+            sources=["module user_project_wrapper_pads(input wb_clk_i); endmodule",
+                     "module fft_engine(input clk); endmodule"]) is None
 
     def test_collision_without_pads_instance_still_caught(self):
         from orchestrator.langchain.agents.integration_lead import (
