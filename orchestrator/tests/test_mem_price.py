@@ -590,7 +590,7 @@ class TestGateVerdictHelper:
         self._spec(tmp_path, "legacy", "sram_budget = 4 KiB (1x sky130_sram)\n")
         assert pg._mem_price_gate_verdict(str(tmp_path), "legacy") is None
 
-    def test_absent_manifest_strict_rejects(self, tmp_path, monkeypatch):
+    def test_absent_manifest_is_unpriced_not_over_budget(self, tmp_path, monkeypatch):
         pg = self._pg(monkeypatch)
         monkeypatch.setenv("CORESMITH_MEM_MANIFEST_REQUIRED", "1")
         self._spec(tmp_path, "legacy", "sram_budget = 4 KiB (1x sky130_sram)\n")
@@ -598,6 +598,11 @@ class TestGateVerdictHelper:
         assert r is None  # WP-11: a missing manifest is advisory (ledger note), not a re-spec
         led = json.loads((tmp_path / ".coresmith" / "blocks" / "legacy" / "mem_price.json").read_text())
         assert led.get("manifest_present") is False
+        assert led["ok"] is False  # Pricing was not established.
+        assert led["over_budget"] is False  # No measured excess exists.
+        assert led["deferred"] is False
+        assert "unpriced" in led["note"]
+        assert mp.deferred_over_budget_blocks(str(tmp_path), ["legacy"]) == []
 
     def test_revise_cap_accepts_after_bound(self, tmp_path, monkeypatch):
         pg = self._pg(monkeypatch)

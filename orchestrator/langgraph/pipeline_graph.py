@@ -1447,10 +1447,9 @@ def _mem_price_gate_verdict(project_root: str, block_name: str) -> dict | None:
     flop-bits floor -- never blocking on a missing PDK), writes the priced
     ``mem_price.json`` ledger, and returns a re-spec request when the block busts
     its area budget or a single memory busts the sanity cap. Returns None to
-    accept the spec. Loud-warns (and accepts) a legacy/prose-only spec that
-    declares storage but no manifest unless strict: strict = the global
-    CORESMITH_MEM_MANIFEST_REQUIRED opt-in OR (param-schema-1) the run's ERS
-    declares a typed ``parameters`` block (new-schema run).
+    accept the spec. A spec that declares storage without a manifest is
+    advisory under WP-11. With CORESMITH_MEM_MANIFEST_REQUIRED or a typed ERS
+    parameters block, its ledger records unpriced storage, not an area excess.
     """
     from orchestrator.langgraph import mem_price as _mprice
     from orchestrator.langgraph.ppa_check import floor_area_budget, parse_area_budget
@@ -1513,20 +1512,17 @@ def _mem_price_gate_verdict(project_root: str, block_name: str) -> dict | None:
     # tiny declared "~2 um2") can't hold a pin-mux to a sub-cell area budget.
     area_budget = floor_area_budget(parse_area_budget(spec_text), block_name, spec_text)
 
-    # Absent manifest: reject only in strict manifest mode AND when the spec
-    # machine-readably declares storage; otherwise warn loudly and accept.
-    # Strict mode is EITHER the global CORESMITH_MEM_MANIFEST_REQUIRED opt-in
-    # OR (param-schema-1) a new-schema run -- one whose ERS declares a typed
-    # `parameters` block. Schema presence is the per-run strict signal, so a
-    # new-schema run rejects a storage-declaring spec that omits its manifest
-    # while legacy prose-only runs stay warn-only (global default untouched).
+    # WP-11 makes an absent manifest advisory even in strict manifest mode.
+    # Preserve the unpriced status for strict/new-schema runs without claiming
+    # an over-budget measurement: no area has been evaluated in this branch.
     strict_manifest = _mprice.manifest_required() or _ers_parameters_block_present(project_root)
     if not decls:
         if _mprice.spec_declares_storage(spec_text):
             if strict_manifest:
                 led = _mprice.format_ledger(
                     block_name, _mprice.MemPriceVerdict(ok=False), area_budget_um2=area_budget,
-                    manifest_present=False, note="storage declared but no # MEM manifest")
+                    manifest_present=False, over_budget=False,
+                    note="storage declared but no # MEM manifest; unpriced, budget not evaluated")
                 _mprice.write_ledger(project_root, block_name, led)
                 log(f"  [MEM-PRICE] {block_name}: storage declared but no # MEM "
                     "manifest -- advisory (WP-11); pricing skipped", YELLOW)
