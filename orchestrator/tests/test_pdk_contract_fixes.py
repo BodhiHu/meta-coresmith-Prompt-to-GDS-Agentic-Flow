@@ -23,6 +23,8 @@ def test_pnr_prompt_keeps_pdn_pin_layer_connected():
     assert "add_pdn_stripe -grid stdcell_grid -layer met5" in prompt
     assert "add_pdn_connect -grid stdcell_grid -layers {{met4 met5}}" in prompt
     assert "CORESMITH_PNR_TOOL_TIMEOUT:-1650" in prompt
+    assert "1650-second inner default" in prompt
+    assert "default 1800-second" in prompt
 
 
 def test_prompts_exclude_clock_from_input_delay():
@@ -73,5 +75,6 @@ def test_renderer_requests_offscreen_qt(tmp_path, monkeypatch):
 
     monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
     monkeypatch.setattr(bh.subprocess, "run", fake_run)
+    assert Path(bh.RENDER_SCRIPT).is_file()
     assert bh.render_layout_image(str(source), str(output)) is True
     assert captured["env"]["QT_QPA_PLATFORM"] == "offscreen"

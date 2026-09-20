@@ -66,6 +66,10 @@ CS="${CORESMITH_CLI:-coresmith}"
    Exit code: 0 pass / 1 checker fail (read `.checks[]`; the route-DRC checker is
    BLOCKING) / 3 infra / 4 unsupported. The JSON carries `.metrics` (WNS/TNS,
    area, route DRC).
+   The 1650-second inner default leaves 150 seconds for the default 1800-second
+   LLM worker to serialize the tool result and diagnostics. If you override
+   `CORESMITH_PNR_TIMEOUT`, also set `CORESMITH_PNR_TOOL_TIMEOUT` to a smaller
+   positive value with a similar margin.
 4. If the run fails, read the error from the JSON (and the log it points to),
    edit the script to fix it, and retry (up to 3 internal retries)
 5. Read WNS/TNS from the CLI JSON `.metrics` (or the timing reports)

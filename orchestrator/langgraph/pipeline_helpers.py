@@ -208,6 +208,34 @@ def preflight_check(phases: list[str] | None = None) -> dict:
             errors.append(f"OpenROAD binary/script not found: {OPENROAD_BIN}")
         if not Path(MAGIC_BIN).exists():
             errors.append(f"Magic binary/script not found: {MAGIC_BIN}")
+        elif (os.access(MAGIC_BIN, os.X_OK)
+              and not Path(MAGIC_BIN).name.endswith("-nix.sh")):
+            # The current sky130A.tech uses syntax unsupported by Ubuntu's
+            # Magic 8.3.105 package. Fail here instead of consuming a backend
+            # attempt on a deterministic technology-file parse error.
+            try:
+                _magic_v = subprocess.run(
+                    [MAGIC_BIN, "--version"], capture_output=True, text=True,
+                    timeout=5,
+                )
+                _version_text = (_magic_v.stdout + "\n" + _magic_v.stderr)
+                _match = re.search(r"\b(\d+)\.(\d+)\.(\d+)\b", _version_text)
+                if _match and tuple(map(int, _match.groups())) < (8, 3, 411):
+                    errors.append(
+                        "Magic 8.3.411 or newer is required by the current "
+                        f"sky130 technology files; found {_match.group(0)} at "
+                        f"{MAGIC_BIN}"
+                    )
+                elif _magic_v.returncode != 0 or not _match:
+                    warnings.append(
+                        f"Could not verify Magic version at {MAGIC_BIN}; "
+                        "sky130 requires Magic 8.3.411 or newer"
+                    )
+            except (OSError, subprocess.SubprocessError) as _magic_exc:
+                warnings.append(
+                    f"Could not verify Magic version at {MAGIC_BIN}: "
+                    f"{_magic_exc}; sky130 requires Magic 8.3.411 or newer"
+                )
         if not Path(NETGEN_BIN).exists():
             errors.append(f"Netgen binary/script not found: {NETGEN_BIN}")
 
@@ -2290,7 +2318,8 @@ def _build_sdc_content(rtl_source: str, target_clock_mhz: float) -> str:
     if clock_port:
         sdc_content = (
             f"create_clock -name clk -period {period_ns} [get_ports {clock_port}]\n"
-            f"set_input_delay -clock clk {period_ns * 0.2} [all_inputs]\n"
+            f"set_input_delay -clock clk {period_ns * 0.2} "
+            f"[remove_from_collection [all_inputs] [get_ports {clock_port}]]\n"
             f"set_output_delay -clock clk {period_ns * 0.2} [all_outputs]\n"
         )
     else:

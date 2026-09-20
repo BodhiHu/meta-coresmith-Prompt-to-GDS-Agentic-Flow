@@ -64,7 +64,10 @@ OPENROAD_BIN = _sky130.OPENROAD_BIN
 MAGIC_BIN = _sky130.MAGIC_BIN
 NETGEN_BIN = _sky130.NETGEN_BIN
 KLAYOUT_BIN = _sky130.KLAYOUT_BIN
-RENDER_SCRIPT = str(PROJECT_ROOT / "scripts" / "render_layout.rb")
+RENDER_SCRIPT = str(
+    Path(__file__).resolve().parents[1]
+    / "pdk_templates" / "sky130" / "render_layout.rb"
+)
 
 
 # ---------------------------------------------------------------------------

@@ -3595,7 +3595,8 @@ async def run_backend_step(
                     _clk_port = "clk"
                 Path(sdc_path).write_text(
                     f"create_clock -name clk -period {period_ns} [get_ports {_clk_port}]\n"
-                    f"set_input_delay {period_ns * 0.2:.1f} -clock clk [all_inputs]\n"
+                    f"set_input_delay {period_ns * 0.2:.1f} -clock clk "
+                    f"[remove_from_collection [all_inputs] [get_ports {_clk_port}]]\n"
                     f"set_output_delay {period_ns * 0.2:.1f} -clock clk [all_outputs]\n"
                 )
 
