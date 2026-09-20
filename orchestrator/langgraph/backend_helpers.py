@@ -1024,15 +1024,30 @@ def run_openroad(
             "returncode": result.returncode,
             "log_path": log_path,
         }
-    except subprocess.TimeoutExpired:
-        log_path = _write_step_log_error(
-            block_name, step, cmd,
-            f"OpenROAD timed out ({timeout}s)", attempt,
+    except subprocess.TimeoutExpired as exc:
+        # TimeoutExpired may expose bytes here even with text=True.  Preserve
+        # everything OpenROAD emitted before the timeout; those last messages
+        # are often the only useful diagnosis for a long physical-design run.
+        def _as_text(output: str | bytes | None) -> str:
+            if isinstance(output, bytes):
+                return output.decode(errors="replace")
+            return output or ""
+
+        stdout = _as_text(exc.stdout)
+        partial_stderr = _as_text(exc.stderr)
+        timeout_message = f"OpenROAD timed out ({timeout}s)"
+        stderr = "\n".join(part for part in (partial_stderr, timeout_message) if part)
+        timeout_result = subprocess.CompletedProcess(
+            cmd, returncode=124, stdout=stdout, stderr=stderr,
+        )
+        log_path = _write_step_log(
+            block_name, step, cmd, timeout_result, attempt,
         )
         return {
             "success": False,
-            "stdout": "",
-            "stderr": f"OpenROAD timed out ({timeout}s)",
+            "stdout": stdout,
+            "stderr": stderr,
+            "returncode": 124,
             "log_path": log_path,
         }
     except FileNotFoundError:

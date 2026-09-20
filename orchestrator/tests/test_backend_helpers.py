@@ -14,6 +14,7 @@ Integration tests require Nix + Sky130 PDK and are marked with
 from __future__ import annotations
 
 import shutil
+import stat
 import textwrap
 from pathlib import Path
 
@@ -43,6 +44,44 @@ from orchestrator.langgraph.backend_helpers import (
     parse_pnr_stdout,
     placed_macro_bboxes,
 )
+
+
+class TestRunOpenroad:
+    def test_timeout_preserves_partial_diagnostics(self, tmp_path, monkeypatch):
+        from orchestrator.langgraph import backend_helpers as bh
+        from orchestrator.langgraph import pipeline_helpers as ph
+
+        fake_openroad = tmp_path / "fake_openroad.py"
+        fake_openroad.write_text(textwrap.dedent("""\
+            #!/usr/bin/env python3
+            import sys
+            import time
+
+            print("partial stdout diagnostic", flush=True)
+            print("partial stderr diagnostic", file=sys.stderr, flush=True)
+            time.sleep(10)
+        """))
+        fake_openroad.chmod(fake_openroad.stat().st_mode | stat.S_IXUSR)
+        tcl = tmp_path / "route.tcl"
+        tcl.write_text("# unused by fake executable\n")
+
+        monkeypatch.setattr(bh, "OPENROAD_BIN", str(fake_openroad))
+        monkeypatch.setattr(bh, "PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr(ph, "_LOG_DIR", tmp_path / "step_logs")
+
+        result = bh.run_openroad(
+            str(tcl), "timeout_block", "pnr", timeout=0.1,
+        )
+
+        assert result["success"] is False
+        assert result["returncode"] == 124
+        assert "partial stdout diagnostic" in result["stdout"]
+        assert "partial stderr diagnostic" in result["stderr"]
+        assert "OpenROAD timed out (0.1s)" in result["stderr"]
+        log = Path(result["log_path"]).read_text()
+        assert "partial stdout diagnostic" in log
+        assert "partial stderr diagnostic" in log
+        assert "OpenROAD timed out (0.1s)" in log
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Tcl Generation
