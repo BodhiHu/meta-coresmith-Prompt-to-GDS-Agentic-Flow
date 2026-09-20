@@ -108,7 +108,7 @@ def _wire_two_block_design(monkeypatch, *, src_width, dst_width):
     )
     monkeypatch.setattr(
         pipeline_graph, "lint_top_level",
-        lambda top, blocks, name: {"clean": True, "errors": "", "log_path": ""},
+        lambda top, blocks, name, **kw: {"clean": True, "errors": "", "log_path": ""},
     )
 
     from orchestrator.langchain.agents import integration_lead
@@ -128,6 +128,7 @@ def _wire_two_block_design(monkeypatch, *, src_width, dst_width):
     monkeypatch.setattr(integration_lead, "IntegrationLeadAgent", _FakeAgent)
     monkeypatch.setattr(
         integration_lead, "assert_blocks_instantiated", lambda *a, **k: "")
+    monkeypatch.setattr("orchestrator.harness.top_module.write_candidate_receipt", lambda *a, **k: {})
     monkeypatch.setattr(
         integration_lead, "assert_no_memory_primitive_defined", lambda *a, **k: "")
 

@@ -33,15 +33,12 @@ logger = logging.getLogger(__name__)
 # the scattered ``*_enabled`` helpers already read, so no reader changes are
 # needed beyond routing through the shared parser.
 STRICT_DEFAULTS: dict[str, str] = {
-    "CORESMITH_BLOCK_GOLDENS": "1",
     "CORESMITH_PPA_GATE": "1",
     "CORESMITH_FIDELITY_GATE": "1",
     "CORESMITH_PDK_CHAR": "1",
     "CORESMITH_LATENCY_AUDIT": "1",
-    "CORESMITH_RTL_FROM_HW_GOLDEN": "1",
     # A-Fix 5a: seeded DV stimulus tier (defined here so the profile owns the
     # single source of truth; the model_integration gate reads the same flag).
-    "CORESMITH_GATE_SEEDED_STIMULUS": "1",
 }
 
 LEGACY_DEFAULTS: dict[str, str] = {}

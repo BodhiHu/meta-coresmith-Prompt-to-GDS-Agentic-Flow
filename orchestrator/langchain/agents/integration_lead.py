@@ -292,73 +292,34 @@ class IntegrationLeadAgent:
 
 
 def assert_blocks_instantiated(
-    chip_top_verilog: str, expected_block_names: set[str]
+    chip_top_verilog: str, expected_block_names: set[str], sources=None,
+    top_module: str = "", *, source_paths=None, defines=(), parameters=None,
+    project_root=None,
 ) -> str | None:
-    """Postcondition: every expected block must appear as an instantiation
-    inside the Integration Lead's chip_top Verilog. Returns None on success
-    or a descriptive error string listing the missing blocks.
+    """Require actual elaborated cells under an explicit top, or fail closed."""
+    import tempfile
+    from pathlib import Path
 
-    The Integration Lead has historically been observed to silently drop
-    blocks from block_diagram.json and substitute glue stubs (e.g.,
-    entropy_enc -> rle_to_packer_token_bridge). Lint passes because the
-    substitute compiles, but the chip is structurally wrong.
-    """
-    if not chip_top_verilog or not expected_block_names:
+    from orchestrator.harness.hierarchy import (
+        HierarchyFailure,
+        elaborate_hierarchy,
+        missing_blocks,
+    )
+
+    if not chip_top_verilog and not expected_block_names:
         return None
-
-    # Strip line and block comments to avoid matching block names that
-    # appear only in commentary.
-    code = re.sub(r"//[^\n]*", "", chip_top_verilog)
-    code = re.sub(r"/\*.*?\*/", "", code, flags=re.DOTALL)
-
-    # Modules DEFINED in the chip_top file: a tier-1 block NAMED like one of
-    # them (the Caravel `user_project_wrapper` collision -- the pad-adapter
-    # block shares the mandatory top-module name) cannot be instantiated
-    # under its own name, since a module cannot instantiate itself. Both the
-    # deterministic assembler and the Integration Lead resolve the collision
-    # by renaming the block module `<name>_pads`; accept that renamed
-    # instantiation as satisfying the block requirement.
-    defined_here = set(re.findall(r"\bmodule\s+([A-Za-z_]\w*)", code))
-
-    missing: list[str] = []
-    for block_name in expected_block_names:
-        if block_name in defined_here and re.search(
-            rf"\b{re.escape(block_name)}_pads\s+(?:#|[a-zA-Z_]\w*\s*\()",
-            code,
-        ):
-            continue
-        # The delivered Caravel openframe_project_wrapper exposes only the
-        # frozen io_in/io_out/io_oeb pad surface; its internal shuttle wires
-        # are therefore represented in an integration top by a local pad
-        # adapter. Accept only the exact, block-named adapter instance so the
-        # structural guard still proves that this wrapper role was not dropped.
-        if block_name == "openframe_project_wrapper" and re.search(
-            r"\breference_codec_openframe_pad_adapter\s+u_openframe_project_wrapper\s*\(",
-            code,
-        ):
-            continue
-        # An instantiation is either
-        #   <module> <inst_name> ( ... );           non-parameterized
-        # or
-        #   <module> #( <params> ) <inst_name> (    parameterized
-        # We accept either by allowing the next token after the module name
-        # to be `#` (parameter override) or an identifier followed by `(`.
-        pattern = (
-            rf"\b{re.escape(block_name)}\s+"
-            rf"(?:#|[a-zA-Z_]\w*\s*\()"
-        )
-        if not re.search(pattern, code):
-            missing.append(block_name)
-
-    if missing:
-        return (
-            f"Integration Lead postcondition failed: chip_top RTL does NOT "
-            f"instantiate {len(missing)} expected block(s): "
-            f"{sorted(missing)}. The Integration Lead may have silently "
-            f"dropped blocks or substituted glue stubs (the entropy_enc -> "
-            f"rle_to_packer_token_bridge failure mode). Refusing to proceed."
-        )
-    return None
+    with tempfile.TemporaryDirectory(prefix="coresmith-hierarchy-source-") as td:
+        if source_paths is None:
+            source_paths = []
+            for i, code in enumerate([chip_top_verilog, *(sources or [])]):
+                path = Path(td) / f"source_{i}.v"
+                path.write_text(code)
+                source_paths.append(str(path))
+        cells = elaborate_hierarchy(source_paths, top_module, defines=defines,
+                                    parameters=parameters, project_root=project_root)
+    if isinstance(cells, HierarchyFailure):
+        return HierarchyFailure(f"{cells}; expected blocks: {sorted(expected_block_names)}", cells.kind)
+    return missing_blocks(cells, expected_block_names, top_module)
 
 
 # Library memory primitives provided by rtl_lib/cs_sram.v. The chip_top may

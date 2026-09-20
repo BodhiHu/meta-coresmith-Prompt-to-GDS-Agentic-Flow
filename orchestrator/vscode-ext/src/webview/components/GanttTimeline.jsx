@@ -347,7 +347,7 @@ function Legend({ graphType }) {
   );
 }
 
-export default function GanttTimeline({ timelineData, traceData, onRequestTraces, graphName, detailWidth, onDetailResize, nodeDescriptions }) {
+export default function GanttTimeline({ timelineData, traceData, onRequestTraces, graphName, detailWidth, onDetailResize, nodeDescriptions, onOpenBlock, onOpenCall }) {
   const [now, setNow] = useState(Date.now() / 1000);
   const [selectedSeg, setSelectedSeg] = useState(null);
   const [selectedSegKey, setSelectedSegKey] = useState(null);
@@ -403,7 +403,11 @@ export default function GanttTimeline({ timelineData, traceData, onRequestTraces
       return;
     }
     const isHITL = HITL_NODES.has(segment.node);
+    // Architecture / backend orchestrator rows carry a display name, not a
+    // block; only real RTL block rows scope the trajectory request.
+    const traceBlock = (block.graph === 'frontend' || block.graph === 'backend') ? block.name : undefined;
     setSelectedSeg({
+      traceBlock,
       label: segment.node,
       id: segment.node,
       type: isHITL ? 'human_review' : 'activity',
@@ -420,7 +424,9 @@ export default function GanttTimeline({ timelineData, traceData, onRequestTraces
     });
     setSelectedSegKey(key);
     if (onRequestTraces) {
-      onRequestTraces(segment.node);
+      // Scope the trajectory to the clicked row's block so the detail
+      // panel never interleaves several blocks in one list.
+      onRequestTraces(segment.node, traceBlock);
     }
   }, [selectedSegKey, onRequestTraces]);
 
@@ -718,10 +724,12 @@ export default function GanttTimeline({ timelineData, traceData, onRequestTraces
                           || nodeDescriptions?.[selectedSeg.id],
             }}
             traceData={traceData}
-            onRequestTraces={onRequestTraces}
+            onRequestTraces={(nodeId) => onRequestTraces && onRequestTraces(nodeId, selectedSeg.traceBlock)}
             onClose={handleClosePanel}
             width={panelWidth}
             flowLayout
+            onOpenBlock={onOpenBlock}
+            onOpenCall={onOpenCall}
           />
         </>
       )}

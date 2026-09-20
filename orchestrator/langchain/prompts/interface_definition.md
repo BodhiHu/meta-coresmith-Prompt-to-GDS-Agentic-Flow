@@ -125,7 +125,7 @@ Produce JSON with a single top-level object:
    `bootstrap_policy.required = true` and pick a `policy_type`. The
    audit-recommended default for "neighbor"/"context" feedback paths
    is `reset_seed` with `seed_value_hex = "0x0"` (semantically
-   correct for the corner-MB / first-frame case in many codec designs).
+   correct for the first-unit / boundary case in many feedback designs).
 
 5. **The block-diagram edge's declared `handshake_protocol` is
    AUTHORITATIVE — copy it, do NOT re-derive it.** Each connection in the
@@ -136,6 +136,13 @@ Produce JSON with a single top-level object:
    ACTUAL signals" is SUBORDINATE to the declared family: if a signal you
    were about to invent contradicts the declared family (e.g. a stray
    `wr_ready` / `tready` on a `mem_write` write edge, or an `elastic_fifo`
+
+PUBLISHED STREAM SAMPLER: the contract entries for the chip's top-level
+stream ports (in_*/out_*) must record that a word is accepted on edge N iff
+in_valid && in_ready AS IT READS AFTER N, and that the output beat visible
+after edge N is consumed by the out_ready driven for cycle N (register it and
+retire on `out_valid_q && out_ready_q`). Internal edges keep the standard
+`valid && ready` at-the-edge convention.
    on a `valid_only` strobe), DROP the contradicting signal — the declared
    family wins. Only when the block diagram omits `handshake_protocol` for
    an edge do you infer the truthful family from the ports the two blocks
@@ -167,8 +174,8 @@ Produce JSON with a single top-level object:
      parameter/command bundles (params + a `start`/`enable` strobe),
      and standalone fixed-latency data.
    * `static` — a fixed bundle of wires with no timing qualifier at all:
-     chip-boundary GPIO, source-synchronous off-chip pins (e.g. QSPI
-     `csn`/`sck`/`io`), static adapters, and always-present level/status
+     chip-boundary GPIO, source-synchronous off-chip pins (e.g. a serial
+     host bus's select / clock / data pins), static adapters, and always-present level/status
      lines. The consumer samples per its own contract.
 
    The skill documents below describe the streaming trade-offs; apply
@@ -187,7 +194,7 @@ Produce JSON with a single top-level object:
    * `elastic_fifo` — N-deep FIFO sized to absorb the worst-case
      stall window the cycle introduces. **Required for any feedback
      loop where one direction has read-before-commit semantics and
-     the other has no-stall input** (the v7/v8 video_codec codec deadlock
+     the other has no-stall input** (the read-before-commit deadlock
      class). Set `min_buffer_depth_beats` to the *concrete* worst-
      case latency × beat-rate, never less.
    * `credit` — explicit credit-return on a reverse channel; set
@@ -203,7 +210,7 @@ Produce JSON with a single top-level object:
    (`flow_control_policy.feedback_cycle = true`), `free_running` and
    `skid` are forbidden — pick `elastic_fifo`, `credit`, or
    `request_response`. The audit-default for prediction/history
-   neighbor feedback in pixel_block codecs is `request_response`.
+   neighbor feedback in block-pipelined designs is `request_response`.
 
    **EXCEPTION — the no-backpressure families are ALWAYS free_running.**
    A `mem_write`, `valid_only`, or `static` edge is always-accepted: it has
@@ -250,10 +257,7 @@ Produce JSON with a single top-level object:
    write the shared store BIT-EXACTLY from this contract alone, with
    ZERO reference to spec prose or sibling documents. A "see the
    runtime_table_memory spec for the layout" note FAILS this test — the
-   layout goes HERE. (Proven cost of omission: six model-generation
-   rounds on one design each parked on a different unrecorded numeric
-   fact — a selector value, an enum number, a phase base — that only
-   ever existed in prose.)
+   layout goes HERE.
 
 # Failure modes to avoid
 
@@ -267,12 +271,10 @@ Produce JSON with a single top-level object:
 - **Missing bootstrap**: do NOT skip the `bootstrap_policy` field on
   cycle edges — leaving it empty will cause downstream deadlocks
   and is the single most common DV failure observed in coresmith.
-- **Missing flow control**: the v7/v8 video_codec codec_v3 autopilot run
-  failed because the scheduler's 256-entry block FIFO filled while
-  residual_prediction backpressured waiting for recon_history neighbor
-  context — and recon_history withheld non-boundary contexts until
-  reconstructed/deblocked feedback committed. Both arms had implicit
-  flow control assumptions that disagreed. **Explicit
+- **Missing flow control**: a feedback pipeline deadlocked because a
+  scheduler FIFO filled while a downstream stage backpressured waiting for
+  context that an upstream stage withheld until its own feedback committed.
+  Both sides had implicit flow-control assumptions that disagreed. **Explicit
   `flow_control_policy` on every edge in the closed loop, with
   `elastic_fifo` depths sized to the actual stall window, prevents
   this entire class of deadlock.**

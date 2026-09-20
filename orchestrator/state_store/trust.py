@@ -11,8 +11,8 @@ the oracle. ``write_oracle_manifest`` snapshots SHA-256 of those files at
 ``/run/start``; ``check_oracle_manifest`` recomputes at gate-accept time and
 reports any drift as an ``ORACLE_TAMPER`` violation.
 
-Both functions are best-effort and never raise: a missing manifest / golden is
-treated as "nothing to check" (non-blocking), NOT a tamper.
+The baseline is owner-controlled outside the project. Missing or malformed
+baselines fail closed; only explicit daemon/run starts capture a new baseline.
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -28,7 +29,13 @@ _MANIFEST_NAME = "oracle_manifest.json"
 
 
 def _manifest_path(project_root: str | Path) -> Path:
-    return Path(project_root) / ".coresmith" / _MANIFEST_NAME
+    root = Path(project_root).resolve()
+    trust_dir = Path(os.environ.get("CORESMITH_TRUST_DIR") or
+                     Path.home() / ".coresmith/trust").expanduser().resolve()
+    if trust_dir.is_relative_to(root):
+        raise ValueError("CORESMITH_TRUST_DIR must be outside the project")
+    project_id = hashlib.sha256(str(root).encode()).hexdigest()
+    return trust_dir / project_id / _MANIFEST_NAME
 
 
 def _sha256(path: Path) -> str | None:
@@ -71,6 +78,11 @@ def _oracle_files(project_root: str | Path) -> list[Path]:
     except Exception:  # noqa: BLE001
         pass
 
+    from orchestrator.harness.task_adapter import adapter_path
+    adapter = adapter_path(str(root))
+    if adapter and not adapter.startswith("MISSING:"):
+        _add(Path(adapter))
+
     inputs = root / "inputs"
     if inputs.is_dir():
         for p in sorted(inputs.rglob("*")):
@@ -97,7 +109,7 @@ def _digest_map(project_root: str | Path) -> dict[str, str]:
     for p in _oracle_files(root):
         digest = _sha256(p)
         if digest is None:
-            continue
+            raise OSError(f"Cannot hash oracle file: {p}")
         try:
             rel = p.resolve().relative_to(root.resolve())
             key = rel.as_posix()
@@ -108,7 +120,7 @@ def _digest_map(project_root: str | Path) -> dict[str, str]:
 
 
 def write_oracle_manifest(project_root: str | Path) -> dict | None:
-    """Snapshot the oracle files' hashes to ``.coresmith/oracle_manifest.json``.
+    """Snapshot oracle hashes into the external owner trust directory.
 
     Best-effort: returns the manifest dict on success, ``None`` on failure.
     """
@@ -117,10 +129,23 @@ def write_oracle_manifest(project_root: str | Path) -> dict | None:
         manifest = {"created_ts": time.time(), "files": files}
         path = _manifest_path(project_root)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as fh:
+            temporary = Path(fh.name)
+            json.dump(manifest, fh, indent=2)
+        try:
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
         return manifest
     except Exception:  # noqa: BLE001
         return None
+
+
+def capture_run_baseline(project_root: str | Path) -> dict:
+    manifest = write_oracle_manifest(project_root)
+    if manifest is None:
+        raise RuntimeError("Cannot capture the external oracle trust baseline")
+    return manifest
 
 
 # The architecture SPEC files an AUTHORIZED *pre-RTL* feasibility revise may
@@ -181,29 +206,29 @@ def check_oracle_manifest(project_root: str | Path) -> dict[str, Any]:
     Returns a dict::
 
         {"ok": bool, "checked": bool, "changed": [...], "missing": [...],
-         "violation": {...} | None}
+         "added": [...], "violation": {...} | None}
 
-    ``ok`` is True (non-blocking) when there is no manifest to check (nothing
-    was snapshotted) or every recorded file still hashes identically. ``ok`` is
-    False ONLY when a recorded oracle file changed or vanished -- an
-    ``ORACLE_TAMPER`` violation the caller must treat as a gate FAIL.
+    Missing/unreadable baselines are infrastructure failures. A complete empty
+    baseline is valid and still detects newly added immutable oracle files.
     """
     result: dict[str, Any] = {
         "ok": True, "checked": False, "changed": [], "missing": [],
-        "violation": None,
+        "added": [], "violation": None,
     }
-    path = _manifest_path(project_root)
-    if not path.exists():
-        return result  # nothing snapshotted -> nothing to enforce
     try:
-        recorded = (json.loads(path.read_text(encoding="utf-8")) or {}).get("files") or {}
-    except Exception:  # noqa: BLE001
+        path = _manifest_path(project_root)
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        recorded = manifest["files"]
+        if not isinstance(recorded, dict) or any(
+                not isinstance(k, str) or not isinstance(v, str) or len(v) != 64
+                for k, v in recorded.items()):
+            raise ValueError("Malformed oracle baseline")
+        now = _digest_map(project_root)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        result.update(ok=False, violation={"category": "ORACLE_BASELINE_ERROR",
+                      "kind": "infrastructure_error", "reason": str(exc)})
         return result
-    if not recorded:
-        return result
-
     result["checked"] = True
-    now = _digest_map(project_root)
     changed: list[str] = []
     missing: list[str] = []
     for rel, want in recorded.items():
@@ -212,8 +237,17 @@ def check_oracle_manifest(project_root: str | Path) -> dict[str, Any]:
             missing.append(rel)
         elif have != want:
             changed.append(rel)
+    # An oracle file that APPEARED under inputs/ after run start is tamper too:
+    # dropping a doctored ``inputs/golden.py`` into a run whose golden resolved
+    # elsewhere SHADOWS the real oracle (resolve_golden_path prefers it) while
+    # every recorded hash still matches. Scoped to inputs/ deliberately -- the
+    # arch specs AND a golden resolved outside the run dir are both written /
+    # re-resolved legitimately after /run/start (the PRD naming the reference
+    # is itself an architecture-stage output).
+    added = sorted(rel for rel in now
+                   if rel not in recorded and rel.startswith("inputs/"))
 
-    if changed or missing:
+    if changed or missing or added:
         # PR#12 finding #9: partition drift into AMENDABLE architecture specs
         # (arch/{ers,frd,prd}_spec.md -- a legitimate pre-RTL feasibility
         # revise edits these) vs IMMUTABLE oracle (the golden + inputs/
@@ -226,7 +260,7 @@ def check_oracle_manifest(project_root: str | Path) -> dict[str, Any]:
         # rebaseline_oracle_specs intent) and recorded as an advisory, not a
         # fail. Set CORESMITH_STRICT_ORACLE_MANIFEST=1 to keep any drift a
         # hard fail.
-        drift = set(changed) | set(missing)
+        drift = set(changed) | set(missing) | set(added)
         immutable_drift = sorted(d for d in drift
                                  if d not in _SPEC_REBASELINE_ALLOWED)
         spec_drift = sorted(d for d in drift if d in _SPEC_REBASELINE_ALLOWED)
@@ -235,15 +269,17 @@ def check_oracle_manifest(project_root: str | Path) -> dict[str, Any]:
                 "1", "true", "yes", "on"}
         result["changed"] = sorted(changed)
         result["missing"] = sorted(missing)
+        result["added"] = added
 
         if immutable_drift or _strict or missing:
             # A real oracle changed/vanished (or strict mode) -> TAMPER.
             result["ok"] = False
             detail = (
                 "oracle artifacts changed since run start "
-                f"(modified={sorted(changed)}, missing={sorted(missing)}). The "
-                "golden reference / stimulus that underwrites the gate MUST "
-                "NOT be edited to make RTL match -- restore them and re-run."
+                f"(modified={sorted(changed)}, missing={sorted(missing)}, "
+                f"added={added}). The golden reference / stimulus that "
+                "underwrites the gate MUST NOT be edited -- or SHADOWED by a "
+                "new file -- to make RTL match: restore them and re-run."
             )
             result["violation"] = {
                 "criterion": "oracle_integrity",
@@ -253,10 +289,12 @@ def check_oracle_manifest(project_root: str | Path) -> dict[str, Any]:
                 "detail": detail,
                 "changed": sorted(changed),
                 "missing": sorted(missing),
+                "added": added,
                 "immutable_drift": immutable_drift,
                 "suggested_fix": (
                     "NOT a pass -- an IMMUTABLE oracle (golden/stimulus/"
-                    "requirements) was changed or is missing. Restore the "
+                    "requirements) was changed, is missing, or was shadowed "
+                    "by a file added after run start. Restore the "
                     "original files, then resume. (Architecture SPEC edits "
                     "are re-baselineable; immutable oracle edits are not.)"
                 ),

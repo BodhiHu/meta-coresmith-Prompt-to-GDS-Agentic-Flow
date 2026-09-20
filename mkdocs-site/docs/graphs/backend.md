@@ -245,7 +245,6 @@ payload = {
 | Variable | Effect |
 |---|---|
 | `CORESMITH_PROJECT_ROOT` | Run directory. |
-| `CORESMITH_SKIP_SYNTH` | `1` skips PDK preflight. |
 | `CORESMITH_BACKEND_OPENROAD` | OpenROAD binary path. |
 | `CORESMITH_BACKEND_MAGIC` | Magic binary path. |
 | `CORESMITH_BACKEND_NETGEN` | Netgen binary path. |

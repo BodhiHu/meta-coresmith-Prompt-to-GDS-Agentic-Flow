@@ -581,3 +581,64 @@ Netlists do not match.
         assert mb.lvs_verify_ties_enabled() is True
         monkeypatch.setenv("CORESMITH_LVS_VERIFY_TIES", "0")
         assert mb.lvs_verify_ties_enabled() is False
+
+
+class TestAdapterPinFidelity:
+    """The materialized adapter must match the MACRO'S OWN pin list.
+
+    Both defects here were silent in RTL DV and only appear in the gate-level
+    netlist that PnR/DRC/LVS read.
+    """
+
+    def test_mask_lane_count_is_ceil_not_floor(self):
+        # sram_1rw1r_9_4096_8: word 9b / write_size 8 -> NUM_WMASKS == 2.
+        # Floor (9 // 8 == 1) emitted a 1-bit constant into the 2-bit port,
+        # zero-extending it -> bit 8 of every word never written.
+        frag = mb.build_macro_adapter_instance(
+            9, 4096, macro_name="sram_1rw1r_9_4096_8_sky130",
+            macro_data_bits=9, macro_words=4096, macro_mask_bits=8)
+        assert ".wmask0(2'h3)" in frag
+
+    def test_maskless_macro_gets_no_wmask_pin(self):
+        # word_size == write_size -> OpenRAM omits wmask0 entirely; connecting
+        # it is a hard elaboration error in yosys/OpenROAD.
+        frag = mb.build_macro_adapter_instance(
+            8, 4096, macro_name="sram_1rw1r_8_4096_8_sky130",
+            macro_data_bits=8, macro_words=4096, macro_mask_bits=8,
+            macro_pins={"clk0", "csb0", "web0", "addr0", "din0", "dout0",
+                        "clk1", "csb1", "addr1", "dout1"})
+        assert ".wmask0(" not in frag
+        assert ".dout1(rdata1)" in frag
+
+    def test_single_port_macro_drops_port1_and_drives_rdata1(self):
+        frag = mb.build_macro_adapter_instance(
+            32, 512, macro_name="sram_1rw_32_512_8_sky130",
+            macro_data_bits=32, macro_words=512, macro_mask_bits=8,
+            macro_pins={"clk0", "csb0", "web0", "wmask0", "addr0", "din0",
+                        "dout0"})
+        assert ".clk1(" not in frag and ".csb1(" not in frag
+        assert ".dout1(" not in frag and "_u_csb1" not in frag
+        # the shell still exposes rdata1 -- drive it rather than leave it float
+        assert "assign rdata1 = rdata0;" in frag
+
+    def test_declared_lane_count_wins_over_derived(self):
+        frag = mb.build_macro_adapter_instance(
+            32, 512, macro_name="m", macro_data_bits=32, macro_words=512,
+            macro_mask_bits=8, mask_lanes=2)
+        assert ".wmask0(2'h3)" in frag
+
+
+class TestResolverScreens:
+    def test_rom_is_not_returned_for_an_sram_request(self, tmp_path):
+        rom = _macro(name="rom_1r_32_256_sky130", root=tmp_path)
+        rom.kind, rom.ports = "rom", "1r"
+        reg = {rom.name: rom}
+        assert og.find_exact(256, 32, reg, kind="sram") is None
+        assert og.ensure_macro(256, 32, allow_generate=False, registry=reg) is None
+        # ...but it is still findable when the caller wants a ROM.
+        assert og.find_exact(256, 32, reg, kind="rom") is rom
+
+    def test_port_cover_is_one_directional(self):
+        assert og.ports_cover("1rw1r", "1rw0r") is True    # spare port unused
+        assert og.ports_cover("1rw", "1rw1r") is False     # rdata1 undriven
+        assert og.ports_cover("", "1rw1r") is True         # unknown -> permissive

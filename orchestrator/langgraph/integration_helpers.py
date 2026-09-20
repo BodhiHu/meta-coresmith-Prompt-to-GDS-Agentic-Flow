@@ -20,15 +20,17 @@ import subprocess
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from orchestrator.langgraph.contract_conformance import (
+    canonical_port,
+    channel_base,
+)
 from orchestrator.langgraph.pipeline_helpers import (
     PROJECT_ROOT,
     RED,
     _write_step_log,
     _write_step_log_error,
     apply_build_fingerprint,
-    clear_build_products,
     log,
-    run_wavekit_vcd_audit,
 )
 
 # ---------------------------------------------------------------------------
@@ -79,6 +81,13 @@ class VerilogModule:
         }
 
 
+# Net/type keywords that may sit between a direction keyword and the port
+# identifiers it declares.
+_TYPE_KEYWORDS = {"wire", "reg", "logic", "signed", "unsigned", "bit",
+                  "tri", "var", "integer", "real", "byte", "shortint",
+                  "int", "longint", "supply0", "supply1"}
+
+
 def parse_verilog_ports(rtl_path: str, module: str | None = None) -> VerilogModule:
     """Parse a Verilog file and extract the module name, ports, and parameters.
 
@@ -105,6 +114,10 @@ def parse_verilog_ports(rtl_path: str, module: str | None = None) -> VerilogModu
     # Strip comments (line and block)
     source = re.sub(r'//.*?$', '', source, flags=re.MULTILINE)
     source = re.sub(r'/\*.*?\*/', '', source, flags=re.DOTALL)
+    # WP-45: see the lint/sim configuration (no defines): `ifdef USE_POWER_PINS
+    # port sections are not ports, and `endif is never a pin name.
+    from orchestrator.langgraph.contract_conformance import strip_preprocessor
+    source = strip_preprocessor(source)
 
     # Narrow to the requested module, else the file stem -- the same precedence
     # rtl_module_name uses. Sliced to its endmodule so a later module's
@@ -142,37 +155,40 @@ def parse_verilog_ports(rtl_path: str, module: str | None = None) -> VerilogModu
 
     ports: list[VerilogPort] = []
 
-    # Try ANSI-style ports (direction in header)
-    ansi_port_re = re.compile(
-        r'(input|output|inout)\s+'
-        r'(?:(reg|wire)\s+)?'
-        r'(?:(signed)\s+)?'
-        r'(?:\[\s*(\d+)\s*:\s*(\d+)\s*\]\s*)?'
-        r'(\w+)',
-        re.MULTILINE
-    )
+    # Try ANSI-style ports (direction in header). Split the header on the
+    # direction keywords and take EVERY identifier in each segment, the way
+    # contract_conformance.declared_ports does: a grouped declaration
+    # (`input [7:0] a, b`) shares one direction/width across all its names, and
+    # capturing only the first dropped the rest from the port map -- the
+    # assembled top then left them dangling.
+    dir_matches = list(re.finditer(r'\b(input|output|inout)\b', port_text))
 
-    ansi_ports = list(ansi_port_re.finditer(port_text))
-
-    if ansi_ports:
-        for m in ansi_ports:
+    if dir_matches:
+        for i, m in enumerate(dir_matches):
+            seg_end = (dir_matches[i + 1].start()
+                       if i + 1 < len(dir_matches) else len(port_text))
+            seg = port_text[m.end():seg_end]
             direction = m.group(1)
-            is_reg = m.group(2) == "reg"
-            is_signed = m.group(3) == "signed"
-            msb = int(m.group(4)) if m.group(4) else 0
-            lsb = int(m.group(5)) if m.group(5) else 0
-            name = m.group(6)
-            width = abs(msb - lsb) + 1 if m.group(4) else 1
+            is_reg = re.search(r'\breg\b', seg) is not None
+            is_signed = re.search(r'\bsigned\b', seg) is not None
+            rng = re.search(r'\[\s*(\d+)\s*:\s*(\d+)\s*\]', seg)
+            msb = int(rng.group(1)) if rng else 0
+            lsb = int(rng.group(2)) if rng else 0
+            width = abs(msb - lsb) + 1 if rng else 1
 
-            ports.append(VerilogPort(
-                name=name,
-                direction=direction,
-                width=width,
-                msb=msb,
-                lsb=lsb,
-                is_reg=is_reg,
-                is_signed=is_signed,
-            ))
+            for name in re.findall(r'[A-Za-z_]\w*',
+                                   re.sub(r'\[[^\]]*\]', ' ', seg)):
+                if name in _TYPE_KEYWORDS:
+                    continue
+                ports.append(VerilogPort(
+                    name=name,
+                    direction=direction,
+                    width=width,
+                    msb=msb,
+                    lsb=lsb,
+                    is_reg=is_reg,
+                    is_signed=is_signed,
+                ))
     else:
         # Non-ANSI: port names in header, declarations in body
         port_names = [n.strip() for n in port_text.split(',') if n.strip()]
@@ -234,6 +250,31 @@ class IntegrationMismatch:
         return asdict(self)
 
 
+_ROLE_CANON = {
+    "tdata": "data", "tvalid": "valid", "tready": "ready", "tlast": "last",
+    "tkeep": "keep", "tuser": "user", "tstrb": "strb",
+    "data": "data", "valid": "valid", "ready": "ready", "last": "last",
+    "keep": "keep", "user": "user", "strb": "strb",
+    "srdy": "valid", "drdy": "ready",
+}
+
+
+def _port_role(name: str) -> str | None:
+    """Canonical handshake role implied by a port-name suffix, or None.
+
+    Arm S/M retro: the substring fallback paired ``*_tready`` with
+    ``*_tdata`` and the width check then reported 7-16 phantom errors on
+    every integration accept -- which trained operators to dismiss error
+    lists wholesale (one accept waved through 9 real errors that way).
+    Ports with recognizably different handshake roles must never be
+    compared.
+    """
+    tokens = [t for t in re.split(r"[^a-z0-9]+", str(name).lower()) if t]
+    while tokens and tokens[-1] in ("o", "i", "n", "q"):
+        tokens.pop()
+    return _ROLE_CANON.get(tokens[-1]) if tokens else None
+
+
 def _find_port_fuzzy(
     module: VerilogModule,
     port_name: str,
@@ -290,10 +331,14 @@ def _find_port_fuzzy(
     # resolve. Named-port lookups never reach here with an empty key_terms.
     if not key_terms and connection_name:
         key_terms = [t for t in connection_name.split('_') if len(t) > 2]
+    want_role = _port_role(port_name) or _port_role(connection_name)
     substr_cands: list[VerilogPort] = []
     for term in key_terms:
         for port in module.ports:
             if term in port.name and port not in substr_cands:
+                cand_role = _port_role(port.name)
+                if want_role and cand_role and cand_role != want_role:
+                    continue  # never resolve across handshake roles
                 substr_cands.append(port)
     return _pick(substr_cands)
 
@@ -466,6 +511,31 @@ def check_integration_compatibility(
                 suggested_fix=f"Change '{dst_port.name}' direction to input in {to_block}",
             ))
 
+        # Role-compatibility guard: if fuzzy/portless resolution paired ports
+        # of DIFFERENT handshake roles (e.g. tready vs tdata), a width compare
+        # is meaningless -- cannot-check != error (phantom-error class from the
+        # arm S/M retrospective). Exact requested-name pairs are exempt.
+        _src_role = _port_role(src_port.name)
+        _dst_role = _port_role(dst_port.name)
+        _was_fuzzy = (src_port.name != from_port or dst_port.name != to_port)
+        if _src_role and _dst_role and _src_role != _dst_role and _was_fuzzy:
+            mismatches.append(IntegrationMismatch(
+                from_block=from_block, to_block=to_block,
+                issue_type="role_mismatch_unverifiable", severity="info",
+                description=(
+                    f"Fuzzy resolution paired ports of different handshake "
+                    f"roles ({from_block}.{src_port.name} [{_src_role}] vs "
+                    f"{to_block}.{dst_port.name} [{_dst_role}]); skipping "
+                    f"width check (cannot check != error)"
+                ),
+                suggested_fix=(
+                    "Add explicit from_port/to_port to the architecture "
+                    "connection so the checker compares like-for-like ports"
+                ),
+                details={"connection": interface_name},
+            ))
+            continue
+
         # Width compatibility check
         if src_port.width != dst_port.width:
             mismatches.append(IntegrationMismatch(
@@ -572,6 +642,7 @@ def generate_top_level_rtl(
     connections: list[dict],
     modules: dict[str, VerilogModule],
     mismatches: list[IntegrationMismatch] | None = None,
+    project_root=None,
 ) -> dict:
     """Generate the top-level Verilog module that instantiates and wires all blocks.
 
@@ -584,6 +655,9 @@ def generate_top_level_rtl(
         connections: Architecture connection list.
         modules: Parsed block modules.
         mismatches: Known mismatches (used to skip broken connections).
+        project_root: Run directory the ``rtl/integration/`` output is
+            anchored to. Defaults to the module-level ``PROJECT_ROOT``
+            (resolved at call time so monkeypatching it still works).
 
     Returns:
         dict with keys: verilog, rtl_path, module_name, block_count,
@@ -652,6 +726,22 @@ def generate_top_level_rtl(
             ("wire", wire_name)
         )
 
+    # Fan-out: a source port feeding several consumers gets one wire per
+    # connection, but the instantiation below binds only the FIRST -- the other
+    # consumers' wires would be undriven. Drive the extras from the bound one
+    # (generate_caravel_wrapper_top merges them via union-find instead).
+    fanout: list[str] = []
+    for key, conns in wire_connections.items():
+        if len(conns) < 2:
+            continue
+        block_name, _, port_name = key.partition(".")
+        src_mod = modules.get(block_name)
+        port = src_mod.port_by_name(port_name) if src_mod else None
+        if not port or port.direction != "output":
+            continue
+        driven = conns[0][1]
+        fanout.extend(f"  assign {w} = {driven};" for _kind, w in conns[1:])
+
     # Collect top-level I/O ports (ports not connected to other blocks)
     top_inputs: list[str] = []
     top_outputs: list[str] = []
@@ -705,6 +795,12 @@ def generate_top_level_rtl(
         lines.extend(wires)
         lines.append("")
 
+    # Fan-out assigns
+    if fanout:
+        lines.append(f"  // Fan-out ({len(fanout)} extra consumer(s))")
+        lines.extend(fanout)
+        lines.append("")
+
     # Block instantiations
     for block_name, mod in sorted(modules.items()):
         lines.append(f"  // {block_name}")
@@ -753,7 +849,7 @@ def generate_top_level_rtl(
     verilog = "\n".join(lines)
 
     # Write to disk
-    rtl_dir = PROJECT_ROOT / "rtl" / "integration"
+    rtl_dir = Path(project_root or PROJECT_ROOT) / "rtl" / "integration"
     rtl_dir.mkdir(parents=True, exist_ok=True)
     rtl_path = rtl_dir / f"{safe_name}.v"
     rtl_path.write_text(verilog, encoding="utf-8")
@@ -838,25 +934,19 @@ def _is_power_pin(port_name: str) -> bool:
     return bool(_POWER_PIN_RE.match(port_name))
 
 
-def detect_wrapper_block(modules: dict[str, VerilogModule]) -> str | None:
-    """Identify the pad-adapter / Caravel wrapper block among the parsed modules.
-
-    Prefers a block literally named ``user_project_wrapper``; else the block
-    whose ports carry the Caravel GPIO pad vector (io_in / io_out / io_oeb); else
-    a block whose *module* name is ``user_project_wrapper``. Returns the block
-    key or None (non-Caravel design)."""
-    if CARAVEL_TOP_MODULE in modules:
-        return CARAVEL_TOP_MODULE
-    for bn, mod in modules.items():
-        names = {p.name for p in mod.ports}
-        if all(io in names for io in _PAD_IO_PORTS):
-            return bn
-    for bn, mod in modules.items():
-        if mod.name == CARAVEL_TOP_MODULE:
-            return bn
+def detect_wrapper_block(modules: dict[str, VerilogModule], top_name: str = "") -> str | None:
+    """The block that IS the declared chassis top (WP-51): matched by name
+    only -- the block key or its module name equals ``top_name`` (default: the
+    Caravel chassis top). No port-pattern inference."""
+    if not top_name:
+        return None        # WP-55: no declared top, no wrapper block (no default chassis)
+    want = top_name
+    if want in modules:
+        return want
+    for name, mod in modules.items():
+        if mod.name == want:
+            return name
     return None
-
-
 def _contract_signal_names(edge: dict) -> list[str]:
     """Every signal a contract edge declares: payload fields + sideband.
 
@@ -864,18 +954,23 @@ def _contract_signal_names(edge: dict) -> list[str]:
     concluded the contract did not record signal names at all. Their union is
     the channel's port set.
     """
-    out: list[str] = []
-    for f in (edge.get("fields") or []):
-        n = f.get("name") if isinstance(f, dict) else f
-        if n:
-            out.append(str(n))
-    for s in (edge.get("sideband_signals") or []):
-        n = s.get("name") if isinstance(s, dict) else s
-        if n:
-            out.append(str(n))
+    declared = [f.get("name") if isinstance(f, dict) else f
+                for f in (edge.get("fields") or [])] + \
+               [s.get("name") if isinstance(s, dict) else s
+                for s in (edge.get("sideband_signals") or [])]
+    from orchestrator.langgraph.contract_conformance import signal_specs as _specs
+    if not any(declared) and not _specs(edge):
+        return []          # a legacy edge: the name-keyed fallback applies
+    # WP-46: ONE derivation shared with the conformance gate and the RTL
+    # prompt (signal_specs): fields + sidebands + the handshake strobes the
+    # protocol implies (WP-21). Binding only the declared fields left the
+    # synthesized `valid` to the bare-name stage, which merged it with a
+    # same-named port of another block (ax25_9600: START resolved to X).
+    from orchestrator.langgraph.contract_conformance import signal_specs
     seen, uniq = set(), []
-    for n in out:
-        if n not in seen:
+    for spec in signal_specs(edge):
+        n = str(spec.get("name") or "")
+        if n and n not in seen:
             seen.add(n)
             uniq.append(n)
     return uniq
@@ -900,23 +995,47 @@ def _resolve_by_contract(edge, pb, cb, port_exact, modules):
     if pb not in modules or cb not in modules:
         return None
 
+    # ONE canonical derivation, shared with the per-block conformance gate: a
+    # `producer_port` spelled as a slash ENUMERATION of the channel's concrete
+    # ports (`m_x_srdy/m_x_data`, `m_read_req/addr`) is reduced to its channel
+    # base, and a slash-ALIASED signal (`srdy/in_valid`) to one name -- so the
+    # assembler looks up ports that can actually exist. Concatenating the raw
+    # strings produced `m_x_srdy/m_x_data_valid`, which matches nothing, so
+    # EVERY signal on such an edge became a hazard and the deterministic top
+    # fell back to an LLM-authored integration.
     def _one(block: str, chan: str, sig: str):
-        pref = port_exact(block, f"{chan}_{sig}")
-        bare = port_exact(block, sig)
+        want, bare_name = canonical_port(chan, sig)
+        pref = port_exact(block, want)
+        bare = port_exact(block, bare_name) if bare_name != want else None
         if pref is not None and bare is not None:
-            return None, (f"{block}.{chan}_{sig} and {block}.{sig} both exist "
+            return None, (f"{block}.{want} and {block}.{bare_name} both exist "
                           f"-- ambiguous which implements '{sig}'")
         got = pref or bare
         if got is None:
             return None, (f"{block} implements no port for declared signal "
-                          f"'{sig}' (expected '{chan}_{sig}' or '{sig}')")
+                          f"'{sig}' (expected '{want}' or '{bare_name}')")
         return got, None
 
-    pchan = str(edge.get("producer_port") or "")
-    cchan = str(edge.get("consumer_port") or "")
+    pchan = channel_base(edge.get("producer_port"))
+    cchan = channel_base(edge.get("consumer_port"))
     eid = edge.get("edge_id")
     paired, hazards = [], []
+    from orchestrator.langgraph.contract_conformance import is_legal_identifier
     for sig in signals:
+        # WP-36: a contract name that cannot be a Verilog identifier (dotted
+        # `status.done`, a slash alias) is unwireable by construction. It is a
+        # HAZARD naming both endpoints -- the contract must be revised. WP-26
+        # skipped the signal and kept assembling, which turned a visible
+        # inconsistency into a silently incomplete chip (review round 2).
+        _pw, _pbare = canonical_port(pchan, sig)
+        _cw, _cbare = canonical_port(cchan, sig)
+        if not (is_legal_identifier(_pw) and is_legal_identifier(_cw)
+                and is_legal_identifier(_pbare) and is_legal_identifier(_cbare)):
+            hazards.append(
+                f"edge {eid}: signal {sig!r} derives port names {_pw!r} on {pb} "
+                f"/ {_cw!r} on {cb} that are not legal Verilog identifiers -- "
+                "revise the CONTRACT (declared connections are never dropped)")
+            continue
         pp, perr = _one(pb, pchan, sig)
         cp, cerr = _one(cb, cchan, sig)
         for err in (perr, cerr):
@@ -967,23 +1086,23 @@ def load_interface_contract_edges(project_root: str) -> list[dict]:
         cb = c.get("consumer_block") or c.get("to_block")
         if not pb or not cb or pb == cb:
             continue
-        edges.append({
+        # WP-53: keep EVERY declared key (handshake_protocol, flow_control_policy,
+        # aliases ...): the shared projection derives the valid/ready strobes from
+        # handshake_protocol, and dropping it here left every loaded valid_only edge
+        # without its strobe -- the assembler then tied `start_valid` to 1'b0
+        # with zero hazards.
+        e = dict(c)
+        e.update({
             "producer_block": pb,
             "consumer_block": cb,
             "producer_port": c.get("producer_port") or c.get("from_port") or "",
             "consumer_port": c.get("consumer_port") or c.get("to_port") or "",
             "data_width": c.get("data_width_bits") or c.get("data_width") or 0,
             "edge_id": c.get("edge_id") or f"{pb}__to__{cb}",
-            # Carry the channel SIGNAL LIST through. The contract declares every
-            # signal on the edge (fields = payload, sideband_signals =
-            # everything else, union = the port set); dropping them here forced
-            # the assembler to re-derive the port set from a naming convention
-            # and to pair the two ends positionally against each other. With the
-            # list present each end resolves against the CONTRACT instead, so
-            # the two ends never have to agree on spelling.
             "fields": c.get("fields") or [],
             "sideband_signals": c.get("sideband_signals") or [],
         })
+        edges.append(e)
     return edges
 
 
@@ -1080,7 +1199,8 @@ def generate_caravel_wrapper_top(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if wrapper_block is None:
-        wrapper_block = detect_wrapper_block(modules)
+        # the Caravel assembler IS the Caravel plugin: its own top name applies
+        wrapper_block = detect_wrapper_block(modules, CARAVEL_TOP_MODULE)
 
     # A declared pin map REPLACES the pin-adapter block. The adapter existed
     # only to translate pad bits into named signals, and the top now does that
@@ -1233,6 +1353,9 @@ def generate_caravel_wrapper_top(
         return out
 
     edge_bound: set[frozenset] = set()
+    # WP-46: ports the CONTRACT stage bound; the legacy name-keyed stage
+    # must never re-union them (or any two same-direction ports).
+    bound_ports: set[tuple[str, str]] = set()
     for e in edges:
         pb, cb = e.get("producer_block"), e.get("consumer_block")
         if pb not in modules or cb not in modules or pb == cb:
@@ -1248,6 +1371,7 @@ def generate_caravel_wrapper_top(
                 continue
             for pp, cp in _paired:
                 uf.union((pb, pp.name), (cb, cp.name))
+                bound_ports.update({(pb, pp.name), (cb, cp.name)})
             if _paired:
                 edge_bound.add(frozenset((pb, cb)))
             continue
@@ -1302,6 +1426,7 @@ def generate_caravel_wrapper_top(
             continue
         for pp, cp in paired:
             uf.union((pb, pp.name), (cb, cp.name))
+            bound_ports.update({(pb, pp.name), (cb, cp.name)})
         if paired:
             edge_bound.add(frozenset((pb, cb)))
 
@@ -1316,6 +1441,17 @@ def generate_caravel_wrapper_top(
         a, b = tuple(pair)
         for key in sorted(set(keyed[a]) & set(keyed[b])):
             pa, pbp = keyed[a][key], keyed[b][key]
+            # WP-46: a port the contract already bound is never re-unioned by
+            # name (modem_controller.start_valid <- regmap vs hdlc_framer.
+            # start_valid <- modem_controller.stage_start_valid share a NAME,
+            # not a net), and two inputs / two outputs are never a connection.
+            if any((a, p.name) in bound_ports for p in pa) or \
+                    any((b, p.name) in bound_ports for p in pbp):
+                continue
+            if (len(pa) == 1 and len(pbp) == 1
+                    and pa[0].direction == pbp[0].direction
+                    and pa[0].direction != "inout"):
+                continue
             if len(pa) != 1 or len(pbp) != 1:
                 if frozenset((a, b)) not in edge_bound:
                     wiring_errors.append(
@@ -1347,6 +1483,24 @@ def generate_caravel_wrapper_top(
             wiring_errors.append(
                 f"wire group {sorted(members)} mixes widths {sorted(widths)} -- "
                 f"refusing to short different-width nets")
+            continue
+        # WP-46: exactly one driver per net. Two outputs on one net (or none)
+        # is a wiring hazard -- with a locked Caravel boundary it parks (WP-45)
+        # instead of shipping a wrapper that resolves to X.
+        _dirs = {(bn, pn): (modules[bn].port_by_name(pn).direction
+                            if modules[bn].port_by_name(pn) else "")
+                 for (bn, pn) in members}
+        _drv = sorted(k for k, d in _dirs.items() if d == "output")
+        _inout = [k for k, d in _dirs.items() if d == "inout"]
+        if len(_drv) > 1:
+            wiring_errors.append(
+                f"wire group {sorted(members)} is driven by {len(_drv)} outputs "
+                f"{_drv} -- refusing a multiply-driven net")
+            continue
+        if not _drv and not _inout:
+            wiring_errors.append(
+                f"wire group {sorted(members)} has no driver (inputs only) -- "
+                "refusing to short two inputs")
             continue
         width = max(widths) if widths else 1
         rb, rp = root
@@ -1570,10 +1724,16 @@ def lint_top_level(
     top_rtl_path: str,
     block_rtl_paths: list[str],
     design_name: str = "integration",
+    project_root=None,
+    top_module: str = "",
 ) -> dict:
     """Run Verilator lint on the top-level module with all block RTL files.
 
     Includes all block Verilog files so Verilator can resolve instantiations.
+
+    ``project_root`` anchors the ``sim_build/integration_lint`` dedup scratch
+    dir at the RUN directory; it defaults to the module-level ``PROJECT_ROOT``
+    (resolved at call time) so existing callers are unchanged.
 
     Returns:
         dict with: clean (bool), errors (str), warnings (str), log_path (str).
@@ -1611,7 +1771,8 @@ def lint_top_level(
     # sim keeps the lib body -- the two stages must see the same sources. Writes
     # deduped copies into a scratch dir alongside the run logs.
     try:
-        _dd_dir = PROJECT_ROOT / "sim_build" / "integration_lint"
+        _dd_dir = (Path(project_root or PROJECT_ROOT) / "sim_build"
+                   / "integration_lint")
         _dd_dir.mkdir(parents=True, exist_ok=True)
         lint_sources = _dedup_module_sources(lint_sources, _dd_dir)
     except Exception:
@@ -1620,7 +1781,7 @@ def lint_top_level(
     cmd = [
         "verilator", "--lint-only", "-Wall", "-Wno-fatal",
         "-Wno-EOFNEWLINE",
-        "--top-module", Path(top_rtl_path).stem,
+        "--top-module", top_module or Path(top_rtl_path).stem,   # WP-49: explicit
         *lint_sources,
     ]
 
@@ -1649,6 +1810,24 @@ def lint_top_level(
 # Load architecture connections
 # ---------------------------------------------------------------------------
 
+
+def _existing_top_module(int_dir: Path, preferred: str = "") -> str:
+    """The recorded candidate top living in ``int_dir``, or "" (WP-49).
+
+    WP-17 inferred it from file contents (stem, first module, the module
+    nobody instantiates); that was one of five disagreeing guesses. The only
+    source now is the candidate receipt / integration record.
+    """
+    from orchestrator.harness.top_module import resolve_top
+    try:
+        mod, path = resolve_top(Path(int_dir).parent.parent)
+    except Exception:  # noqa: BLE001
+        return ""
+    if mod and path and Path(path).parent.resolve() == Path(int_dir).resolve():
+        return mod
+    return ""
+
+
 def load_architecture_connections(project_root: str) -> tuple[list[dict], str]:
     """Load block-to-block connections from architecture state.
 
@@ -1667,34 +1846,25 @@ def load_architecture_connections(project_root: str) -> tuple[list[dict], str]:
             data = json.loads(arch_path.read_text(encoding="utf-8"))
             bd = data.get("block_diagram", {})
             connections = bd.get("connections", [])
-            # Extract design name: prefer actual module name from
-            # integration RTL on disk, fall back to block_diagram title,
-            # and only use PRD title as last resort.
-            _int_dir = root / "rtl" / "integration"
-            _found_module = ""
-            if _int_dir.is_dir():
-                for _vf in sorted(_int_dir.glob("*.v")):
-                    try:
-                        _src = _vf.read_text(encoding="utf-8", errors="replace")
-                        _mm = re.search(r'^\s*module\s+(\w+)', _src, re.MULTILINE)
-                        if _mm:
-                            _found_module = _mm.group(1)
-                            break
-                    except OSError:
-                        pass
+            prd = data.get("prd_spec", data.get("ers_spec", {}))
+            prd_doc = prd.get("prd", prd.get("ers", {})) if isinstance(prd, dict) else {}
+            _prd_name = ""
+            if prd_doc.get("title"):
+                _raw = prd_doc["title"]
+                _raw = re.sub(r'^(?:PRD|ERS)\s*[—–-]\s*', '', _raw)
+                _prd_name = re.sub(r'[^a-zA-Z0-9_]', '_', _raw).strip('_').lower()
+                _prd_name = re.sub(r'_+', '_', _prd_name)
+                _prd_name = f"{_prd_name}_top"
+            # WP-17: an existing top file names the design by its REAL top
+            # module, not by whichever `module` keyword happens to start a
+            # line (observed: the top declared behind a same-line comment,
+            # the helper arbiter picked instead, the chip re-emitted under
+            # the helper's name).
+            _found_module = _existing_top_module(root / "rtl" / "integration", _prd_name)
             if _found_module:
                 design_name = _found_module
-            else:
-                # Fall back to a clean name from PRD title
-                prd = data.get("prd_spec", data.get("ers_spec", {}))
-                prd_doc = prd.get("prd", prd.get("ers", {})) if isinstance(prd, dict) else {}
-                if prd_doc.get("title"):
-                    _raw = prd_doc["title"]
-                    # Strip common prefixes like "PRD — " or "ERS — "
-                    _raw = re.sub(r'^(?:PRD|ERS)\s*[—–-]\s*', '', _raw)
-                    design_name = re.sub(r'[^a-zA-Z0-9_]', '_', _raw).strip('_').lower()
-                    design_name = re.sub(r'_+', '_', design_name)
-                    design_name = f"{design_name}_top"
+            elif _prd_name:
+                design_name = _prd_name
             if connections:
                 return connections, design_name
         except (json.JSONDecodeError, OSError):
@@ -1745,6 +1915,7 @@ async def generate_integration_testbench(
     prior_failure: str = "",
     chip_model_path: str = "",
     parameter_table: str = "",
+    project_root=None,
 ) -> dict:
     """Generate a cocotb integration testbench via the Lead DV agent.
 
@@ -1752,6 +1923,10 @@ async def generate_integration_testbench(
     description of why the previous integration DV attempt failed so the
     LLM can avoid repeating the same mistake. The underlying
     ``IntegrationTestbenchGenerator.generate`` accepts the same kwarg.
+
+    ``project_root`` anchors ``tb/integration/`` at the RUN directory; it
+    defaults to the module-level ``PROJECT_ROOT`` (resolved at call time) so
+    existing callers are unchanged.
 
     Returns:
         dict with: tb_path (str), testbench_path (str), test_count (int).
@@ -1771,7 +1946,7 @@ async def generate_integration_testbench(
             "ports": [p.to_dict() for p in mod.ports],
         })
 
-    tb_dir = PROJECT_ROOT / "tb" / "integration"
+    tb_dir = Path(project_root or PROJECT_ROOT) / "tb" / "integration"
     tb_dir.mkdir(parents=True, exist_ok=True)
     output_path = str(tb_dir / f"test_{design_name}.py")
 
@@ -1804,8 +1979,13 @@ async def generate_validation_testbench(
     reference_path: str = "",
     reference_entry: str = "",
     parameter_table: str = "",
+    project_root=None,
 ) -> dict:
     """Generate an ERS/KPI validation cocotb testbench via Lead Validation DV.
+
+    ``project_root`` anchors ``tb/validation/`` at the RUN directory; it
+    defaults to the module-level ``PROJECT_ROOT`` (resolved at call time) so
+    existing callers are unchanged.
 
     Returns:
         dict with: tb_path (str), testbench_path (str), test_count (int).
@@ -1825,7 +2005,7 @@ async def generate_validation_testbench(
             "ports": [p.to_dict() for p in mod.ports],
         })
 
-    tb_dir = PROJECT_ROOT / "tb" / "validation"
+    tb_dir = Path(project_root or PROJECT_ROOT) / "tb" / "validation"
     tb_dir.mkdir(parents=True, exist_ok=True)
     output_path = str(tb_dir / f"test_{design_name}_validation.py")
 
@@ -2078,79 +2258,195 @@ def _dedup_module_sources(
 
 
 def chip_rtl_sources(
-    top_rtl_path: str,
-    block_rtl_paths: dict[str, str],
-    dedup_dir=None,
+    top_rtl_path: str, block_rtl_paths: dict[str, str], dedup_dir=None,
+    top_module: str = "", *, project_root=None,
 ) -> list[str]:
-    """Every Verilog source needed to elaborate the ASSEMBLED chip, top first.
+    """Return the adopted sources verbatim; never deduplicate or discover RTL."""
+    from orchestrator.harness.top_module import CandidateError, candidate_for_inputs
+    if project_root is None:
+        raise CandidateError("A project manifest and explicit top are required")
+    rec = candidate_for_inputs(project_root, top_rtl_path, block_rtl_paths)
+    if not top_module or top_module != rec["top_module"]:
+        raise CandidateError("An explicit top matching the candidate manifest is required")
+    return list(rec["sources"])
 
-    Single definition on purpose. The integration/validation DV sims and the
-    chip_top gate-sim's REFERENCE run must elaborate the identical source set:
-    the gate compares the flat netlist against that reference, so a reference
-    built from a different source list is not a reference at all -- it is a
-    second design, and any verdict against it is meaningless.
 
-    Top-first ordering matters: callers resolve the Verilator TOPLEVEL from the
-    first entry.
+_DV_SPECIAL_TESTS = (
+    "test_wavekit_bounded_semantic_trace",
+    "test_frozen_acceptance_matrix",
+)
+
+
+def _mission_testcase_line(tb_source: str) -> str:
+    """Shell-safe ``COCOTB_TESTCASE`` include-list for the default (mission)
+    pass of a bounded validation TB: every top-level cocotb test except the
+    bounded-trace and frozen-acceptance specials (which run under their own
+    Makefile targets).
+
+    Exists because the exclusion CANNOT be expressed as a regex: cocotb's
+    Makefile expands ``COCOTB_TEST_FILTER`` unquoted onto a ``bash -c`` line
+    (and re-expands it in a sub-make), so any filter containing ``(|)`` dies
+    with ``syntax error near unexpected token '('`` no matter how the
+    assignment is quoted -- the failure mode that ate 5 chip-lead fix_tb
+    rounds on arm U. A comma-separated name list survives every shell layer.
     """
-    sources = [top_rtl_path]
-    # A block file that RE-DECLARES the top's own module is an alias-carrier:
-    # the generated pad block ships a thin `module user_project_wrapper` alias
-    # plus stub declarations of its sibling blocks. Include it and the MODDUP
-    # dedup keeps the stubs (they sort first) and strips the real logic -- the
-    # reference then elaborates a hollow chip and honestly fails, so the gate
-    # reports not_run on a design that is fine. The top provides its own
-    # module; a file re-declaring it leaves the list, stubs and all.
-    _top_mod = ""
+    names = re.findall(r"^async def (test_\w+)\(", tb_source or "", re.M)
+    mission = [n for n in dict.fromkeys(names) if n not in _DV_SPECIAL_TESTS]
+    if not mission or not (set(names) & set(_DV_SPECIAL_TESTS)):
+        return ""
+    return "COCOTB_TESTCASE = " + ",".join(mission) + "\n"
+
+
+def _compose_dv_makefile(
+    sim_scope: str,
+    tb_source: str,
+    sources_str: str,
+    safe_name: str,
+    module_stem: str,
+) -> str:
+    """Makefile for the integration/validation cocotb sim.
+
+    Bounded-validation mode (ported from a chip-lead hot-patch authored live
+    on arm U, which cut the validation sim from a 900s VCD-explosion timeout
+    to ~7 min): when the validation TB provides an explicit bounded semantic
+    trace test, run THAT one test with tracing (depth-capped so mandatory
+    WaveKit evidence cannot grow with mission runtime) and run the full
+    application matrix untraced -- sharded 4-wide when the TB supports
+    ``ACCEPTANCE_SHARD``. The default cocotb pass covers the remaining
+    mission tests via a shell-safe COCOTB_TESTCASE list (see
+    :func:`_mission_testcase_line`).
+    """
+    bounded = (
+        sim_scope == "validation"
+        and "test_wavekit_bounded_semantic_trace" in (tb_source or "")
+    )
+    if not bounded:
+        return f"""
+SIM = verilator
+TOPLEVEL_LANG = verilog
+VERILOG_SOURCES = {sources_str}
+TOPLEVEL = {safe_name}
+MODULE = {module_stem}
+WAVES = 1
+EXTRA_ARGS += --trace --trace-structs
+EXTRA_ARGS += --build-jobs 1
+EXTRA_ARGS += -Wno-fatal
+include $(shell cocotb-config --makefiles)/Makefile.sim
+"""
+    sharded = (
+        "test_frozen_acceptance_matrix" in tb_source
+        and "ACCEPTANCE_SHARD" in tb_source
+    )
+    mission_line = _mission_testcase_line(tb_source)
+    acceptance_rules = ""
+    if sharded:
+        acceptance_rules = r"""
+ACCEPTANCE_SHARDS = 0 1 2 3 4 5 6 7 8 9 10 11
+ACCEPTANCE_TARGETS = $(addprefix acceptance_shard_,$(ACCEPTANCE_SHARDS))
+
+.PHONY: acceptance_shards
+sim: acceptance_shards
+
+acceptance_shards: $(SIM_BUILD)/Vtop
+	$(MAKE) -j4 $(ACCEPTANCE_TARGETS)
+
+acceptance_shard_%: $(SIM_BUILD)/Vtop
+	$(RM) acceptance_shard_$*.xml
+	ACCEPTANCE_SHARD=$* \
+	COCOTB_RESULTS_FILE=acceptance_shard_$*.xml \
+	COCOTB_TEST_MODULES=$(MODULE) \
+	COCOTB_TEST_FILTER=test_frozen_acceptance_matrix \
+	COCOTB_TOPLEVEL=$(TOPLEVEL) TOPLEVEL_LANG=$(TOPLEVEL_LANG) \
+	$(SIM_BUILD)/Vtop
+	$(PYTHON_BIN) -m cocotb_tools.check_results acceptance_shard_$*.xml
+"""
+    return rf"""
+SIM = verilator
+TOPLEVEL_LANG = verilog
+VERILOG_SOURCES = {sources_str}
+TOPLEVEL = {safe_name}
+MODULE = {module_stem}
+COMPILE_ARGS += --trace --trace-structs --trace-depth 1 --trace-max-array 64
+EXTRA_ARGS += --build-jobs 1
+EXTRA_ARGS += -Wno-fatal
+CUSTOM_COMPILE_DEPS += Makefile
+{mission_line}include $(shell cocotb-config --makefiles)/Makefile.sim
+
+.PHONY: bounded_waveform
+sim: bounded_waveform
+
+bounded_waveform: $(SIM_BUILD)/Vtop
+	$(RM) trace_results.xml dump.vcd
+	COCOTB_RESULTS_FILE=trace_results.xml \
+	COCOTB_TEST_MODULES=$(MODULE) \
+	COCOTB_TEST_FILTER=test_wavekit_bounded_semantic_trace \
+	COCOTB_TOPLEVEL=$(TOPLEVEL) TOPLEVEL_LANG=$(TOPLEVEL_LANG) \
+	$(SIM_BUILD)/Vtop --trace --trace-file dump.vcd
+	$(PYTHON_BIN) -m cocotb_tools.check_results trace_results.xml
+{acceptance_rules}
+"""
+
+
+
+def _recreate_sim_dir(sim_dir: Path) -> None:
+    """Start an authoritative build with only engine retry bookkeeping.
+
+    A partial clean leaves objects visible to the nested make through VPATH.
+    Read the small state files first, then recreate the entire directory;
+    cleanup errors must stop the build, never fall back to a contaminated tree.
+    Step logs/attempt numbers and the verifier's flock live outside this tree.
+    """
+    import shutil
+
+    bookkeeping = {}
+    if sim_dir.is_dir() and not sim_dir.is_symlink():
+        for name in (".build_fingerprint", "sim_timeout_state.json"):
+            path = sim_dir / name
+            if path.is_file() and not path.is_symlink():
+                bookkeeping[name] = path.read_bytes()
+        prior = sorted(p.name for p in sim_dir.iterdir() if p.name not in bookkeeping)
+        if prior:
+            log(f"  [SIM] Recreating {sim_dir}: discarding prior contents: {', '.join(prior)}")
+        shutil.rmtree(sim_dir)
+    elif sim_dir.is_symlink() or sim_dir.exists():
+        sim_dir.unlink()
+    sim_dir.mkdir(parents=True)
+    for name, content in bookkeeping.items():
+        (sim_dir / name).write_bytes(content)
+
+
+def _stage_project_inputs(sim_dir: Path, root: Path) -> None:
+    """Expose ``<root>/inputs`` inside the simulation directory.
+
+    WP-15: block RTL legitimately carries project-relative artifact paths
+    (``$readmemh("inputs/rom_images/<image>.memh")``, cs_rom_1r INIT_FILE);
+    the simulator resolves them against its own cwd, which is the per-scope
+    sim dir -- so every task-only run lost ~20 min at chip-level DV to "three
+    project-relative ROM images missing" before the chip lead symlinked them
+    by hand. A symlink keeps the images single-sourced.
+    """
     try:
-        _top_text = Path(top_rtl_path).read_text(errors="replace")
-        _m = re.search(r"\bmodule\s+([A-Za-z_]\w*)", _top_text)
-        _top_mod = _m.group(1) if _m else ""
+        src = root / "inputs"
+        link = sim_dir / "inputs"
+        if src.is_dir() and not link.exists() and not link.is_symlink():
+            link.symlink_to(src.resolve(), target_is_directory=True)
     except OSError:
         pass
-    for bp in block_rtl_paths.values():
-        if not Path(bp).exists() or bp == top_rtl_path:
-            continue
-        if _top_mod:
-            try:
-                if re.search(r"\bmodule\s+" + re.escape(_top_mod) + r"\b",
-                             Path(bp).read_text(errors="replace")):
-                    continue
-            except OSError:
-                pass
-        sources.append(bp)
-    # Include the generic SRAM wrapper lib if any block instantiates cs_sram, so
-    # the chip-level Verilator build can resolve cs_sram_1rw/1rw1r (without it
-    # the sim hard-fails with "Cannot find module cs_sram_1rw1r"). Best-effort.
+
+
+def _successful_sim_cases(path: Path) -> list[str]:
+    """Read only freshly emitted executed test cases, excluding skipped/failures."""
+    import xml.etree.ElementTree as ET
     try:
-        from orchestrator.langgraph.sram_wrapper import (
-            uses_wrapper as _uses_wrapper,
-        )
-        from orchestrator.langgraph.sram_wrapper import (
-            wrapper_lib_path as _wrapper_lib_path,
-        )
-        _all_rtl = "".join(
-            Path(p).read_text(errors="replace")
-            for p in sources if Path(p).exists()
-        )
-        _wlib = _wrapper_lib_path()
-        if _uses_wrapper(_all_rtl) and _wlib not in sources:
-            sources.append(_wlib)
-    except Exception:
-        pass
-    # A deterministically-assembled Caravel top and the pad-adapter BLOCK it was
-    # built from both declare `module user_project_wrapper`, and blocks commonly
-    # each bundle the same shared macro. Two compilation units defining one
-    # module is a Verilator MODDUP abort before any transaction runs, so a caller
-    # that hands this list straight to a simulator must dedup. Pass a scratch dir
-    # to get an elaborable list back; omit it to get raw paths.
-    if dedup_dir is not None:
-        # _dedup_module_sources WRITES the stripped copies and does not create
-        # its own output dir, so a caller passing a fresh scratch path would get
-        # back paths to files that do not exist.
-        Path(dedup_dir).mkdir(parents=True, exist_ok=True)
-        sources = _dedup_module_sources(sources, dedup_dir)
-    return sources
+        root = ET.parse(path).getroot()
+    except (OSError, ET.ParseError):
+        return []
+    rows = list(root.iter("testcase"))
+    # Duplicate names with any failing/skipped instance do not certify that case.
+    names = {row.get("name") for row in rows if row.get("name")}
+    return sorted(name for name in names if all(
+        not any(row.find(tag) is not None for tag in ("failure", "error", "skipped"))
+        for row in rows if row.get("name") == name))
 
 
 def run_integration_simulation(
@@ -2160,6 +2456,7 @@ def run_integration_simulation(
     tb_path: str,
     attempt: int = 1,
     sim_scope: str = "integration",
+    project_root=None,
 ) -> dict:
     """Run cocotb simulation on the integrated top-level design.
 
@@ -2168,11 +2465,17 @@ def run_integration_simulation(
 
     ``sim_scope`` namespaces the sim build dir and the step log so the
     integration_dv and validation_dv runs (both driven by this function) do not
-    clobber each other. It defaults to ``"integration"`` (byte-identical to the
-    historical behavior); validation_dv passes ``"validation"`` so it gets
+    clobber each other. It defaults to ``"integration"``;
+    validation_dv passes ``"validation"`` so it gets
     ``sim_build/validation`` + ``step_logs/integration/validation_sim_attempt<N>.log``
-    -- preserving the integration run's raw sim log for forensics and avoiding
-    build-fingerprint churn between the two runs.
+    -- preserving the integration run's raw sim log for forensics. Each attempt
+    recreates its scope directory, retaining only engine retry bookkeeping.
+
+    ``project_root`` anchors ``sim_build/<scope>`` (and the sim PYTHONPATH) at
+    the RUN directory; it defaults to the module-level ``PROJECT_ROOT``
+    (resolved at call time) so existing callers are unchanged. Without it, a
+    process that never set ``CORESMITH_PROJECT_ROOT`` builds the chip inside
+    the engine checkout.
 
     Returns:
         dict with: passed (bool), log (str), returncode (int), log_path (str).
@@ -2185,48 +2488,27 @@ def run_integration_simulation(
         _parse_cocotb_summary,
     )
 
-    # Distinct sim build dir per scope (avoids fingerprint churn: the two runs
-    # differ only in MODULE, which would otherwise trigger a full rebuild on
-    # every integration<->validation switch through a shared dir).
-    sim_dir = PROJECT_ROOT / "sim_build" / sim_scope
-    sim_dir.mkdir(parents=True, exist_ok=True)
+    # Each scope owns its build tree and artifacts independently.
+    root = Path(project_root) if project_root else PROJECT_ROOT
+    sim_dir = root / "sim_build" / sim_scope
     # Distinct step-log name per scope (validation -> validation_sim_attempt<N>.log)
     # so validation_dv never overwrites integration_dv's raw sim log.
     _log_step = f"{sim_scope}_sim"
 
-    all_sources = chip_rtl_sources(top_rtl_path, block_rtl_paths)
-    # Dedup shared macro modules (e.g. SRAM) bundled by multiple blocks, else
-    # Verilator MODDUP-aborts elaboration before any transaction.
-    all_sources = _dedup_module_sources(all_sources, sim_dir)
-    sources_str = " ".join(all_sources)
-
-    # The integration file may deliberately contain more than one wrapper
-    # module (for example a 44-pad OpenFrame parent and the graded Caravel
-    # user_project_wrapper).  A filename-derived TOPLEVEL always selects the
-    # first/file-stem wrapper even when the pipeline explicitly chose the real
-    # graded module. Honor design_name when that module is declared in the file;
-    # retain the historical file-stem fallback for ordinary generated tops.
-    safe_name = Path(top_rtl_path).stem
+    from orchestrator.harness.top_module import CandidateError, candidate_for_inputs
     try:
-        _top_source = Path(top_rtl_path).read_text(
-            encoding="utf-8", errors="replace"
-        )
-        if re.search(
-            rf"^\s*module\s+{re.escape(design_name)}\b",
-            _top_source,
-            re.MULTILINE,
-        ):
-            safe_name = design_name
-    except OSError:
-        pass
+        rec = candidate_for_inputs(root, top_rtl_path, block_rtl_paths)
+        if rec["defines"] != "none" or rec["parameters"] != "none":
+            raise CandidateError("Integration simulator does not support the declared candidate configuration")
+    except CandidateError as exc:
+        return {"passed": False, "returncode": -1, "log": str(exc), "kind": exc.kind}
+    all_sources = rec["sources"]
+    sources_str = " ".join(all_sources)
+    safe_name = rec["top_module"]
 
-    # TRACE IS MANDATORY on the integration/validation sim path (2026-07-02 fix).
-    # This function backs BOTH integration_dv and validation_dv, whose PASS verdict
-    # HARD-REQUIRES a WaveKit VCD audit: `run_wavekit_vcd_audit` fail-closes on a
-    # missing/empty VCD and the caller gates `passed` on `wavekit_audit["ok"] is
-    # True`. Previously the trace was gated behind CORESMITH_SIM_TRACE=1 (default
-    # OFF), so a healthy 6/6-passing sim could STRUCTURALLY never pass integration
-    # DV -- it emitted no dump.vcd and the audit fail-closed on it.
+    # TRACE stays on for the integration/validation sim path: the VCD is the
+    # debug agent's and the chip lead's evidence. (WP-10a removed the WaveKit
+    # audit that used to veto the PASS verdict on it.)
     #
     # The trace was only ever gated to dodge an OOM from `--trace --trace-structs`
     # C++ built in PARALLEL fork-storming a 4-core host (2026-07-01). That storm is
@@ -2236,30 +2518,18 @@ def run_integration_simulation(
     # sims (run_simulation) already trace unconditionally -- only this path was
     # env-gated. (Per-block sims may stay env-gated for speed if ever needed; the
     # integration/validation path may not, because its audit is fail-closed.)
-    _waves = "1"
-    _trace_args = "--trace --trace-structs"
-    makefile_content = f"""
-SIM = verilator
-TOPLEVEL_LANG = verilog
-VERILOG_SOURCES = {sources_str}
-TOPLEVEL = {safe_name}
-MODULE = {Path(tb_path).stem}
-WAVES = {_waves}
-EXTRA_ARGS += {_trace_args}
-EXTRA_ARGS += --build-jobs 1
-include $(shell cocotb-config --makefiles)/Makefile.sim
-"""
-    # Pre-run hygiene: the INTEGRATION/VALIDATION sims are engine-authoritative,
-    # rare, and correctness-critical (their PASS verdict hard-requires a WaveKit
-    # VCD audit). Unconditionally wipe any pre-existing build products in this dir
-    # before writing our traced Makefile: an agent's in-context `verify` (or an
-    # earlier aborted run) may have left a stale/traceless Vtop here, and cocotb's
-    # make would REUSE it (its mtime predates our fresh Makefile), emit no
-    # dump.vcd, and fail-close the mandatory audit on a phantom-missing VCD
-    # (2026-07-02 integration-DV failure). Per-block sims (run_simulation) keep the
-    # fingerprint fast-path -- they are frequent and cheap; only this path forces a
-    # clean rebuild.
-    clear_build_products(sim_dir)
+    try:
+        _tb_source = Path(tb_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        _tb_source = ""
+    makefile_content = _compose_dv_makefile(
+        sim_scope, _tb_source, sources_str, safe_name, Path(tb_path).stem,
+    )
+    # No prior object, generated source or binary may reach make, including
+    # through the nested obj dir's parent VPATH. Block DV retains fingerprint
+    # reuse; these authoritative scopes always start fresh before staging inputs.
+    _recreate_sim_dir(sim_dir)
+    _stage_project_inputs(sim_dir, root)
     # Fingerprint the (now clean) build inputs so a later flag/source change is
     # still caught by the mismatch path (and so the fingerprint file stays current).
     apply_build_fingerprint(sim_dir, makefile_content, all_sources)
@@ -2279,7 +2549,7 @@ include $(shell cocotb-config --makefiles)/Makefile.sim
     venv_bin = str(Path(sys.prefix) / "bin")
     env["PATH"] = f"{venv_bin}:{env.get('PATH', '/usr/bin:/bin')}"
     env["SHELL"] = shutil.which("bash") or "/bin/bash"
-    env["PYTHONPATH"] = f"{sim_dir}:{PROJECT_ROOT}:{env.get('PYTHONPATH', '')}"
+    env["PYTHONPATH"] = f"{sim_dir}:{root}:{env.get('PYTHONPATH', '')}"
     # SERIAL make (-j1): with `--build-jobs 1` in the Makefile this keeps the
     # full-chip Verilator build single-threaded so it can never fork-storm the
     # host (the 2026-07-01 incident). Raise only on a big box via
@@ -2359,8 +2629,6 @@ include $(shell cocotb-config --makefiles)/Makefile.sim
             )
 
         vcd_path = sim_dir / "dump.vcd"
-        audit_path = sim_dir / "wavekit_audit.json"
-        wavekit_audit = run_wavekit_vcd_audit(vcd_path, audit_path)
         passed = (
             result.returncode == 0
             and not no_tests
@@ -2368,14 +2636,16 @@ include $(shell cocotb-config --makefiles)/Makefile.sim
                 not summary["found"]
                 or (summary["tests_total"] > 0 and summary["tests_failed"] == 0)
             )
-            and wavekit_audit.get("ok") is True
         )
-        if not wavekit_audit.get("ok"):
-            output = (
-                "WAVEKIT VCD AUDIT FAILED: "
-                f"{wavekit_audit.get('error', 'unknown error')}\n" + output
-            )
+        from orchestrator.harness.top_module import validated_candidate
+        try:
+            if validated_candidate(root)["candidate_sha"] != rec["candidate_sha"]:
+                raise CandidateError("Candidate changed during simulation")
+        except CandidateError as exc:
+            return {"passed": False, "kind": exc.kind, "log": str(exc), "executed_cases": []}
         return {
+            "candidate_sha": rec["candidate_sha"],
+            "executed_cases": _successful_sim_cases(sim_dir / "results.xml") if passed else [],
             "passed": passed,
             "log": output,
             "returncode": result.returncode,
@@ -2384,8 +2654,6 @@ include $(shell cocotb-config --makefiles)/Makefile.sim
             "tests_failed": summary["tests_failed"],
             "log_path": log_path,
             "vcd_path": str(vcd_path) if vcd_path.exists() else "",
-            "wavekit_audit_path": str(audit_path),
-            "wavekit_audit": wavekit_audit,
         }
     except subprocess.TimeoutExpired:
         cmd = [make_bin, "-C", str(sim_dir)]

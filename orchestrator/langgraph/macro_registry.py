@@ -553,11 +553,13 @@ def resolve_shell(
         registry = discover_macros()
     if spec.kind == "rom":
         from orchestrator.langgraph.openram_gen import find_exact
-        return find_exact(words=spec.depth, data_bits=spec.width, registry=registry)
+        return find_exact(words=spec.depth, data_bits=spec.width,
+                          registry=registry, ports=spec.ports, kind="rom")
     from orchestrator.langgraph.openram_gen import ensure_macro
     return ensure_macro(
         words=spec.depth, data_bits=spec.width,
         allow_generate=allow_generate, write_size=8, registry=registry,
+        ports=spec.ports, kind="sram",
     )
 
 

@@ -914,6 +914,23 @@ def _zext(expr: str, extra_bits: int) -> str:
     return "{ {%d{1'b0}}, %s }" % (extra_bits, expr)
 
 
+def _mask_lane_count(macro_data_bits: int, macro_mask_bits: int,
+                     mask_lanes: int | None) -> int:
+    """Write-mask lanes on the macro's ``wmask0`` port.
+
+    OpenRAM's lane count is ``ceil(word_bits / write_size)``, the same
+    arithmetic ``macro_prebind.detect_memory_instances`` uses. Floor division
+    silently drops the top lane -- ``sram_1rw1r_9_4096_8`` declares
+    ``wmask0[1:0]`` while ``9 // 8 == 1``, so the emitted 1-bit constant
+    zero-extends and bit 8 of every word is never written.
+    """
+    if mask_lanes:
+        return max(1, int(mask_lanes))
+    if not macro_mask_bits:
+        return 1
+    return max(1, -(-int(macro_data_bits) // int(macro_mask_bits)))
+
+
 def build_macro_adapter_instance(
     shell_width: int,
     shell_depth: int,
@@ -922,6 +939,8 @@ def build_macro_adapter_instance(
     macro_data_bits: int,
     macro_words: int,
     macro_mask_bits: int = 8,
+    macro_pins: set | None = None,
+    mask_lanes: int | None = None,
     inst_name: str = "u_macro",
 ) -> str:
     """Verilog fragment that instantiates a concrete sky130 1rw1r SRAM macro and
@@ -932,36 +951,59 @@ def build_macro_adapter_instance(
     addr1[AW-1:0], rdata1[W-1:0]) in place of the tie-0 assigns. Widths adapt
     generically: an over-provisioned macro (deeper/wider than requested) gets
     its extra address/data MSBs tied to 0 and its extra read MSBs dropped.
+
+    ``macro_pins`` (the ports the macro's Verilog model actually declares) is
+    the same guard ``macro_prebind._ports_for`` applies: OpenRAM omits
+    ``wmask0`` when ``word_size == write_size``, and a 1rw part has no port-1
+    pins at all -- connecting a pin the model does not declare is a hard
+    elaboration error. None/empty means "unknown model" -> the historical full
+    1rw1r pin list.
     """
     W = int(shell_width)
     AW = _clog2b(int(shell_depth))
     MW = int(macro_data_bits) or W
     MA = _clog2b(int(macro_words) or shell_depth)
-    NB = max(1, MW // macro_mask_bits) if macro_mask_bits else 1
+    NB = _mask_lane_count(MW, macro_mask_bits, mask_lanes)
     # all lanes enabled -> full-word write (the shell has no byte mask)
     wmask_const = "%d'h%x" % (NB, (1 << NB) - 1)
+    have = set(macro_pins or ())
+    masked = (not have) or "wmask0" in have
+    dual = (not have) or ("dout1" in have and "csb1" in have)
 
     addr0_expr = _zext("addr0", MA - AW)
     addr1_expr = _zext("addr1", MA - AW)
     din0_expr = _zext("wdata0", MW - W)
 
     lines = [f"  // --- {_MACRO_ADAPTER_MARK} ---",
-             "  wire _csb0, _web0, _csb1;",
+             "  wire _csb0, _web0" + (", _csb1;" if dual else ";"),
              f"  {_INV_CELL} _u_csb0 (.A(ce0), .Y(_csb0));",  # csb0 = ~ce0
-             f"  {_INV_CELL} _u_web0 (.A(we0), .Y(_web0));",  # web0 = ~we0
-             f"  {_INV_CELL} _u_csb1 (.A(ce1), .Y(_csb1));"]  # csb1 = ~ce1
+             f"  {_INV_CELL} _u_web0 (.A(we0), .Y(_web0));"]  # web0 = ~we0
+    if dual:
+        lines.append(f"  {_INV_CELL} _u_csb1 (.A(ce1), .Y(_csb1));")  # csb1 = ~ce1
     if MW == W:
         dout0_conn, dout1_conn, post = "rdata0", "rdata1", []
     else:
         lines.append(f"  wire [{MW - 1}:0] _dout0;")
-        lines.append(f"  wire [{MW - 1}:0] _dout1;")
-        dout0_conn, dout1_conn = "_dout0", "_dout1"
-        post = [f"  assign rdata0 = _dout0[{W - 1}:0];",
-                f"  assign rdata1 = _dout1[{W - 1}:0];"]
+        dout0_conn = "_dout0"
+        post = [f"  assign rdata0 = _dout0[{W - 1}:0];"]
+        if dual:
+            lines.append(f"  wire [{MW - 1}:0] _dout1;")
+            post.append(f"  assign rdata1 = _dout1[{W - 1}:0];")
+        dout1_conn = "_dout1"
+    if not dual:
+        # 1rw macro behind a shell that still exposes rdata1: drive it from
+        # port 0 rather than leaving it floating (X in gate sim, undriven in
+        # silicon). Mirrors emit_bound_shell's single-port arm.
+        post.append("  assign rdata1 = rdata0;")
     lines.append(f"  {macro_name} {inst_name} (")
-    lines.append(f"    .clk0(clk), .csb0(_csb0), .web0(_web0), .wmask0({wmask_const}),")
-    lines.append(f"    .addr0({addr0_expr}), .din0({din0_expr}), .dout0({dout0_conn}),")
-    lines.append(f"    .clk1(clk), .csb1(_csb1), .addr1({addr1_expr}), .dout1({dout1_conn})")
+    port0 = "    .clk0(clk), .csb0(_csb0), .web0(_web0)"
+    if masked:
+        port0 += f", .wmask0({wmask_const})"
+    lines.append(port0 + ",")
+    lines.append(f"    .addr0({addr0_expr}), .din0({din0_expr}), .dout0({dout0_conn})"
+                 + ("," if dual else ""))
+    if dual:
+        lines.append(f"    .clk1(clk), .csb1(_csb1), .addr1({addr1_expr}), .dout1({dout1_conn})")
     lines.append("  );")
     lines.extend(post)
     return "\n".join(lines)
@@ -977,6 +1019,8 @@ def build_macro_composition_instance(
     tiles_wide: int,
     tiles_deep: int,
     macro_mask_bits: int = 8,
+    macro_pins: set | None = None,
+    mask_lanes: int | None = None,
     inst_prefix: str = "u_tile",
 ) -> str:
     """Verilog fragment that realizes ONE `cs_mem_macro_shell` from an N-tile
@@ -1021,8 +1065,14 @@ def build_macro_composition_instance(
             f"only (tiles_deep=1); got tiles_deep={td} for {macro_name}. A "
             f"multi-bank plan must be surfaced as a blocker upstream."
         )
-    NB = max(1, MW // macro_mask_bits) if macro_mask_bits else 1
+    NB = _mask_lane_count(MW, macro_mask_bits, mask_lanes)
     wmask_const = "%d'h%x" % (NB, (1 << NB) - 1)
+    # Only connect pins the tile macro actually declares (see
+    # build_macro_adapter_instance): a maskless or 1rw tile has no wmask0 /
+    # port-1 pins, and connecting one is a hard elaboration error.
+    have = set(macro_pins or ())
+    masked = (not have) or "wmask0" in have
+    dual = (not have) or ("dout1" in have and "csb1" in have)
 
     # Per-column logical bit range [lo, hi] and the USED width (planner
     # guarantees lo < W for every column: tiles_wide = ceil(W/MW), so the
@@ -1038,11 +1088,12 @@ def build_macro_composition_instance(
     # verilog reader rejects behavioral `~`); mirrors the single-macro adapter.
     lines = [
         f"  // --- {_MACRO_COMPOSITION_MARK}: {tw}w x {td}d of {macro_name} ---",
-        "  wire _csb0, _web0, _csb1;",
+        "  wire _csb0, _web0" + (", _csb1;" if dual else ";"),
         f"  {_INV_CELL} _u_csb0 (.A(ce0), .Y(_csb0));",   # csb0 = ~ce0
         f"  {_INV_CELL} _u_web0 (.A(we0), .Y(_web0));",   # web0 = ~we0
-        f"  {_INV_CELL} _u_csb1 (.A(ce1), .Y(_csb1));",   # csb1 = ~ce1
     ]
+    if dual:
+        lines.append(f"  {_INV_CELL} _u_csb1 (.A(ce1), .Y(_csb1));")  # csb1 = ~ce1
     # Depth over-provision: zero-extend the logical address into the deeper tile.
     addr0_expr = _zext("addr0", MA - AW)
     addr1_expr = _zext("addr1", MA - AW)
@@ -1053,7 +1104,8 @@ def build_macro_composition_instance(
     for (w, lo, hi, used) in cols:
         d0, d1 = f"_dout0_c{w}", f"_dout1_c{w}"
         lines.append(f"  wire [{MW - 1}:0] {d0};")
-        lines.append(f"  wire [{MW - 1}:0] {d1};")
+        if dual:
+            lines.append(f"  wire [{MW - 1}:0] {d1};")
         if used >= MW:
             din_expr = f"wdata0[{hi}:{lo}]"
         else:
@@ -1061,13 +1113,16 @@ def build_macro_composition_instance(
             din_expr = _zext(f"wdata0[{hi}:{lo}]", MW - used)
         inst = f"{inst_prefix}_r0_c{w}"
         lines.append(f"  {macro_name} {inst} (")
-        lines.append(
-            f"    .clk0(clk), .csb0(_csb0), .web0(_web0), .wmask0({wmask_const}),"
-        )
-        lines.append(f"    .addr0({addr0_expr}), .din0({din_expr}), .dout0({d0}),")
-        lines.append(
-            f"    .clk1(clk), .csb1(_csb1), .addr1({addr1_expr}), .dout1({d1})"
-        )
+        port0 = "    .clk0(clk), .csb0(_csb0), .web0(_web0)"
+        if masked:
+            port0 += f", .wmask0({wmask_const})"
+        lines.append(port0 + ",")
+        lines.append(f"    .addr0({addr0_expr}), .din0({din_expr}), .dout0({d0})"
+                     + ("," if dual else ""))
+        if dual:
+            lines.append(
+                f"    .clk1(clk), .csb1(_csb1), .addr1({addr1_expr}), .dout1({d1})"
+            )
         lines.append("  );")
         # low `used` bits of each column, MSB column first -> rebuild rdata.
         rdata0_parts.append(f"{d0}[{used - 1}:0]")
@@ -1076,7 +1131,11 @@ def build_macro_composition_instance(
     # Reassemble the logical read words by concatenation (structural net alias):
     # column tw-1 supplies the MSBs, column 0 the LSBs. Total width == W.
     lines.append("  assign rdata0 = { %s };" % ", ".join(reversed(rdata0_parts)))
-    lines.append("  assign rdata1 = { %s };" % ", ".join(reversed(rdata1_parts)))
+    if dual:
+        lines.append("  assign rdata1 = { %s };" % ", ".join(reversed(rdata1_parts)))
+    else:
+        # 1rw tiles: the shell still exposes rdata1 -- drive it from port 0.
+        lines.append("  assign rdata1 = rdata0;")
     return "\n".join(lines)
 
 
@@ -1111,6 +1170,30 @@ def _macro_info_from_binding(b: dict) -> MacroInfo:
         w, h, pp, gp = _parse_lef(_P(mi.lef))
         mi.width_um, mi.height_um, mi.power_pin, mi.ground_pin = w, h, pp, gp
     return mi
+
+
+def _macro_model_pins(verilog_path: str) -> tuple[set | None, int | None]:
+    """``(ports the macro model declares, its wmask0 lane count)`` for a
+    binding, or ``(None, None)`` when there is no readable model.
+
+    The adapter must be filtered against the REAL model, not a fixed 1rw1r pin
+    list: OpenRAM omits ``wmask0`` when ``word_size == write_size`` and a 1rw
+    part has no port-1 pins, and connecting a pin the model does not declare is
+    a hard elaboration error -- the same lesson ``macro_prebind._ports_for``
+    encodes for the pre-synthesis path.
+    """
+    from pathlib import Path as _P
+
+    if not verilog_path or not _P(verilog_path).exists():
+        return None, None
+    try:
+        from orchestrator.langgraph.macro_prebind import (
+            macro_mask_lanes,
+            macro_ports,
+        )
+        return (macro_ports(verilog_path) or None), macro_mask_lanes(verilog_path)
+    except Exception:      # unreadable/odd model -> keep the historical pin list
+        return None, None
 
 
 def materialize_macro_netlist(
@@ -1155,6 +1238,7 @@ def materialize_macro_netlist(
         b = by_geom.get((sp.width, sp.depth))
         if b is None:
             return block  # no binding for this geometry -> leave as-is
+        pins, lanes = _macro_model_pins(b.get("verilog", "") or "")
         comp = b.get("composition")
         if comp:
             # Shell resolved to an N-tile COMPOSITION: instantiate the concrete
@@ -1167,6 +1251,7 @@ def materialize_macro_netlist(
                 tiles_wide=int(comp.get("tiles_wide") or 1),
                 tiles_deep=int(comp.get("tiles_deep") or 1),
                 macro_mask_bits=int(b.get("macro_mask_bits") or 8),
+                macro_pins=pins, mask_lanes=lanes,
             )
         else:
             body = build_macro_adapter_instance(
@@ -1175,6 +1260,7 @@ def materialize_macro_netlist(
                 macro_data_bits=int(b.get("macro_data_bits") or sp.width),
                 macro_words=int(b.get("macro_words") or sp.depth),
                 macro_mask_bits=int(b.get("macro_mask_bits") or 8),
+                macro_pins=pins, mask_lanes=lanes,
             )
         stripped = _TIEOFF_ASSIGN_RE.sub("", block)
         cut = stripped.rindex("endmodule")

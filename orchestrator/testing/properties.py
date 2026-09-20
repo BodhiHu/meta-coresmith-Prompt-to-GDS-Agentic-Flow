@@ -180,7 +180,7 @@ def assert_never_hangs(result: BlockRunResult) -> None:
 
 def assert_never_fails_open(result: BlockRunResult) -> None:
     """P2: an unrecovered fault must not yield a passing block."""
-    assert result.terminal or result.timed_out is False, "run did not terminate"
+    assert result.terminal and not result.timed_out, "run did not terminate"
     assert not result.passed, (
         "P2 violated: block reported PASS under an unrecovered fault "
         f"(final flags: sim_passed={result.final_state.get('sim_passed')})"

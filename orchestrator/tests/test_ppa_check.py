@@ -614,10 +614,11 @@ class TestRouteAfterSynthPpaGate:
         from orchestrator.langgraph.pipeline_graph import route_after_synth
         assert route_after_synth(self._state()) == "block_done"
 
-    def test_gate_on_over_budget_routes_to_diagnose(self, monkeypatch):
+    def test_over_budget_is_advisory(self, monkeypatch):
+        # WP-10c: the PPA budget verdict never routes a compiled block to rework.
         monkeypatch.setenv("CORESMITH_PPA_GATE", "1")
         from orchestrator.langgraph.pipeline_graph import route_after_synth
-        assert route_after_synth(self._state(ppa_ok=False)) == "diagnose"
+        assert route_after_synth(self._state(ppa_ok=False)) == "block_done"
 
     def test_gate_on_within_budget_is_done(self, monkeypatch):
         monkeypatch.setenv("CORESMITH_PPA_GATE", "1")

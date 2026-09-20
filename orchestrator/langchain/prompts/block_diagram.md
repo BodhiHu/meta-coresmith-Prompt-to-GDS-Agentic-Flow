@@ -27,7 +27,7 @@ RULES:
 2. Assign each block a complexity tier:
    - Tier 1: Straightforward (combinational logic, simple FSMs, LUTs)
    - Tier 2: Moderate (multi-cycle pipelines, interleaving, packetization)
-   - Tier 3: Complex (FFT, Viterbi, Reed-Solomon, prediction engines)
+   - Tier 3: Complex (transforms, decoders, error correction, prediction engines)
 3. For each block, specify:
    - name: snake_case module name
    - description: one-line description
@@ -45,6 +45,11 @@ RULES:
      memory/IO/wrapper block that reproduces no golden math. Format:
      `<this_run's_golden_file>.py:<fn_or_method_1>,<fn_or_method_2>,...` naming
      the ACTUAL functions from THIS run's golden that this block reproduces.
+     HARD SIGNOFF RULE: a chip cannot sign off while any block has neither a
+     python_source golden slice nor an explicit exemption. For a pure
+     memory/IO/wrapper block that reproduces no golden math, set
+     `"golden_exempt": true` AND `"no_golden_reason": "<why the contract fixes
+     its behaviour completely>"`; every other block MUST name its golden slice.
    - rtl_target: path for generated Verilog (e.g. "rtl/<subsystem>/<name>.v")
    - testbench: path for cocotb testbench (e.g. "tb/cocotb/test_<name>.py")
    - interfaces: dict of port groups (e.g. {{"input": {{"width": 8}}, "output": {{"width": 8}}}})
@@ -116,16 +121,27 @@ RULES:
    (e.g. `clk_rst_ctrl`, `rst_sync`, `clock_gate`). The design is compiled flat
    and the integration agent inserts clock distribution, reset synchronization,
    and clock-gating cells automatically during top-level integration. Individual
-   blocks should simply declare `clk` and `rst_n` ports and assume clean,
-   synchronized signals are provided.
+   blocks simply declare the design's clock and reset ports and assume clean,
+   synchronized signals are provided. Use the clock/reset NAMES AND POLARITY the
+   requirements or locked interface define (a task with a locked boundary
+   names them, with their polarity); default to `clk` +
+   active-low `rst_n` only when the requirements say nothing about reset.
 6. Soft-IP interface rule: if the PRD/requirements describe reusable soft IP,
    synthesizable RTL only, or an internal accelerator, do NOT narrow, serialize,
    pin-mux, or packetize functional streams solely to fit package/MPW GPIO pad
    limits. Keep AXI-Stream interfaces at the functional payload widths required
    by the user and golden model. Add pad serializers/wrappers only when the user
-   explicitly asks for OpenFrame/Caravel/MPW top-level integration.
+   explicitly asks for a hardened top-level chip integration (a shuttle /
+   MPW wrapper).
+   When the requirements LOCK a chip-boundary pinout (the task declares a
+   `top` with fixed pins -- a host-bus accelerator chassis, a shuttle
+   submission), emit exactly ONE pad-adapter block named as that declared
+   top; it carries the locked boundary pins (pads, host bus, clock/reset)
+   and bridges them to the core blocks. NEVER add an outer shell block
+   around it: the backend generates the shell, and a second wrapper block
+   breaks the deterministic assembly and the graded DV boundary.
 7. KPI arithmetic rule: for every measurable throughput, latency, bandwidth,
-   frame-rate, tile-rate, packet-rate, PSNR/error, or compression KPI preserved
+   frame-rate, tile-rate, packet-rate, quality/error, or compression KPI preserved
    from PRD/FRD, include a system invariant with the exact arithmetic and units.
    For cycle budgets, state clock frequency, transactions per frame/window/
    packet, cycles available, cycles per transaction, and the local block

@@ -130,6 +130,7 @@ class TestOperatorSpecPin:
         # The pin only prevents REGEN; the mem-price gate (review path) reads the
         # spec off disk regardless, so a pinned OVER-BUDGET spec STILL fails.
         monkeypatch.setattr(mp, "characterizer_warm", lambda pdk=None: False)
+        monkeypatch.setenv("CORESMITH_MEM_PRICE_MAX_REVISE", "3")
         _spec(tmp_path, "recon",
               "area_budget_um2 = 250000\n"
               "# MEM r: 8x235520 ports=1rw1r impl=sram justification=frame\n")

@@ -1161,8 +1161,13 @@ def predict_mem(width: int, depth: int, ports: str = "1rw",
         rec = order[0][0]
         if rec == "flop" and "registered_flop" in meeting:
             rec = "registered_flop"
+        # meets() only requires an Fmax, and the sort treats a None area as
+        # +inf, so the winner can legitimately have no area estimate (a macro
+        # whose .lib parses but whose LEF has no SIZE). Say "unknown" rather
+        # than raising TypeError out of the whole prediction.
+        _area = meeting[rec]["area_um2"]
         reason = (f"{rec} meets {target_mhz:.0f} MHz at least predicted area "
-                  f"({meeting[rec]['area_um2']:.0f} um2, "
+                  f"({f'{_area:.0f} um2' if _area is not None else 'unknown area'}, "
                   f"{meeting[rec]['fmax_mhz']:.0f} MHz).")
     else:
         # nothing meets target with flops -> macro if feasible, else reshape

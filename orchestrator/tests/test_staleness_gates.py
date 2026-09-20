@@ -17,12 +17,6 @@ assemble (truncation adapters would destroy the amended semantics).
 
 import json
 
-from orchestrator.langgraph.pipeline_helpers import (
-    block_contract_sha1,
-    detect_model_interface_gap,
-    stale_uarch_spec_blocks,
-)
-
 
 def _write_contracts(root, contracts):
     (root / ".coresmith").mkdir(exist_ok=True)
@@ -41,25 +35,6 @@ def _stamp(root, block, sha):
     (d / "uarch_spec_contract_sha1").write_text(sha)
 
 
-class TestDetectModelInterfaceGap:
-    def test_structured_marker(self):
-        text = ("# INFEASIBLE-INTERFACE-GAP: no port carries the coded/"
-                "uncoded traversal counts\nfrom myhdl import block\n")
-        got = detect_model_interface_gap(text)
-        assert "INFEASIBLE-INTERFACE-GAP" in got
-        assert "traversal counts" in got
-
-    def test_observed_stub_idiom(self):
-        text = ("from myhdl import block\n"
-                "STATE_ERROR_INTERFACE_GAP = 7  # every job routes here\n")
-        assert "ERROR_INTERFACE_GAP" in detect_model_interface_gap(text)
-
-    def test_clean_model_is_empty(self):
-        assert detect_model_interface_gap(
-            "from myhdl import block\n# transcribes idct8x8()\n") == ""
-        assert detect_model_interface_gap("") == ""
-
-
 _VALID_MODEL_TMPL = """\
 {header}from myhdl import block, always_seq
 
@@ -70,42 +45,6 @@ def {name}(clk, rst):
         pass
     return logic
 """
-
-
-class TestArbitrateDiskFirst:
-    """C8: disk-first arbitration must not resurrect a superseded model."""
-
-    def test_unchanged_on_disk_never_beats_fresh_extraction(self):
-        from orchestrator.langchain.agents.block_golden_generator import (
-            BlockGoldenGenerator,
-        )
-
-        stale = _VALID_MODEL_TMPL.format(
-            header="# stub: ERROR_INTERFACE_GAP\n", name="myblk")
-        fresh = _VALID_MODEL_TMPL.format(
-            header="# INFEASIBLE-INTERFACE-GAP: counts not carried\n",
-            name="myblk")
-        # on_disk == pre_existing -> the file was NOT written during this
-        # call; the fresh extraction must win even though both validate.
-        chosen = BlockGoldenGenerator._arbitrate_disk_first(
-            fresh, stale, stale, "myblk")
-        assert "INFEASIBLE-INTERFACE-GAP" in chosen
-        assert "ERROR_INTERFACE_GAP" not in chosen
-
-    def test_cli_written_file_still_preferred(self):
-        from orchestrator.langchain.agents.block_golden_generator import (
-            BlockGoldenGenerator,
-        )
-
-        pre = _VALID_MODEL_TMPL.format(header="# old\n", name="myblk")
-        written_now = _VALID_MODEL_TMPL.format(header="# rich CLI output\n",
-                                               name="myblk")
-        echoed = _VALID_MODEL_TMPL.format(header="# thin echo\n", name="myblk")
-        # on_disk != pre_existing -> the CLI wrote it during this call;
-        # disk-first preference is preserved.
-        chosen = BlockGoldenGenerator._arbitrate_disk_first(
-            echoed, written_now, pre, "myblk")
-        assert "rich CLI output" in chosen
 
 
 class TestApplyContractAmendments:
@@ -190,54 +129,6 @@ class TestApplyContractAmendments:
         doc, a2 = apply_contract_amendments(doc, [amend])
         assert len(a1) == 1 and a2 == []
         assert doc["contracts"][1]["notes"].count("same note") == 1
-
-
-class TestClockPortValidation:
-    """C11: the model validator must accept the design's ACTUAL clock name
-    (wb_clk_i on Caravel), not demand a literal 'clk' -- the literal check
-    failed every model generation on such designs and discarded substantive
-    models before gap detection could run.
-
-    _validate_block_model_text is pure Amaranth-contract AST validation (looks
-    for ``class <block>(Elaboratable)`` + __init__/elaborate) -- it never
-    imports myhdl, so it does not share _VALID_MODEL_TMPL (still MyHDL-style,
-    used elsewhere in this file by TestArbitrateDiskFirst, which exercises a
-    different code path). This class builds its own minimal Amaranth-shaped
-    fixture so it validates against the ACTUAL current contract."""
-
-    def _model(self, clk: str, rst: str) -> str:
-        return (
-            "from amaranth import Elaboratable, Module\n\n"
-            f"class myblk(Elaboratable):\n"
-            f"    def __init__(self, {clk}, {rst}):\n"
-            f"        self.{clk} = {clk}\n"
-            f"        self.{rst} = {rst}\n\n"
-            "    def elaborate(self, platform):\n"
-            "        m = Module()\n"
-            "        return m\n"
-        )
-
-    def test_wb_clk_i_accepted(self):
-        from orchestrator.langchain.agents.block_golden_generator import (
-            _validate_block_model_text,
-        )
-        assert _validate_block_model_text(
-            self._model("wb_clk_i", "wb_rst_i"), "myblk") is None
-
-    def test_plain_clk_still_accepted(self):
-        from orchestrator.langchain.agents.block_golden_generator import (
-            _validate_block_model_text,
-        )
-        assert _validate_block_model_text(
-            self._model("clk", "rst"), "myblk") is None
-
-    def test_no_clock_port_rejected(self):
-        from orchestrator.langchain.agents.block_golden_generator import (
-            _validate_block_model_text,
-        )
-        problem = _validate_block_model_text(
-            self._model("tick", "rst"), "myblk")
-        assert problem is not None and "clock" in problem.lower()
 
 
 class TestFreshArtifactRecovery:
@@ -423,24 +314,3 @@ endmodule
         assert errors == [], errors
 
 
-class TestStaleUarchSpecBlocks:
-    def test_no_sidecar_never_flagged(self, tmp_path):
-        _write_contracts(tmp_path, [_edge("a", "b", 8)])
-        assert stale_uarch_spec_blocks(tmp_path, ["a", "b"]) == []
-
-    def test_matching_stamp_not_stale(self, tmp_path):
-        _write_contracts(tmp_path, [_edge("a", "b", 8)])
-        _stamp(tmp_path, "a", block_contract_sha1(tmp_path, "a"))
-        assert stale_uarch_spec_blocks(tmp_path, ["a"]) == []
-
-    def test_contract_amendment_flags_only_stale_participants(self, tmp_path):
-        # bitstream_reader case: spec stamped pre-amendment; the contract is
-        # then widened (8 -> 9 bit bit_req). The stale block is flagged; a
-        # block stamped AFTER the amendment is not.
-        _write_contracts(tmp_path, [_edge("hp", "br", 8), _edge("x", "y", 4)])
-        _stamp(tmp_path, "br", block_contract_sha1(tmp_path, "br"))
-        _stamp(tmp_path, "y", block_contract_sha1(tmp_path, "y"))
-        _write_contracts(tmp_path, [_edge("hp", "br", 9), _edge("x", "y", 4)])
-        stale = stale_uarch_spec_blocks(tmp_path, ["br", "y", "hp"])
-        assert [s["block"] for s in stale] == ["br"]
-        assert stale[0]["recorded"] != stale[0]["current"]

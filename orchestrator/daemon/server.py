@@ -45,6 +45,11 @@ _PROJECT_ROOT = os.environ.get(
 )
 os.environ["CORESMITH_PROJECT_ROOT"] = _PROJECT_ROOT
 
+# The blocks override that was in the daemon's environment at startup. A
+# /run/start with blocks_file sets CORESMITH_BLOCKS_FILE process-wide; a later
+# run without blocks_file must fall back to this, not inherit the stale one.
+_ENV_BLOCKS_FILE = os.environ.get("CORESMITH_BLOCKS_FILE")
+
 # A-Fix 1: seed profile flag defaults BEFORE importing graph code -- the
 # pipeline builder reads gate-enable helpers (e.g. block_goldens_enabled) at
 # build time, so the profile must be applied first.
@@ -61,6 +66,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from orchestrator.graph_lifecycle import GraphLifecycle
+from orchestrator.run_env import apply_persisted_env, format_override_notice
 
 log = logging.getLogger("coresmithd")
 log.setLevel(logging.INFO)
@@ -415,6 +421,43 @@ _architecture = GraphLifecycle(
 
 
 # ---------------------------------------------------------------------------
+# Persisted run env (<project_root>/.coresmith/env)
+# ---------------------------------------------------------------------------
+# The daemon reads its environment ONCE, at process start. `.coresmith/env` is
+# the run's frozen config and operators edit it MID-RUN -- a chip lead appended
+# several keys to a parked run -- but those edits were invisible to every later
+# /run/restart-node and resume, so a knob the operator had already "set" was
+# still unset in the graph until someone bounced the daemon. Re-apply the file
+# before launching graph work, with the SAME persisted-wins semantics the CLI
+# uses (one implementation: orchestrator.run_env).
+
+def _apply_run_env(where: str) -> list[str]:
+    """Re-read ``.coresmith/env`` into ``os.environ``; return the changed keys.
+
+    The persisted file wins over whatever this process currently holds --
+    including values the daemon itself set earlier in the run. Best-effort: an
+    absent/unreadable file is a no-op and a failure never breaks the handler.
+    """
+    try:
+        changes = apply_persisted_env(_PROJECT_ROOT)
+    except Exception:  # noqa: BLE001 -- an env refresh must never fail a request
+        _daemon_log("warning", "%s: persisted env refresh failed", where,
+                    exc_info=True)
+        return []
+    if changes:
+        # _daemon_log, not log: under uvicorn the `coresmithd` logger has no
+        # handler, and a silent env swap is exactly what this fix is about.
+        _daemon_log(
+            "warning", "%s: reloaded .coresmith/env -- applied %s",
+            where, [k for k, _, _ in changes],
+        )
+        notice = format_override_notice(changes)
+        if notice:
+            _daemon_log("warning", "%s: %s", where, notice)
+    return [k for k, _, _ in changes]
+
+
+# ---------------------------------------------------------------------------
 # Request models
 # ---------------------------------------------------------------------------
 
@@ -560,6 +603,10 @@ async def run_start(req: StartRequest):
                 "force=true (CLI: `run start --force`).",
             )
 
+    # Mid-run edits to .coresmith/env (gate knobs, provider selectors) apply to
+    # the work this request is about to launch, not only to the next daemon.
+    env_updated = _apply_run_env("run/start")
+
     block_queue = _load_block_queue(req.blocks_file)
     if not block_queue:
         raise HTTPException(
@@ -574,7 +621,7 @@ async def run_start(req: StartRequest):
     # B3: persist the resolved block queue + initialize the scoreboard schema +
     # snapshot the oracle manifest so the harness (`coresmith verify ...`) can
     # resolve blocks and detect oracle tampering after the daemon parks. All
-    # best-effort -- must never block starting a run.
+    # Queue/schema exports are best-effort; trust capture must succeed.
     try:
         from orchestrator.harness.blocks import persist_block_queue
         persist_block_queue(_PROJECT_ROOT, block_queue)
@@ -585,11 +632,11 @@ async def run_start(req: StartRequest):
         Scoreboard(_PROJECT_ROOT).ensure_schema()
     except Exception:  # noqa: BLE001
         pass
+    from orchestrator.state_store.trust import capture_run_baseline
     try:
-        from orchestrator.state_store.trust import write_oracle_manifest
-        write_oracle_manifest(_PROJECT_ROOT)
-    except Exception:  # noqa: BLE001
-        pass
+        capture_run_baseline(_PROJECT_ROOT)
+    except RuntimeError as exc:
+        raise HTTPException(500, str(exc)) from exc
 
     await _pipeline.reset_for_new_run()
 
@@ -617,6 +664,8 @@ async def run_start(req: StartRequest):
         "block_count": len(block_queue),
         "status": _pipeline.status,
     }
+    if env_updated:
+        response["env_updated"] = env_updated
     if arch_warnings:
         response["warnings"] = arch_warnings
     return response
@@ -690,6 +739,10 @@ async def run_resume(req: ResumeRequest):
     if _pipeline.task is not None and not _pipeline.task.done():
         raise HTTPException(409, "pipeline still running; nothing to resume")
 
+    # A resume re-enters the graph in THIS process: pick up any .coresmith/env
+    # edits the operator made while the run was parked.
+    env_updated = _apply_run_env("run/resume")
+
     graph_config = {"configurable": {"thread_id": _pipeline.thread_id}}
     state_snapshot = await _pipeline.graph.aget_state(graph_config)
 
@@ -716,13 +769,16 @@ async def run_resume(req: ResumeRequest):
         # (cmd=None) to advance a stranded/paused run without a fake action.
         _consumed_interrupt_ids.clear()
         await _pipeline.safe_resume(None, graph_config)
-        return {
+        _ticked = {
             "resumed": True,
             "ticked": True,
             "next_nodes": list(state_snapshot.next),
             "action": req.action,
             "status": _pipeline.status,
         }
+        if env_updated:
+            _ticked["env_updated"] = env_updated
+        return _ticked
 
     # Reject an action the parked interrupt does not support (400 + allowed list)
     # rather than silently forwarding it into the graph.
@@ -757,7 +813,10 @@ async def run_resume(req: ResumeRequest):
     _consumed_interrupt_ids = {iid for iid, _ in interrupts}
 
     await _pipeline.safe_resume(cmd, graph_config)
-    return {"resumed": True, "interrupts": len(interrupts), "action": req.action}
+    result = {"resumed": True, "interrupts": len(interrupts), "action": req.action}
+    if env_updated:
+        result["env_updated"] = env_updated
+    return result
 
 
 @app.post("/run/pause")
@@ -799,6 +858,7 @@ async def run_continue():
     """
     if _pipeline.task is not None and not _pipeline.task.done():
         raise HTTPException(409, "pipeline already running")
+    _apply_run_env("run/continue")
     await _pipeline.ensure_graph()
     snap = await _pipeline.graph.aget_state(
         {"configurable": {"thread_id": _pipeline.thread_id}}
@@ -861,28 +921,28 @@ async def run_restart_node(req: RestartNodeRequest):
     """
     if _pipeline.task is not None and not _pipeline.task.done():
         raise HTTPException(409, "pipeline already running -- pause first")
+    # Re-entering a node runs it with THIS process's env; the operator's
+    # mid-run .coresmith/env edits must be live for that re-run (bug C).
+    env_updated = _apply_run_env("run/restart-node")
     refreshed = []
     if req.refresh_sidecars:
         # #6: re-sync intact-RTL blocks' contract sidecars to live before
         # re-entering integration, so the staleness preflight does not force a
         # mass-regen of already-passing blocks.
         try:
-            import json as _json
-
-            from orchestrator.langgraph.pipeline_helpers import (
-                refresh_current_sidecars,
-            )
-            bq = os.path.join(_PROJECT_ROOT, ".coresmith", "block_queue.json")
-            names = []
-            if os.path.exists(bq):
-                data = _json.loads(open(bq).read())
-                names = [b.get("name") for b in data if b.get("name")]
-            refreshed = refresh_current_sidecars(_PROJECT_ROOT, names)
+            from orchestrator.state_store.project_db import open_project as _open_project
+            _pdb = _open_project(_PROJECT_ROOT)
+            for _name in _pdb.block_names():
+                if _pdb.block_contract_version(_name):
+                    _pdb.stamp_block_spec(_name)
+                    refreshed.append(_name)
         except Exception:
             log.warning("restart-node: sidecar refresh failed", exc_info=True)
     result = await _pipeline.restart_from_node(req.node)
     if refreshed:
         result["sidecars_refreshed"] = refreshed
+    if env_updated:
+        result["env_updated"] = env_updated
     if result.get("error"):
         raise HTTPException(400, result["error"] + (
             " -- " + result["hint"] if result.get("hint") else ""))
@@ -973,6 +1033,36 @@ async def backend_state():
     return state
 
 
+class BackendResumeRequest(BaseModel):
+    action: str = "retry"          # retry | skip | abort
+    constraint: str = ""
+
+
+@app.post("/backend/resume")
+async def backend_resume(req: BackendResumeRequest):
+    """Resume a parked backend interrupt (DRC/LVS/signoff ask_human).
+
+    Delegates to the MCP resume_backend (one implementation, two transports
+    -- the same split as /backend/start). Fire-and-forget is safe HERE
+    because the daemon event loop hosts the created task; the gap this
+    closes is that resume_backend was previously reachable only from a
+    short-lived MCP process, which silently lost the resume. Two campaigns
+    were run-blocked on this: backend start --full can only replay into the
+    same park, so a DRC/LVS-parked backend was terminal from the outside."""
+    try:
+        _mcp = _backend_handle()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"backend resume unavailable: {exc}") from exc
+    raw = await _mcp.resume_backend(action=req.action, constraint=req.constraint)
+    try:
+        result = json.loads(raw) if isinstance(raw, str) else dict(raw)
+    except (ValueError, TypeError):
+        return {"raw": raw}
+    if result.get("error"):
+        raise HTTPException(409, json.dumps(result))
+    return result
+
+
 @app.post("/backend/pause")
 async def backend_pause():
     try:
@@ -1001,6 +1091,11 @@ async def backend_pause():
 async def architecture_start(req: ArchStartRequest):
     if _architecture.task is not None and not _architecture.task.done():
         raise HTTPException(409, "architecture already running; call /architecture/pause first")
+
+    # The composition / model-integration gates read their knobs
+    # (CORESMITH_REFERENCE_ENTRY, CORESMITH_MODEL_STIMULUS, ...) from the
+    # environment at gate time, and the architecture graph is where they run.
+    env_updated = _apply_run_env("architecture/start")
 
     requirements = req.requirements
     if not requirements and req.requirements_file:
@@ -1067,13 +1162,16 @@ async def architecture_start(req: ArchStartRequest):
 
     graph_config = {"configurable": {"thread_id": _architecture.thread_id}}
     await _architecture.safe_start(initial_state, graph_config)
-    return {
+    response = {
         "started": True,
         "status": _architecture.status,
         "requirements_length": len(requirements),
         "target_clock_mhz": req.target_clock_mhz,
         "pdk_summary": pdk_summary,
     }
+    if env_updated:
+        response["env_updated"] = env_updated
+    return response
 
 
 @app.get("/architecture/state")
@@ -1096,6 +1194,8 @@ async def architecture_resume(req: ArchResumeRequest):
     await _architecture.ensure_graph()
     if _architecture.task is not None and not _architecture.task.done():
         raise HTTPException(409, "architecture still running; nothing to resume")
+
+    env_updated = _apply_run_env("architecture/resume")
 
     config = {"configurable": {"thread_id": _architecture.thread_id}}
     snap = await _architecture.graph.aget_state(config)
@@ -1130,7 +1230,10 @@ async def architecture_resume(req: ArchResumeRequest):
         cmd = None  # plain tick to resume a paused run
 
     await _architecture.safe_resume(cmd, config)
-    return {"resumed": True, "action": resume_value["action"]}
+    result = {"resumed": True, "action": resume_value["action"]}
+    if env_updated:
+        result["env_updated"] = env_updated
+    return result
 
 
 @app.post("/architecture/pause")
@@ -1203,11 +1306,15 @@ def _load_block_queue(blocks_file: str) -> list[dict]:
         if not bf_path.exists():
             raise HTTPException(400, f"blocks_file not found: {bf_path}")
         os.environ["CORESMITH_BLOCKS_FILE"] = str(bf_path)
+    elif _ENV_BLOCKS_FILE:
+        os.environ["CORESMITH_BLOCKS_FILE"] = _ENV_BLOCKS_FILE
+    else:
+        os.environ.pop("CORESMITH_BLOCKS_FILE", None)
 
     block_queue: list[dict] = []
-    specs_path = Path(_PROJECT_ROOT) / ".coresmith" / "block_specs.json"
-    if not blocks_file and specs_path.exists():
-        block_queue = json.loads(specs_path.read_text())
+    if not blocks_file:
+        from orchestrator.state_store.project_db import open_project as _open_project
+        block_queue = _open_project(_PROJECT_ROOT).block_specs()
 
     if not block_queue:
         config = load_config()
@@ -1478,6 +1585,9 @@ def main():
     ap.add_argument("--host", default="127.0.0.1")
     args = ap.parse_args()
 
+    from orchestrator.state_store.trust import capture_run_baseline
+    _apply_run_env("daemon start")
+    capture_run_baseline(_PROJECT_ROOT)
     port = _pick_port(args.port)
     _write_daemon_file(port)
 

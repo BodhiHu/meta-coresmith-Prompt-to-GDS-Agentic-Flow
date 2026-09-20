@@ -237,26 +237,34 @@ async def materialize_stage(
     shutil.copy2(fixture_dir / "checkpoint.db", ckpt_dst)
     cm = AsyncSqliteSaver.from_conn_string(str(ckpt_dst))
     saver = await cm.__aenter__()
-    graph = _build_graph(graph_name, saver)
-    config = {"configurable": {"thread_id": manifest["thread_id"]}}
-    ctx.graph = graph
-    ctx.config = config
+    # C7: the saver is OPEN from here on. Attach it to the ctx first so any
+    # failure below (unknown graph kind, missing thread_id, a checkpoint the
+    # current schema can't read) can close it -- the caller never receives the
+    # ctx on a raise, so nothing else would, and pytest hangs at exit.
     ctx._saver_cm = cm
     ctx._saver = saver
+    try:
+        graph = _build_graph(graph_name, saver)
+        config = {"configurable": {"thread_id": manifest["thread_id"]}}
+        ctx.graph = graph
+        ctx.config = config
 
-    # 5. rewrite original_root -> project_root across the checkpointed state
-    orig = manifest.get("original_root", "")
-    if orig and orig != project_root:
-        snap = await graph.aget_state(config)
-        values = dict(snap.values or {})
-        updates = {}
-        for k, v in values.items():
-            if k in _APPEND_KEYS:
-                continue
-            nv = _rewrite(v, orig, project_root)
-            if nv != v:
-                updates[k] = nv
-        if updates:
-            await graph.aupdate_state(config, updates)
+        # 5. rewrite original_root -> project_root across the checkpointed state
+        orig = manifest.get("original_root", "")
+        if orig and orig != project_root:
+            snap = await graph.aget_state(config)
+            values = dict(snap.values or {})
+            updates = {}
+            for k, v in values.items():
+                if k in _APPEND_KEYS:
+                    continue
+                nv = _rewrite(v, orig, project_root)
+                if nv != v:
+                    updates[k] = nv
+            if updates:
+                await graph.aupdate_state(config, updates)
+    except BaseException:
+        await ctx.aclose()
+        raise
 
     return ctx

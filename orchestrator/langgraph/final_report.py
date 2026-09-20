@@ -91,6 +91,30 @@ def _read_json(path: Path) -> dict | None:
     return None
 
 
+def _blocks_without_golden(project_root: str, blocks_out: list) -> list:
+    """Names of blocks whose block-diagram entry has neither a python_source
+    golden slice nor an explicit golden exemption (WP-12 hard gate)."""
+    try:
+        bd = json.loads((Path(project_root) / ".coresmith" / "block_diagram.json")
+                        .read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    entries = {str(b.get("name")): b for b in (bd.get("blocks") or [])
+               if isinstance(b, dict) and b.get("name")}
+    missing: list = []
+    for row in blocks_out:
+        name = str(row.get("name") or "")
+        e = entries.get(name)
+        if e is None:
+            continue
+        has_golden = bool(str(e.get("python_source") or "").strip())
+        exempt = bool(e.get("golden_exempt")) and bool(
+            str(e.get("no_golden_reason") or "").strip())
+        if not has_golden and not exempt:
+            missing.append(name)
+    return missing
+
+
 def _carried_forward_defects(project_root: str) -> list:
     """Read the carried-forward-defects ledger (advisory-bypass observations)."""
     try:
@@ -142,15 +166,18 @@ def _chip_throughput(project_root: str) -> dict:
 def _engine_provenance(project_root: str) -> dict:
     """Engine git SHA stamped at run start (+ mid-run-change flag). Section 7a.
 
-    Prefers the run-stamped ``.coresmith/engine_sha.json`` (what the run ACTUALLY
+    Prefers the run-stamped engine SHA in the project database (what the run ACTUALLY
     executed); falls back to the live engine SHA when no stamp exists.
     """
     try:
-        p = Path(project_root) / ".coresmith" / "engine_sha.json"
-        if p.exists():
-            d = json.loads(p.read_text())
-            if isinstance(d, dict):
-                return d
+        from orchestrator.state_store.project_db import ProjectDB
+        db = ProjectDB(project_root)
+        if db.exists():
+            sha = db.get_setting("engine_sha")
+            if sha is not None:
+                changes = json.loads(db.get_setting("engine_sha_changes", "[]") or "[]")
+                return {"sha": sha, "changed": bool(changes), "changes": changes,
+                        "first_seen": db.get_setting("engine_sha_first_seen")}
     except Exception:  # noqa: BLE001
         pass
     try:
@@ -414,11 +441,26 @@ def build_final_report(state: dict, project_root: str, *,
     blocks_total = len(blocks_out)
     blocks_passed = sum(1 for b in blocks_out if b["dv"]["passed"] is True)
 
+    # WP-12 (owner decision): no block signs off without a reference golden.
+    # A block diagram entry must carry a python_source golden slice, or an
+    # explicit exemption (`golden_exempt: true` with `no_golden_reason`) for a
+    # pure storage/IO block whose behaviour the contract fixes completely.
+    blocks_without_golden = _blocks_without_golden(project_root, blocks_out)
+
     # ---- chip level ----------------------------------------------------
     integ = state.get("integration_dv_result") or {}
     valid = state.get("validation_dv_result") or {}
     design_name = (integ.get("design_name") or valid.get("design_name")
                    or state.get("design_name") or "chip_top")
+    from orchestrator.harness.top_module import CandidateError, validated_candidate
+    try:
+        candidate = validated_candidate(project_root)
+        top_module, top_rtl_path = candidate["top_module"], candidate["top_rtl_path"]
+        candidate_sha = candidate["candidate_sha"]
+        candidate_error = ""
+    except CandidateError as exc:
+        top_module, top_rtl_path, candidate_error = None, None, str(exc)
+        candidate_sha = None
 
     integ_dv_row = _dv_one(sb, design_name, "chip")
     valid_dv_row = _dv_one(sb, design_name, "validation")
@@ -440,6 +482,7 @@ def build_final_report(state: dict, project_root: str, *,
             "action_taken": result.get("action_taken", ""),
             "skipped": bool(result.get("skipped_by_user")),
             "aborted": bool(result.get("aborted")),
+            "max_geometry": result.get("max_geometry"),
         }
         if kind == "validation":
             out["requirement_count"] = _int(result.get("requirement_count"))
@@ -453,13 +496,15 @@ def build_final_report(state: dict, project_root: str, *,
         if st["ran"] and st["testbench"]:
             tb_total += 1
 
-    top_ppa = _block_ppa(sb, design_name, period_ns)
+    top_ppa = _block_ppa(sb, top_module, period_ns) if top_module else {"measured": False}
 
     cov_aggregate = (round(100.0 * cov_hit_sum / cov_total_sum, 2)
                      if cov_total_sum else None)
     cov_min = round(min(cov_pcts), 2) if cov_pcts else None
-    top_fmax = round(min(fmax_vals), 2) if fmax_vals else None
-    top_wns = round(min(wns_vals), 4) if wns_vals else None
+    top_fmax = top_ppa.get("fmax_mhz")
+    top_wns = top_ppa.get("wns_ns")
+    leaf_fmax = round(min(fmax_vals), 2) if fmax_vals else None
+    leaf_wns = round(min(wns_vals), 4) if wns_vals else None
 
     # ---- signoff verdict ----------------------------------------------
     integ_ok = integ_stage["passed"]
@@ -479,14 +524,20 @@ def build_final_report(state: dict, project_root: str, *,
         or integ_ok is False or valid_ok is False
         or chip_synth_ok is False or die_ok is False
         or bool(state.get("pipeline_aborted"))
+        or bool(blocks_without_golden)
     )
     if (blocks_all_pass and integ_ok is True and valid_ok is True
-            and pipeline_done):
+            and pipeline_done and not blocks_without_golden):
         status = "PASS"
         status_reason = ""
     elif explicit_fail:
         status = "FAIL"
-        if blocks_total > 0 and blocks_passed < blocks_total:
+        if blocks_without_golden:
+            status_reason = (
+                f"{len(blocks_without_golden)} block(s) have no reference "
+                f"golden and no golden exemption: "
+                f"{', '.join(blocks_without_golden)}")
+        elif blocks_total > 0 and blocks_passed < blocks_total:
             status_reason = (f"{blocks_total - blocks_passed} of "
                              f"{blocks_total} blocks did not pass")
         elif integ_ok is False:
@@ -537,6 +588,10 @@ def build_final_report(state: dict, project_root: str, *,
         "generated_at": _iso(now),
         "project_root": str(project_root),
         "design_name": design_name,
+        "top_module": top_module,
+        "top_rtl_path": top_rtl_path,
+        "candidate_sha": candidate_sha,
+        "candidate_error": candidate_error,
         "target_clock_mhz": target_clock_mhz,
         "engine_sha": engine_prov.get("sha", ""),
         "engine_sha_changed_mid_run": bool(engine_prov.get("changed")),
@@ -555,9 +610,12 @@ def build_final_report(state: dict, project_root: str, *,
             "coverage_floor": _num(_floor_from_blocks(blocks_out)),
             "top_fmax_mhz": top_fmax,
             "top_wns_ns": top_wns,
+            "leaf_estimate_fmax_mhz": leaf_fmax,
+            "leaf_estimate_wns_ns": leaf_wns,
             "integration_dv": _verdict_word(integ_ok, integ_stage["ran"]),
             "validation_dv": _verdict_word(valid_ok, valid_stage["ran"]),
             "carried_forward_defect_count": len(carried_defects),
+            "blocks_without_golden": blocks_without_golden,
             "retired_block_count": len(retired_blocks),
             "throughput_blocks_gated": len(tput_gated),
             "throughput_blocks_failed": tput_failed,
@@ -620,6 +678,10 @@ def _fmt(x: Any, suffix: str = "", nd: int = 2) -> str:
     return f"{x}{suffix}"
 
 
+def _timing(x: Any, suffix: str, nd: int = 2) -> str:
+    return "unknown" if x is None else _fmt(x, suffix, nd)
+
+
 def _cov_cell(cov: dict) -> str:
     if not cov.get("applicable"):
         return f"n/a ({cov.get('reason', 'not measured')})"
@@ -676,6 +738,12 @@ def render_markdown(report: dict) -> str:
     )
     lines.append(f"- Generated: `{report.get('generated_at', '')}`")
     lines.append(f"- Project: `{report.get('project_root', '')}`")
+    if report.get("top_module"):
+        lines.append(f"- Top module: `{report['top_module']}` (`{report['top_rtl_path']}`)")
+    else:
+        lines.append(f"- Top module: unknown ({report.get('candidate_error') or 'no validated candidate'})")
+    if report.get("candidate_sha"):
+        lines.append(f"- Candidate SHA: `{report['candidate_sha']}`")
     if report.get("engine_sha"):
         _chg = " ⚠️ CHANGED MID-RUN" if report.get("engine_sha_changed_mid_run") else ""
         lines.append(f"- Engine SHA: `{report.get('engine_sha')}`{_chg}")
@@ -690,13 +758,30 @@ def render_markdown(report: dict) -> str:
         f"(floor {_fmt(s.get('coverage_floor'), '%', 0)})"
     )
     lines.append(
-        f"- Top Fmax: {_fmt(s.get('top_fmax_mhz'), ' MHz')} "
-        f"(worst WNS {_fmt(s.get('top_wns_ns'), ' ns', 4)})"
+        f"- Top Fmax: {_timing(s.get('top_fmax_mhz'), ' MHz')} "
+        f"(worst WNS {_timing(s.get('top_wns_ns'), ' ns', 4)})"
+    )
+    lines.append(
+        f"- Leaf estimate Fmax: {_fmt(s.get('leaf_estimate_fmax_mhz'), ' MHz')} "
+        f"(worst leaf WNS {_fmt(s.get('leaf_estimate_wns_ns'), ' ns', 4)})"
     )
     lines.append(
         f"- Integration DV: **{s.get('integration_dv')}** · "
         f"Validation DV: **{s.get('validation_dv')}**"
     )
+    for stage in ("integration", "validation"):
+        geometry = report.get("chip", {}).get(f"{stage}_dv", {}).get("max_geometry") or {}
+        lines.append(
+            f"- Maximum geometry ({stage}): **{geometry.get('verdict', 'not evaluated')}**"
+            f" — {geometry.get('reason', 'no maximum-geometry gate record')}"
+        )
+        if geometry:
+            lines.append(
+                f"  Policy-declared dimensions: `{geometry.get('declared_dims', {})}`; "
+                f"Marker pairs: `{geometry.get('marker_pairs', {})}`; "
+                f"Testbench case mentions (scope only): `{geometry.get('testbench_case_mentions', {})}`; "
+                f"Executed owner maximum cases: `{geometry.get('executed_maximum_cases', [])}`."
+            )
     _tg_gated = s.get("throughput_blocks_gated")
     if _tg_gated:
         lines.append(
@@ -864,8 +949,8 @@ def render_markdown(report: dict) -> str:
         f"aggregate block area {_fmt(chip.get('aggregate_area_um2'), ' µm²')}"
     )
     lines.append(
-        f"- Top-level Fmax {_fmt(report.get('signoff', {}).get('top_fmax_mhz'), ' MHz')}, "
-        f"WNS {_fmt(top_ppa.get('wns_ns'), ' ns', 4)}"
+        f"- Top-level Fmax {_timing(report.get('signoff', {}).get('top_fmax_mhz'), ' MHz')}, "
+        f"WNS {_timing(top_ppa.get('wns_ns'), ' ns', 4)}"
     )
     lines.append("")
     lines.append(

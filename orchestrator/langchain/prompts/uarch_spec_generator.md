@@ -33,6 +33,51 @@ processing, or when blocks need flow control):
 - tdata/tvalid/tready/tlast signals
 - Registered tvalid to avoid the "valid self-cancellation" bug
 - Backpressure handling via tready
+
+**Chip-boundary stream ports** (in_valid/in_ready/in_data/in_last,
+out_valid/out_ready/out_data/out_last of the top level) are graded by the
+published sampler, not by the internal AXI-Stream convention. The spec of the
+block that owns them MUST state, verbatim, the acceptance rules below and
+design the ready/valid registers to them.
+
+PUBLISHED STREAM SAMPLER CONTRACT (chip-boundary stream ports ONLY):
+The task's shipped sampler/testbench is the contract for these ports; the
+ERS transcribes its acceptance semantics and that transcription wins over
+anything below. When the task's sampler is a post-edge stream driver (the
+common cocotb pattern: it drives the chip's top-level stream ports -- the
+input stream's valid/ready/data/last and the output stream's
+valid/ready/data/last, named as the task declares them -- before each rising
+edge and samples them in the read-only phase AFTER the edge), it counts:
+  input word accepted on edge N  <=> in_valid (driven before N) && in_ready as it
+                                     reads AFTER N (the value in_ready takes at N)
+  output beat consumed on edge N <=> out_valid/out_data as they read after N &&
+                                     out_ready as driven for cycle N
+Rules that follow. Violating either desyncs the grader; the failure is
+seed-dependent under backpressure and is NOT caught by a testbench that samples
+ready before the edge (a common and expensive mistake):
+  - in_ready: the grader re-offers a word whenever in_ready reads 0 after the
+    edge, and counts it accepted on the first edge after which in_ready reads 1.
+    Two self-consistent ways to honour that; pick ONE and keep it everywhere:
+      (a) pre-edge latching (accept = in_valid && in_ready_q): in_ready may only
+          FALL on an edge that accepts a word (the re-offered duplicate is then
+          absorbed by the edge on which in_ready rises, where in_ready_q is
+          still 0 so nothing is latched twice); never fall on a non-accepting
+          edge, or the re-offered word is lost when ready rises.
+      (b) post-edge latching (accept = in_valid && in_ready_next): drop ready
+          only on an edge that does NOT latch (refuse-and-drop), and latch on
+          the edge ready rises if in_valid is high.
+    Mixing the two (e.g. pre-edge latching plus refuse-and-drop) desyncs the
+    grader.
+  - out side: the beat visible after edge N is consumed by the out_ready driven
+    for cycle N. Register it (`out_ready_q <= out_ready`), keep out_valid/out_data
+    on registered state, hold the beat until `out_valid_q && out_ready_q`, and
+    only then advance to the next beat. Retiring on the raw out_ready sampled at
+    the next edge skips a beat on every ready 0->1 transition.
+  - If the task ships a reference sampler/testbench (for example a cocotb
+    `StreamHarness`), its sampling is the contract; the ERS must transcribe it
+    and the DV must drive the DUT exactly as it does.
+Internal block-to-block interfaces keep the standard convention (a transfer is
+`valid && ready` sampled at the edge); this section is about the chip boundary.
 - Packet boundaries via tlast
 
 **Memory-mapped / CSR** (use when ERS specifies bus-accessible registers):
@@ -70,9 +115,17 @@ For each port, verify:
    via signal "coeff_data", use that name (or a clear derivative like
    "coeff_data_in" / "coeff_data_out").
 
+
+**Contract port names are canonical and collapse.** A contract signal maps to port
+`<channel>_<signal>`; when the signal already starts with `<channel>_` or equals the
+channel name, the port is the signal as-is (channel `irq` + signal `irq` -> port `irq`,
+channel `in` + signal `in_last` -> `in_last`). Never instruct "keep both tokens" or
+spell `irq_irq`: the conformance gate demands the collapsed name and parks the block.
+
 5. **Clock and reset**: ALL blocks in the same clock domain must use
-   identical clock and reset port names and polarities. Each block simply
-   declares `clk` and `rst_n` (or per the ERS convention) as inputs and
+   identical clock and reset port names and polarities, taken from the ERS /
+   locked interface (the task's declared names and polarity; `clk` +
+   `rst_n` only when the ERS specifies nothing). Each block declares them as inputs and
    assumes clean, synchronized signals. Do NOT include clock/reset
    synchronization logic, clock gating, or reset synchronizer sub-blocks
    inside the block -- these are inserted by the integration agent during
@@ -93,7 +146,7 @@ For this block, identify and document:
 1. **Payload semantics**: exact field layout, numeric format, mode encoding,
    sideband meaning, packet ordering, and when each field is valid.
 2. **Atomicity rules**: which payload fields and sideband metadata must refer
-   to the same transaction, sample, macroblock, packet, frame, or state update.
+   to the same transaction, sample, coding unit, packet, frame, or state update.
 3. **Stateful feedback loops**: any predictor, context RAM, recurrence,
    reconstruction feedback, adaptive coding state, rolling checksum, history
    buffer, or neighbor table that is updated from this block or consumed by it.
@@ -108,11 +161,11 @@ For codecs and predictors, explicitly specify the closed-loop invariant. For
 example:
 
 > The reconstructed pixels emitted for neighbor/context update after each
-> macroblock MUST be generated from the same selected mode, selected quantized
+> coding unit MUST be generated from the same selected mode, selected quantized
 > coefficients, predictor samples, inverse transform, dequantization, clipping,
 > and deblock rules that the decoder/golden model applies to the emitted
-> bitstream. The context update for macroblock N MUST occur before any
-> dependent macroblock N+1 consumes that context, and mode/coefficient/context
+> bitstream. The context update for coding unit N MUST occur before any
+> dependent coding unit N+1 consumes that context, and mode/coefficient/context
 > metadata must advance atomically.
 
 If the block cannot satisfy a required semantic contract with the interfaces
@@ -630,3 +683,12 @@ RULES
     or other closed-loop state, the uArch MUST either carry that state through
     the relevant interfaces or explicitly require a block repartition. Guessing
     or recomputing from incomplete metadata is not acceptable.
+
+## Pad-adapter block (locked chip boundary)
+
+If this block carries the task's declared locked boundary (the block named as
+the task's `top`), specify a PAD ADAPTER, not a structural chip top: its ports
+are the locked boundary pins plus the inward contract channels it produces or
+consumes; it instantiates no other block and routes no contract edge. The
+engine assembles the chip top from all blocks and the interface contract; a
+block that instantiates a sibling fails the conformance gate.

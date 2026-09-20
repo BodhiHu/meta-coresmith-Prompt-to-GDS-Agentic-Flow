@@ -123,7 +123,6 @@ By default the optional stages are **off**. Both ENABLE and legacy SKIP forms ar
 
 | Var | Effect |
 |---|---|
-| `CORESMITH_SKIP_SYNTH` | `1` skips Yosys + PDK preflight (frontend-only runs) |
 | `CORESMITH_STRICT_INTEGRATION_REVIEW` | `1` auto-revises when `issues_fixed > 0` (old behavior) |
 | `CORESMITH_ALLOW_SKIP_INTEGRATION_DV` | `1` adds `skip` to the integration DV failure interrupt |
 | `CORESMITH_ALLOW_SKIP_VALIDATION_DV` | `1` adds `skip` to the validation DV failure interrupt |
@@ -151,7 +150,6 @@ export CORESMITH_CODEX_MODEL=gpt-5.6-sol
 export CORESMITH_MODEL=gpt-5.6-sol
 export CORESMITH_BLOCK_MODEL=gpt-5.6-sol
 export CORESMITH_CODEX_SANDBOX=danger-full-access
-export CORESMITH_SKIP_SYNTH=1                   # unless Sky130 PDK is local
 export CORESMITH_ENABLE_MEMORY_MAP=0
 export CORESMITH_ENABLE_CLOCK_TREE=0
 export CORESMITH_ENABLE_REGISTER_SPEC=0
@@ -171,4 +169,3 @@ make preflight
 
 Validates that the Sky130 PDK is present at the expected paths, Yosys ≥ 0.40 and Verilator ≥ 5.0 are on PATH, and the LLM provider CLI is callable. Outputs structured JSON listing exactly what is missing.
 
-`CORESMITH_SKIP_SYNTH=1` skips the PDK and Yosys checks but still requires Verilator + cocotb.

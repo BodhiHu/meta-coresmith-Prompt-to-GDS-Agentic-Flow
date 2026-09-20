@@ -61,7 +61,7 @@ You MUST include at least one question for EACH of the six categories:
   6. **validation_kpi** — at least one measurable application-intent KPI
      that validation DV can test against RTL simulation or a referenced
      golden model. This is required; examples include max output error,
-     minimum PSNR, compression ratio range, throughput, latency, decoded
+     a minimum quality metric, compression ratio range, throughput, latency, decoded
      frame/sample count, packet ordering, or protocol compliance.
 
 MANDATORY ACCEPTANCE-TEST QUESTION: if the user requirements do not fully

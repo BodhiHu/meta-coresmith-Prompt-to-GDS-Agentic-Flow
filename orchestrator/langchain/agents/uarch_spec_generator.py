@@ -24,7 +24,11 @@ from typing import Any
 from opentelemetry import trace
 
 from orchestrator._timeouts import scaled
-from orchestrator.langchain.prompts.skills import load_skills as _load_skills
+from orchestrator.langchain.prompts.skills import (
+    UARCH_SKILL_CANDIDATES,
+    build_skill_section,
+    select_skills,
+)
 
 from .coresmith_llm import ClaudeLLM
 
@@ -41,27 +45,18 @@ else:
         "Produce a detailed microarchitecture specification from a Python model."
     )
 
-# Inject handshake skills so every uArch spec author has access to the
-# coresmith conventions for AXI-Stream and sRdy/dRdy. Skills are loaded
-# at import time so a missing skill file is visible immediately rather
-# than at first agent call.
-_SKILLS_TEXT = _load_skills(
-    "axi_stream",
-    "srdy_drdy",
-    "arithmetic_precision",
-    "memory_macro_vs_flops",
-    "serialization_contract",
-    "buffer_stride_contract",
-    "pipeline_contract",
-    "throughput_budget_contract",
-    "control_pulse_handshake",
-)
-if _SKILLS_TEXT:
-    SYSTEM_PROMPT = (
-        SYSTEM_PROMPT
-        + "\n\n# Reference Skills (use when authoring interfaces)\n\n"
-        + _SKILLS_TEXT
-    )
+# Reference skills are NO LONGER concatenated at import time. All ten used to
+# be injected unconditionally, so a register-file block carried the full 18 K
+# bitstream-serialization skill: measured on a live run, 133 K of a 141 K-char
+# system prompt was skills, most of them inapplicable. They are now selected
+# PER CALL from the block's own evidence (see build_system_prompt below);
+# unselected skills are listed in a compact manifest with their absolute paths,
+# which the worker (which has filesystem read access) must read before
+# authoring in that domain. Nothing became unavailable; the token tax did.
+#
+# The missing-file fail-fast property is preserved and strengthened: a SELECTED
+# skill is loaded with load_skill_strict, which raises loudly at first use
+# instead of silently shrinking the prompt.
 
 # Inject the LIVE set of pre-built SRAM macros discovered in the PDK, so the
 # uArch author picks from what is actually available (not a hardcoded list) --
@@ -119,6 +114,42 @@ try:
     )
 except Exception:  # pragma: no cover - discovery is best-effort
     pass
+
+
+def _constraint_precedence_line() -> str:
+    """Naming precedence for a block's ACCUMULATED constraints ('' on error).
+
+    The accumulated constraints are a debug agent's reading of past failures;
+    the frozen contract is design intent. On a port NAME they disagree about,
+    the contract wins. Imported lazily so the agent module keeps no import-time
+    dependency on the langgraph package.
+    """
+    try:
+        from orchestrator.langgraph.contract_conformance import (
+            CONSTRAINT_PRECEDENCE_LINE,
+        )
+        return CONSTRAINT_PRECEDENCE_LINE
+    except Exception:  # noqa: BLE001 - prompt garnish, never blocks a spec
+        return ""
+
+
+def build_system_prompt(
+    block_spec: Any = None,
+    contracts: Any = None,
+    block_diagram: Any = None,
+) -> str:
+    """The uArch author's system prompt for ONE block.
+
+    ``SYSTEM_PROMPT`` (the authored prompt + the live SRAM macro menu) plus the
+    reference-skill section assembled for this block: ``port_naming`` always
+    inline, the skills this block's evidence implicates inline, everything else
+    named in the manifest with an absolute path to read.
+    """
+    section = build_skill_section(
+        select_skills(block_spec, contracts, block_diagram),
+        candidates=UARCH_SKILL_CANDIDATES,
+    )
+    return SYSTEM_PROMPT + "\n\n" + section if section else SYSTEM_PROMPT
 
 
 def normalize_feasibility(summary: dict) -> dict:
@@ -228,6 +259,13 @@ class UarchSpecGenerator:
                 f"Description: {description}",
             ]
 
+            # Evidence for per-call reference-skill selection (see
+            # build_system_prompt). Populated below from disk when a
+            # project_root is supplied; empty means "no evidence", and the
+            # classifier then conservatively inlines every skill.
+            _bd_block: dict = {}
+            _contracts_view: dict = {}
+
             if constraints:
                 parts.append("\n--- DESIGN CONSTRAINTS ---")
                 for i, c in enumerate(constraints, 1):
@@ -235,6 +273,7 @@ class UarchSpecGenerator:
                         parts.append(f"  {i}. {c.get('rule', str(c))}")
                     else:
                         parts.append(f"  {i}. {c}")
+                parts.append(_constraint_precedence_line())
                 parts.append("")
 
             # PDK arithmetic timing budget (gated; best-effort). Arms the author
@@ -365,6 +404,7 @@ class UarchSpecGenerator:
 
                         for blk in bd.get("blocks", []):
                             if blk.get("name") == block_name:
+                                _bd_block = blk if isinstance(blk, dict) else {}
                                 ifaces = blk.get("interfaces", {})
                                 if ifaces:
                                     parts.append(
@@ -423,7 +463,7 @@ class UarchSpecGenerator:
                     format_block_contracts_prompt,
                     load_block_contracts,
                 )
-                _contracts_view = load_block_contracts(project_root, block_name)
+                _contracts_view = load_block_contracts(project_root, block_name) or {}
                 _contracts_fragment = format_block_contracts_prompt(
                     block_name, _contracts_view
                 )
@@ -469,9 +509,25 @@ class UarchSpecGenerator:
 
             user_message = "\n".join(parts)
 
+            # Per-call system prompt: port_naming always inline, the rest
+            # selected from THIS block's evidence, unselected skills manifested
+            # with absolute paths.
+            _block_spec = dict(_bd_block)
+            _block_spec.update({
+                "name": block_name,
+                "description": description,
+                "model_source": python_source,
+            })
+            system_prompt = build_system_prompt(
+                block_spec=_block_spec,
+                contracts=_contracts_view or None,
+                block_diagram=_bd_block or None,
+            )
+            span.set_attribute("system_prompt_chars", len(system_prompt))
+
             run_name = f"Generate Uarch Spec [{block_title}]{revision_label}"
             content = await self.llm.call(
-                system=SYSTEM_PROMPT,
+                system=system_prompt,
                 prompt=user_message,
                 run_name=run_name,
                 resume_session_id=resume_session_id,
@@ -485,6 +541,184 @@ class UarchSpecGenerator:
                 "spec_summary": spec_summary,
                 "block_name": block_name,
             }
+
+    async def generate_many(
+        self,
+        blocks: list[dict],
+        python_sources: dict[str, str] | None = None,
+        feedback: dict[str, str] | None = None,
+        previous_specs: dict[str, str] | None = None,
+        project_root: str = "",
+    ) -> str:
+        """Single-context uArch stage: ONE session authors (or revises) every
+        spec in ``blocks`` against the shared ERS / FRD / block diagram /
+        interface contracts, so port names, widths, handshakes and field
+        layouts agree across connected blocks by construction. Each spec is
+        written to ``arch/uarch_specs/<block>.md``; the raw response is
+        returned for the caller, which verifies the files on disk.
+        """
+        python_sources = python_sources or {}
+        feedback = feedback or {}
+        previous_specs = previous_specs or {}
+        names = [b["name"] for b in blocks]
+        revising = [n for n in names if n in previous_specs]
+        span_name = f"Uarch Specs [{len(names)} blocks]"
+        with _tracer.start_as_current_span(span_name) as span:
+            span.set_attribute("block_count", len(names))
+            span.set_attribute("revising", len(revising))
+            parts = [
+                "Author the microarchitecture specifications for ALL of the "
+                "following blocks in this one session. You are the single "
+                "micro-architect of this design: every port name, width, "
+                "handshake, field layout and clock/reset convention MUST agree "
+                "between the blocks that connect to each other and MUST match "
+                "the canonical interface contracts exactly.",
+                "",
+                f"Write ONE file per block, {len(names)} files in total:",
+            ]
+            for n in names:
+                parts.append(f"- arch/uarch_specs/{n}.md")
+            parts.append(
+                "\nWrite each file completely (the same structure and depth "
+                "you would give a single block) before moving to the next; do "
+                "not stop until every file above exists. Spec Section 9 "
+                "(interface summary) of two connected blocks must name the "
+                "same signals.\n"
+            )
+            if revising:
+                parts.append(
+                    "--- REVISION REQUESTED ---\n"
+                    "The following blocks already have a spec on disk that was "
+                    "reviewed and needs changes. Read the current spec file, "
+                    "revise it to address ALL feedback points, and rewrite it "
+                    "in place. Keep everything the feedback does not touch."
+                )
+                for n in revising:
+                    _cur = (Path(project_root) / "arch" / "uarch_specs" / f"{n}.md"
+                            if project_root else Path("arch/uarch_specs") / f"{n}.md")
+                    parts.append(
+                        f"\n### {n} -- current spec: {_cur}\nFeedback:\n"
+                        f"{feedback.get(n, '').strip() or '(rejected; revise)'}")
+                parts.append("")
+            _root = None
+            _bd: dict = {}
+            if project_root:
+                _root = Path(project_root)
+                ers_path = _root / "arch" / "ers_spec.md"
+                if ers_path.exists():
+                    try:
+                        parts.append(
+                            "\n--- ENGINEERING REQUIREMENTS SPECIFICATION (ERS) ---\n"
+                            f"{ers_path.read_text()}\n--- END ERS ---\n"
+                        )
+                    except OSError:
+                        pass
+                bd_path = _root / ".coresmith" / "block_diagram.json"
+                if bd_path.exists():
+                    try:
+                        _bd = json.loads(bd_path.read_text())
+                    except (OSError, json.JSONDecodeError):
+                        _bd = {}
+                if _bd:
+                    target = set(names)
+                    conns = [c for c in _bd.get("connections", [])
+                             if c.get("from") in target or c.get("to") in target]
+                    parts.append(
+                        "\n--- CONNECTION GRAPH (every edge touching these blocks) ---\n"
+                        f"{json.dumps(conns, indent=2)}\n--- END CONNECTION GRAPH ---\n"
+                    )
+                from .contract_lookup import load_interface_contracts
+                _doc = load_interface_contracts(project_root) or {}
+                _edges = _doc.get("contracts") or _doc.get("edges") or []
+                if _edges:
+                    _defaults = _doc.get("defaults") or {}
+                    _pack = _defaults.get("default_packing_convention")
+                    parts.append(
+                        "\n## CANONICAL INTERFACE CONTRACTS (all edges; AUTHORITATIVE)\n"
+                        "The bit layouts, field positions, handshake protocol, "
+                        "sideband signals, bootstrap policy and port NAMES below "
+                        "MUST match in every spec exactly. Do not invent fields, "
+                        "change widths, rename signals, or skip a bootstrap policy."
+                        + (f"\n**Design-wide convention:** `{_pack}`" if _pack else "")
+                        + "\n```json\n" + json.dumps(_edges, indent=2) + "\n```\n"
+                    )
+                frd_path = _root / "arch" / "frd_spec.md"
+                if frd_path.exists():
+                    try:
+                        frd_text = frd_path.read_text()
+                        if len(frd_text) > 8000:
+                            frd_text = (frd_text[:8000]
+                                        + f"\n... (truncated; full text: {frd_path})")
+                        parts.append(
+                            "\n--- FUNCTIONAL REQUIREMENTS (FRD) ---\n"
+                            f"{frd_text}\n--- END FRD ---\n"
+                        )
+                    except OSError:
+                        pass
+            bd_blocks = {b.get("name"): b for b in _bd.get("blocks", [])
+                         if isinstance(b, dict)}
+            parts.append("\n═══ BLOCKS TO SPECIFY ═══")
+            for b in blocks:
+                n = b["name"]
+                parts.append(f"\n### Block: {n}")
+                parts.append(f"Description: {b.get('description', '')}")
+                blk = bd_blocks.get(n) or {}
+                ifaces = blk.get("interfaces", {})
+                if ifaces:
+                    parts.append("Interfaces (block diagram):\n"
+                                 f"{json.dumps(ifaces, indent=2)}")
+                _ffb = blk.get("flip_flop_budget")
+                if _ffb:
+                    parts.append(f"HARD FLOP BUDGET: flip_flop_budget = {_ffb} FF "
+                                 "(std-cell sequential elements; bulk memories "
+                                 ">= 2 Kbit are SRAM macros, excluded). The spec "
+                                 f"MUST emit `flip_flop_budget` <= {_ffb}.")
+                _ab = blk.get("area_budget_um2") or blk.get("die_area_budget_um2")
+                if _ab:
+                    parts.append(f"HARD AREA BUDGET (SRAM included): area_budget_um2 "
+                                 f"= {_ab}; each cs_sram bit costs ~1.7 um^2. The "
+                                 f"spec MUST emit `area_budget_um2` <= {_ab}.")
+                src = (python_sources.get(n) or "").strip()
+                if src:
+                    parts.append(f"Python golden model:\n```python\n{src}\n```")
+                else:
+                    parts.append(
+                        "Python golden model: NONE SUPPLIED -- derive the "
+                        "microarchitecture from the description, contracts and "
+                        "ERS, and say so in the spec. Do NOT invent one.")
+                if n in previous_specs:
+                    _cur = (Path(project_root) / "arch" / "uarch_specs" / f"{n}.md"
+                            if project_root else Path("arch/uarch_specs") / f"{n}.md")
+                    parts.append(
+                        f"Current spec to revise: {_cur} (read it with its "
+                        "absolute path; write the revision to "
+                        f"arch/uarch_specs/{n}.md).")
+            parts.append(
+                "\nWhen every file is written, end with ONE fenced ```json block: "
+                '{"specs_written": [<block names>], "notes": "<cross-block '
+                'naming decisions>"}.'
+            )
+            user_message = "\n".join(parts)
+            system_prompt = build_system_prompt()  # no per-block evidence: all skills inline
+            span.set_attribute("system_prompt_chars", len(system_prompt))
+            span.set_attribute("user_prompt_chars", len(user_message))
+            # One session writes every spec sequentially, so the per-block
+            # budget (CORESMITH_UARCH_TIMEOUT, 45 min) cannot bound it: allow
+            # the per-block budget plus 15 min per extra block, overridable.
+            try:
+                _budget = scaled(2700 + 900 * max(0, len(names) - 1),
+                                 env="CORESMITH_UARCH_MANY_TIMEOUT")
+                self.llm.timeout = max(int(getattr(self.llm, "timeout", 0) or 0), int(_budget))
+                span.set_attribute("timeout_s", self.llm.timeout)
+            except Exception:  # noqa: BLE001 - keep the default budget on any error
+                pass
+            content = await self.llm.call(
+                system=system_prompt,
+                prompt=user_message,
+                run_name=f"Generate Uarch Specs [{len(names)} blocks"
+                         + (" - Revision" if revising else "") + "]",
+            )
+            return content or ""
 
     def _parse_response(
         self, content: str, block_name: str

@@ -41,6 +41,7 @@ from orchestrator.langgraph.backend_graph import (
     route_after_timing,
     route_decision,
 )
+from orchestrator.tests.candidate_fixtures import adopt
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -323,14 +324,14 @@ class TestInternalNodes:
         result = await init_design_node(state)
         assert result["current_block"]["name"] == "test_chip_top"
         assert result["attempt"] == 1
-        assert result["phase"] == "init"
+        assert result["phase"] == "candidate"
         assert result["step_log_paths"] == {}
 
     @pytest.mark.asyncio
     async def test_init_design_no_integration_top(self):
         state = _initial_backend_state(_fft16_backend_blocks())
         result = await init_design_node(state)
-        assert "No integration top-level RTL" in result.get("previous_error", "")
+        assert "manifest" in result.get("previous_error", "").lower()
 
     @pytest.mark.asyncio
     async def test_backend_complete(self):
@@ -405,13 +406,13 @@ class TestHappyPath:
         await backend_graph.ainvoke(state, config)
 
         result = await backend_graph.ainvoke(
-            Command(resume={"action": "skip"}), config
+            Command(resume={"action": "abort"}), config
         )
 
-        assert result["backend_done"] is True
-        assert len(result["completed_blocks"]) == 1
-        assert result["completed_blocks"][0]["name"] == "test_chip_top"
-        assert result["completed_blocks"][0]["skipped"] is True
+        assert not result.get("backend_done")
+        assert not result.get("completed_blocks")
+        assert result["phase"] == "candidate"
+        mock_diag.assert_not_called()
 
 
 class TestEdaTimeout:
@@ -654,6 +655,7 @@ class TestFlatSynthAttemptHistoryWiring:
             "current_block": {"name": "chip_top"},
         }
         state.update(kw)
+        adopt(tmp_path, top)
         return state
 
     def _syn_dir(self, tmp_path):

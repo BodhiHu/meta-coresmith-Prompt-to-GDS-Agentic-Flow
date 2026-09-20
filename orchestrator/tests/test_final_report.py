@@ -21,6 +21,7 @@ from orchestrator.langgraph.final_report import (
     fmax_mhz,
     render_markdown,
 )
+from orchestrator.tests.candidate_fixtures import adopt
 
 
 class _FakeScoreboard:
@@ -61,6 +62,9 @@ def _write_chip_tput(root: Path, rec: dict) -> None:
 
 
 def _passing_setup(tmp_path):
+    top = tmp_path / "chip_top.v"
+    top.write_text("module chip_top(); endmodule\n")
+    adopt(tmp_path, top)
     state = {
         "project_root": str(tmp_path),
         "target_clock_mhz": 100.0,  # 10 ns period
@@ -176,7 +180,8 @@ class TestBuildReportPassing:
 
         # totals / aggregates
         assert sign["coverage_min_pct"] == 85.0
-        assert sign["top_fmax_mhz"] == pytest.approx(86.96, abs=0.05)
+        assert sign["top_fmax_mhz"] == pytest.approx(92.59, abs=0.05)
+        assert sign["leaf_estimate_fmax_mhz"] == pytest.approx(86.96, abs=0.05)
         # aggregate block area = 850.5 + 3200.0
         assert r["chip"]["aggregate_area_um2"] == pytest.approx(4050.5, abs=0.1)
 

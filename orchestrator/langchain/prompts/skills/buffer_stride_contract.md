@@ -11,7 +11,7 @@ and it looks exactly like an arithmetic bug.
 
 A proven case: a `stripe_mb_emitter` filled its line buffer **contiguously**
 by an incrementing counter (effective row stride = the runtime frame width,
-e.g. 16), but `_pack_macroblock` read it back as a 2-D array with a
+e.g. 16), but `_pack_block` read it back as a 2-D array with a
 **hardcoded** `MAX_WIDTH` row pitch (640): `stripe[ly*MAX_WIDTH + base_x + lx]`.
 Only row 0 aligned; rows 1–7 indexed never-written cells = 0. Every
 pixel_block delivered to the encoder had a correct row 0 and zeroed rows
@@ -63,9 +63,9 @@ reserved slot is populated, the consumer must apply the **identical base
 offset on BOTH paths** — the data blocks are at slots `1..N` regardless of
 whether slot 0 happens to be used in this variant.
 
-### The failure this prevents (proven)
+### The failure this prevents
 
-An video_codec `intra_rd_encode_core` packed the per-pixel_block coefficient word
+A block-pipelined encoder core packed the per-block coefficient word
 with a **uniform slot convention for both MB types**: slot 0 = luma DC block,
 slots `1..16` = the sixteen 4×4 residual blocks (`scans[(sb+1)*16 + i]`,
 `totals[sb+1]`) — for the Intra16x16 path AND the Intra4x4 path. The consumer

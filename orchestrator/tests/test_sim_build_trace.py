@@ -20,6 +20,7 @@ import pytest
 
 from orchestrator.langgraph import integration_helpers as ih
 from orchestrator.langgraph.pipeline_helpers import apply_build_fingerprint
+from orchestrator.tests.candidate_fixtures import adopt
 
 
 # ---------------------------------------------------------------------------
@@ -45,8 +46,8 @@ def test_integration_makefile_always_has_trace_flags(tmp_path, monkeypatch, trac
         return subprocess.CompletedProcess(cmd, 0, "** TESTS=1 PASS=1 FAIL=0 **", "")
 
     monkeypatch.setattr(ih.subprocess, "run", _fake_run)
-    monkeypatch.setattr(ih, "run_wavekit_vcd_audit", lambda *a, **k: {"ok": True})
 
+    adopt(tmp_path, top)
     ih.run_integration_simulation("chip", str(top), {}, str(tb))
 
     makefile = (tmp_path / "sim_build" / "integration" / "Makefile").read_text()
@@ -72,10 +73,8 @@ def test_integration_makefile_honors_declared_design_top(tmp_path, monkeypatch):
             cmd, 0, "** TESTS=1 PASS=1 FAIL=0 **", ""
         ),
     )
-    monkeypatch.setattr(
-        ih, "run_wavekit_vcd_audit", lambda *a, **k: {"ok": True}
-    )
 
+    adopt(tmp_path, top, name="user_project_wrapper")
     ih.run_integration_simulation(
         "user_project_wrapper", str(top), {}, str(tb)
     )
@@ -205,8 +204,8 @@ def test_integration_pre_run_hygiene_clears_agent_debris(tmp_path, monkeypatch):
             return "** TESTS=1 PASS=1 FAIL=0 **", ""
 
     monkeypatch.setattr(ih.subprocess, "Popen", _FakePopen)
-    monkeypatch.setattr(ih, "run_wavekit_vcd_audit", lambda *a, **k: {"ok": True})
 
+    adopt(tmp_path, top)
     ih.run_integration_simulation("chip", str(top), {}, str(tb))
 
     # The stale obj dir/binary + outputs must have been wiped before make ran.
@@ -233,7 +232,7 @@ def test_agent_chip_verify_uses_scratch_namespace(tmp_path, monkeypatch):
 
     captured = {}
 
-    def _fake_sim(design, top, blocks, tbp, attempt=1, sim_scope="integration"):
+    def _fake_sim(design, top, blocks, tbp, attempt=1, sim_scope="integration", **kw):
         captured["sim_scope"] = sim_scope
         return {"passed": True, "log": "ok", "log_path": "/i.log"}
 

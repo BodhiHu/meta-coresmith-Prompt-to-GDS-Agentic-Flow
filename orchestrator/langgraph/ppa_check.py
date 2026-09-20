@@ -25,6 +25,7 @@ default-off preserves current behavior.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
 import os
@@ -1477,8 +1478,13 @@ def run_pre_layout_sta(
     top_module: str,
     *,
     timeout_s: int = 300,
+    report_path: str | None = None,
 ) -> dict[str, float | None] | None:
     """Pre-layout STA on the mapped netlist via OpenSTA.
+
+    When ``report_path`` is given, the full OpenSTA output (the worst setup
+    paths from ``report_checks``, then ``report_wns`` / ``report_tns``) is
+    written there so a reviewer can see WHICH paths fail, not just the number.
 
     Ideal-clock, no wire RC -> optimistic, but it catches gross violations
     (a hundreds-of-ns combinational read-mux path shows huge negative slack
@@ -1535,6 +1541,7 @@ def run_pre_layout_sta(
             f"read_verilog {sta_nl}\n"
             f"link_design {top_module}\n"
             f"read_sdc {sdc_path}\n"
+            f"report_checks -path_delay max -group_count 10 -format full_clock_expanded\n"
             f"report_wns\n"
             f"report_tns\n"
             f"exit\n"
@@ -1546,6 +1553,17 @@ def run_pre_layout_sta(
             [sta_bin, "-no_init", "-exit", tcl],
             capture_output=True, text=True, timeout=timeout_s,
         )
+        if report_path:
+            try:
+                Path(report_path).parent.mkdir(parents=True, exist_ok=True)
+                Path(report_path).write_text(
+                    f"# OpenSTA pre-layout report for {top_module}\n"
+                    f"# netlist: {netlist_path}\n# sdc: {sdc_path}\n# liberty: {liberty_path}\n"
+                    f"# rc: {result.returncode}\n\n{result.stdout}\n"
+                    + (f"\n=== STDERR ===\n{result.stderr[-4000:]}\n" if result.stderr else ""),
+                    encoding="utf-8")
+            except OSError:
+                pass
         parsed = parse_sta_report(result.stdout)
         if parsed["wns_ns"] is None and parsed["tns_ns"] is None:
             tail = ((result.stderr or "") + (result.stdout or "")).strip()[-400:]
@@ -1602,13 +1620,21 @@ _STA_CELL_RE = re.compile(r'cell\s*\(\s*"([^"]+)"\s*\)\s*\{')
 def _sta_dontuse_liberty(src_lib: str) -> str:
     """Return a Liberty with the lpflow/probe (dont_use) cells stripped.
 
-    Cached in $TMPDIR; regenerated only when missing or older than the source.
-    Falls back to the full library on any I/O error (never blocks measurement).
+    Cached in $TMPDIR under a name derived from the SOURCE library (resolved
+    path + mtime + size), so a different corner/PDK never picks up another
+    library's stripped cache out of a shared $TMPDIR. Regenerated when missing
+    or older than the source. Falls back to the full library on any I/O error
+    (never blocks measurement).
     """
     try:
         src = Path(src_lib)
-        cache = Path(tempfile.gettempdir()) / "coresmith_sta_dontuse_sky130_hd.lib"
-        if cache.exists() and cache.stat().st_mtime >= src.stat().st_mtime:
+        st = src.stat()
+        key = hashlib.sha1(
+            f"{src.resolve()}|{int(st.st_mtime)}|{st.st_size}".encode(
+                "utf-8", "replace")
+        ).hexdigest()[:12]
+        cache = Path(tempfile.gettempdir()) / f"coresmith_sta_dontuse_{key}.lib"
+        if cache.exists() and cache.stat().st_mtime >= st.st_mtime:
             return str(cache)
         txt = src.read_text()
         n = len(txt)
@@ -1684,7 +1710,7 @@ def _maxfanout_synth_script(sources: list[str], lib: str, netlist: Path,
 def _measure_wns_from_rtl(sources: list[str], lib: str, base_wd: Path, tag: str,
                           buffered: bool, period_ns: float, top: str,
                           clk_port: str, yosys_bin: str, sta_bin: str,
-                          timeout_s: int) -> tuple[float | None, str]:
+                          timeout_s: int, persist_to: Path | None = None) -> tuple[float | None, str]:
     """Synth (blackbox-mem, optionally fan-out-buffered) + OpenSTA at period.
 
     Returns ``(wns_ns, "")`` on success or ``(None, detail)`` on any error so a
@@ -1725,6 +1751,8 @@ def _measure_wns_from_rtl(sources: list[str], lib: str, base_wd: Path, tag: str,
         f"read_verilog {netlist}\n"
         f"link_design {top}\n"
         f"create_clock -name clk -period {period_ns} [get_ports {clk_port}]\n"
+        f"report_checks -path_delay max -group_count 5 -format full_clock_expanded\n"
+        f"report_tns\n"
         f'puts "CORESMITH_WNS [worst_slack -max]"\n'
     )
     try:
@@ -1735,6 +1763,15 @@ def _measure_wns_from_rtl(sources: list[str], lib: str, base_wd: Path, tag: str,
     except OSError as e:
         return None, f"OpenSTA invocation failed: {e}"
     out = sp.stdout + sp.stderr
+    if persist_to is not None:
+        try:
+            persist_to.mkdir(parents=True, exist_ok=True)
+            (persist_to / f"{top}_sta_{tag}.rpt").write_text(
+                f"# OpenSTA fan-out-aware pre-layout report ({tag}: "
+                f"{'fan-out buffered' if buffered else 'unbuffered'}) for {top}\n"
+                f"# period: {period_ns} ns  clock port: {clk_port}\n\n{out}\n", encoding="utf-8")
+        except OSError:
+            pass
     m = re.search(r"CORESMITH_WNS\s+([-0-9.eE+]+)", out)
     if m is None:
         m = re.search(r"worst slack\s*(?:-?max)?\s*([-0-9.eE+]+)", out, re.IGNORECASE)
@@ -1761,6 +1798,7 @@ def run_maxfanout_buffered_sta(
     *,
     timeout_s: int = 300,
     extra_sources: list[str] | None = None,
+    report_dir: str | Path | None = None,
 ) -> dict[str, float | None] | None:
     """Fan-out-aware pre-layout STA: max(unbuffered BASE, fan-out-BUFFERED) WNS.
 
@@ -1799,13 +1837,14 @@ def run_maxfanout_buffered_sta(
     _srcs = _dedup_sources(rtl_path, extra_sources)
     wd = Path(tempfile.mkdtemp(prefix="coresmith_mfsta_"))
     try:
+        _persist = Path(report_dir) if report_dir else None
         base_wns, base_detail = _measure_wns_from_rtl(
             _srcs, lib, wd, "base", False, period_ns, top_module,
-            clk_port, yosys_bin, sta_bin, timeout_s)
+            clk_port, yosys_bin, sta_bin, timeout_s, persist_to=_persist)
         # BUFFERED is the fan-out-aware relaxation; if it errors we keep BASE.
         buf_wns, buf_detail = _measure_wns_from_rtl(
             _srcs, lib, wd, "buf", True, period_ns, top_module,
-            clk_port, yosys_bin, sta_bin, timeout_s)
+            clk_port, yosys_bin, sta_bin, timeout_s, persist_to=_persist)
     finally:
         try:
             shutil.rmtree(wd, ignore_errors=True)
@@ -1847,9 +1886,13 @@ def ppa_gate_enabled() -> bool:
 def ppa_honor_feas_override_enabled() -> bool:
     """Post-synth PPA gate honors a chip-lead ``uarch_feasibility_override``
     on the BUDGET dimensions (area + logic-FF), mirroring the mem_price gate
-    (default ON). The absolute FF hard ceiling and the timing dimension still
-    gate -- an accepted [area] blocker never waives routability or timing.
-    ``CORESMITH_PPA_HONOR_FEAS_OVERRIDE=0`` restores budget-strict behavior.
+    (default ON). Only an override whose recorded scope covers ``[area]`` (and
+    whose contract_sha1 still matches the block's current contract) counts --
+    an ``[interface]``/tooling override says nothing about the storage budget
+    and no longer forces past this gate. The absolute FF hard ceiling and the
+    timing dimension still gate -- an accepted [area] blocker never waives
+    routability or timing. ``CORESMITH_PPA_HONOR_FEAS_OVERRIDE=0`` restores
+    budget-strict behavior.
     """
     return (os.environ.get("CORESMITH_PPA_HONOR_FEAS_OVERRIDE", "1")
             or "1").strip() != "0"

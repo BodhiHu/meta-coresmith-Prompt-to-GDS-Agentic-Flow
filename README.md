@@ -7,19 +7,20 @@ Coresmith converts prompts to silicon. It uses LangGraph to drive the full RTL-t
 > **Try it:** click the Codespaces badge above for a pre-built sandbox with the full EDA toolchain (Yosys, OpenROAD, Magic, Sky130 PDK) and Claude CLI ready to go. Note that it takes up to ten minutes to boot. Once it boots, launch Claude or Codex in the terminal. You will need to log in to your Claude or Codex account within the codespace.  For your first time, keep it simple: ask for a 32 bit adder.
 
 > \[!NOTE]
-> Agentic silicon design is expensive. Every agent needs to reference the chip specification to accurately architect their block. Codex Pro (100$/month) is the recommended minimum viable inference provider. Claude Max (100$) is usable until June 15th, after which you will have to pay API rates. Codex is superior at prompt caching and a prerequisite for designs exceeding in-order MCU complexity. You can use local LLMs (unquantized only) to reduce cost, with severely degraded performance: https://coresmith.ai/blog/qwen-vs-gemma
+> Agentic silicon design is expensive. Every agent needs to reference the full chip specification to accurately architect, implement, and verify their block. Codex Pro (100$/month) or Claude Max (100$/month) is the recommended minimum viable inference provider. Enthusiasts can try using local LLMs (unquantized only) to reduce cost, with severely degraded performance: https://coresmith.ai/blog/qwen-vs-gemma
 
 
 ## What It Does
 
-Coresmith will ask questions about your requirements, then run these phases:
+You provide Coresmith with a specification of the ASIC you want, ideally including a software model for some parts of the design. Coresmith will then decompose your requirements into an ASIC architecture and autonomously drive execution into a GDS. 
 
-1. **Architecture** -- Generates a Product Requirements Document (PRD) and block diagram via a multi-step LangGraph state machine. (Memory-map, clock-tree, and register-spec stages also exist but are **off by default** — enable with `CORESMITH_ENABLE_MEMORY_MAP=1` / `_CLOCK_TREE=1` / `_REGISTER_SPEC=1`.)
-2. **RTL Generation** -- An LLM agent converts specifications into synthesizable Verilog-2005
-3. **Verification** -- Another LLM agent generates cocotb testbenches; Verilator lints and simulates
-4. **Synthesis** -- Yosys synthesizes each block to a gate-level netlist targeting the SkyWater Sky130 130nm PDK
-5. **Backend** -- OpenROAD/Magic/netgen handle place-and-route, DRC, and LVS
-6. **Diagnosis** -- On failure at any step, a debug agent analyzes the root cause and retries with corrective constraints
+1. **Architecture**: Generates a Product Requirements Document (PRD), functional requirements document and system architecture using proxy metrics
+2. **Microarchitecture**: Decomposes your requirements and software model into microarchitecture specifications and byte-exact software models using heuristics for data movement and locality
+3. **RTL Generation**: An LLM agent converts specifications for every block into synthesizable Verilog
+4. **Verification**: Another LLM agent generates cocotb testbenches; Verilator lints and simulates
+5. **Synthesis**: Yosys synthesizes each block to a gate-level netlist targeting the SkyWater Sky130 130nm PDK, fixing timing if necessary
+6. **Backend**: OpenROAD/Magic/netgen handle place-and-route, DRC, and LVS
+7. **Diagnosis**: On failure at any step, a debug agent analyzes the root cause and retries with corrective constraints
 
 The pipeline is interactive via a daemon that exposes endpoints to control the LangGraph pipeline.
 
@@ -47,11 +48,8 @@ Post-synthesis, LLM agents drive place-and-route, DRC, GDS export, and LVS — e
 design into per-block *micro-architecture* specs before any RTL is written: each
 block gets its own uArch spec (interfaces, latency/throughput intent, and a
 byte-exact reference model) that the frontend pipeline then implements and verifies
-block-by-block. An Amaranth block-model + composition methodology
-(`CORESMITH_BLOCK_GOLDENS`) elaborates each per-block reference model and the
-integrated chip model as `Elaboratable`s; pysim carries their real
-clock/handshake/latency semantics and the composition gate compares the composed
-output bit-exactly against the software reference.
+block-by-block. A block's declared reference slice, when the task supplies one, is the
+transcription target its uArch spec and RTL are written against.
 
 **Complexity-aware decomposition into memory vs compute.** A deterministic,
 AST-based pass scores each block's reference slice on four axes (flop count, latency,
@@ -61,22 +59,10 @@ inside its per-block area / FF / SRAM budget. Storage that should be a macro is
 mapped to an **SRAM macro** (with LEF/GDS/lib injection) rather than synthesized as a
 flop array.
 
-**Proxy / coverage metrics + honest signoff gates.** DV is functional- and
-coverage-driven, and the backend signoff gates are deterministic and *fail closed on
-blank or proxy signals* rather than trusting a tool's summary line:
-
-- **PnR route-DRC** and a **DRC-count** gate (guards against a parser reading an
-  empty tool line as "0 violations").
-- **LVS** with a **benign-tie classifier** that reconciles constant-tie / replicated
-  top-pin and physical-only (tap/fill/decap) device-count deltas, and fails closed
-  when a delta is *not* provably benign.
-- **Synth cell-budget**, **memory-price**, and **aggressive flop-vs-SRAM thresholds**
-  (a three-way bits|width|depth policy) that push storage over budget onto macros.
-
-These gates are the difference between "a tool printed success" and "the evidence
-actually supports signoff."
+**Coverage driven verification.** DV is functional and coverage driven. The DV agents verify targets specified in the functional requirements document and attempt to hit 90% line coverage before proceeding to chip integration.
 
 ## PPABench Results
+PPABench is a chip design benchmark (github.com/facebookresearch/ppabench).
 
 Five designs were driven from architecture through backend signoff on the SkyWater
 Sky130 130nm PDK. **Four of five signed off** (DRC 0, LVS benign-tie match, timing
@@ -96,27 +82,34 @@ at the 50 MHz target.
 - **‡** LVS match under benign-tie classification -- constant-tie / replicated top-pins plus zero-transistor tap/fill/decap device-count deltas, each explicitly identified (no unexplained residue).
 - **§** Raster power is invalid: an OpenRAM macro-power table returned a nonphysical value; the finite non-macro + leakage subtotal is ~2.26 mW.
 
-**JPEG is not signed off.** DRC genuinely does not close -- a from-scratch Magic run
-finds 4166 real `li.*` violations that the engine's stdout parser mis-reported as 0
-(an empty-string bug in `_parse_magic_drc_count()`, fix in progress) -- and its LVS
-net-delta is architectural (the DCT row/column caches are flop arrays rather than
-SRAM macros, so read-mux symmetry defeats a unique match), not a proven-benign tie.
+CoreSmith can now generate intermediate-complexity out-of-order cores, like intra video encoders or decoders (e.g. Theora) that are byte-exact and decodable by a software oracle. 
 
-> **Broader exercise coverage (not backend signoffs):** a Theora-style video encode
-> was functionally verified clean-room (Verilator + PSNR ~35-44 dB) but its backend
-> was not run; the matching decode path has an open setup-header bug; an AX.25 framer
-> is in progress. These are functional-verification results only -- explicitly **not**
-> backend signoffs.
+| Design | Functional | DRC | LVS | Area (util) | Power | Timing @50 MHz |
+|--------|------------|-----|-----|-------------|-------|----------------|
+| Theora encoder | byte-exact (15,637/15,637 B) | 0 † | match ‡ | 4.44 mm² (43%) | *invalid* ※ | MET |
+| Theora decoder | byte-exact (161,280/161,280 B, 35 frames) | 0 † | match ‡ | 7.18 mm² (32%) | 6.25 mW | MET |
 
-## LLM Cost
-You must have a Claude Code Max or OpenAI Codex Pro subscription. Codex is recommended and GPT 5.6 Sol is superior at silicon design.
+![A 640×480 photo round-tripped through the CoreSmith Theora codec](docs/images/codec/roundtrip_hero.png)
 
-| Design  | Opus 5 | GPT 5.6 Sol |
-|------|---------|---------|
-| MCU | OK | OK |
-| JPEG | Exceeds 5hr limit on Max 5x | OK |
+![Rate–distortion vs libtheora at 640×480](docs/images/codec/rd_curve.png)
 
-You can use an API key, but it will be expensive.
+Quality scales monotonically with qi:
+
+![Quality ladder, qi 16 → 52](docs/images/codec/quality_ladder.png)
+
+
+## LLM Providers
+For the best experience: 
+
+* Claude Code Max (minimum 100$/month, ideally 200$/month): use Fable as outer agent, Opus for inner agents
+* OpenAI Codex Pro (minimum 100$/month, ideally 200$/month): use Sol-5.6 xhigh for outer agent
+
+For research purposes:
+
+* OpenCode/OpenRouter endpoints are supported, including Kimi K3. 
+* Meta Muse Spark is supported via OpenCode: http://dev.meta.ai
+
+Using API rates, budget about 3$-5$ for a simple 3-stage MCU. 
 
 ## Setup
 
@@ -150,10 +143,16 @@ PRD (sizing questions)         Testbench + Sim              LVS
 Block Diagram
   |
   v
+Interface Contracts
+  |
+  v
 Constraint Check -> OK2DEV Gate
-  (off by default:
-   Memory Map -> Clock Tree -> Register Spec)
 ```
+
+Acceptance is the task's own checker: a task ships `inputs/task_adapter.py` and its
+verdict outranks the engine's internal requirements. See
+[docs/migration-arm-e.md](docs/migration-arm-e.md) for what a task declares and for
+migrating a project created before that change.
 
 ## Project Structure
 
@@ -198,12 +197,21 @@ resume`. See [CLAUDE.md](CLAUDE.md) for the full decision contract.
 ### Web UI (live dashboard)
 
 `orchestrator/vscode-ext/serve.py` serves the same ReactFlow dashboard the
-VS Code extension provides, but as a plain web page in any browser — the
-graph view, a Gantt timeline of every block/node, per-node LLM
-trajectories (prompts, tool runs, reasoning), and a browser for generated
-collateral (RTL, testbenches, waveforms, GDS reports). It's **read-only**:
-it visualizes a daemon run by reading that run's `.coresmith/` event logs,
-so it never drives the pipeline.
+VS Code extension provides, but as a plain web page in any browser. It is a
+**run-review tool**: the **Overview** tab is a run-level dashboard (block table
+with DV / coverage / cells / FF / area / WNS vs budgets, integration and
+validation results, chip-lead decisions, interrupt history, engine SHA and
+settings, token and wall-time totals); the **Blocks** tab scopes everything to
+one block — a chronological **Trajectory** (rounds → graph nodes → every LLM
+call with its full prompts, agent commands and captured output, file writes,
+response, plus tool logs and engine events) and a **Design & results** page
+(uArch spec versions, RTL with diffs between attempts, testbench, simulation,
+synthesis, timing, gates, issues, decisions). The graph, Gantt timeline and
+collateral browser remain. It's **read-only**: it visualizes a run by reading
+that run's `.coresmith/` logs, `project.sqlite` (opened read-only) and
+artefacts, so it never drives the pipeline or writes to the run directory.
+See [docs/WEBVIEW.md](docs/WEBVIEW.md) for the views, where every number comes
+from, the JSON endpoints, and the data the engine does not persist yet.
 
 Because it reads the run's event logs, the webview must point at the **same
 project root as the daemon** — it keys off the same `CORESMITH_PROJECT_ROOT`
@@ -249,6 +257,7 @@ pytest orchestrator/tests/ -v -m "not requires_nix and not e2e"
 - [docs/LOCAL-DEV.md](docs/LOCAL-DEV.md) — running and iterating without containers
 - [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) — common failures (Yosys version, missing PDK, OpenROAD OOM, …)
 - [docs/RUNPOD.md](docs/RUNPOD.md) — hosted runs with a ready-to-paste pod template
+- [docs/WEBVIEW.md](docs/WEBVIEW.md) — the run-review web UI: views, data sources, endpoints, known gaps
 
 ## Maintainer
 

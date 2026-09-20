@@ -17,29 +17,23 @@ import pytest
 from orchestrator import profile
 
 # The 9 rewired enable-helpers.
-from orchestrator.architecture.composition import block_goldens_enabled
 from orchestrator.architecture.fidelity import fidelity_gate_enabled
 from orchestrator.langgraph.latency_audit import audit_enabled as latency_audit_enabled
 from orchestrator.langgraph.pdk_characterize import stage_enabled as pdk_stage_enabled
-from orchestrator.langgraph.pipeline_helpers import _rtl_from_hw_golden_enabled
 from orchestrator.langgraph.ppa_check import (
     logic_depth_gate_enabled,
     ppa_gate_enabled,
     synth_cell_gate_enabled,
 )
-from orchestrator.langgraph.rtl_model_equiv import rtl_model_equiv_enabled
 
 # (helper, env_flag, legacy_default, strict_seeds_on)
 HELPERS = [
-    (block_goldens_enabled, "CORESMITH_BLOCK_GOLDENS", False, True),
     (ppa_gate_enabled, "CORESMITH_PPA_GATE", False, True),
     (fidelity_gate_enabled, "CORESMITH_FIDELITY_GATE", False, True),
     (pdk_stage_enabled, "CORESMITH_PDK_CHAR", False, True),
     (latency_audit_enabled, "CORESMITH_LATENCY_AUDIT", False, True),
-    (_rtl_from_hw_golden_enabled, "CORESMITH_RTL_FROM_HW_GOLDEN", False, True),
     (synth_cell_gate_enabled, "CORESMITH_SYNTH_CELL_GATE", True, True),
     (logic_depth_gate_enabled, "CORESMITH_LOGIC_DEPTH_GATE", True, True),
-    (rtl_model_equiv_enabled, "CORESMITH_RTL_MODEL_EQUIV", True, True),
 ]
 
 _ALL_FLAGS = [f for _, f, _, _ in HELPERS] + list(profile.STRICT_DEFAULTS)

@@ -30,6 +30,7 @@ import pytest
 
 from orchestrator import profile
 from orchestrator.harness.env import ensure_cli_symlink
+from orchestrator.tests.candidate_fixtures import adopt
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -108,8 +109,8 @@ class TestSimScopeNamespacing:
             return subprocess.CompletedProcess(cmd, 0, "** TESTS=1 PASS=1 FAIL=0 **", "")
 
         monkeypatch.setattr(ih.subprocess, "run", _fake_run)
-        monkeypatch.setattr(ih, "run_wavekit_vcd_audit", lambda *a, **k: {"ok": True})
 
+        adopt(tmp_path, top)
         res_int = ih.run_integration_simulation("chip", str(top), {}, str(tb))
         res_val = ih.run_integration_simulation(
             "chip", str(top), {}, str(tb), sim_scope="validation")
@@ -138,7 +139,7 @@ class TestSimScopeNamespacing:
         monkeypatch.setattr(
             ih.subprocess, "run",
             lambda cmd, *a, **k: subprocess.CompletedProcess(cmd, 0, "** TESTS=1 PASS=1 FAIL=0 **", ""))
-        monkeypatch.setattr(ih, "run_wavekit_vcd_audit", lambda *a, **k: {"ok": True})
+        adopt(tmp_path, top)
         res = ih.run_integration_simulation("chip", str(top), {}, str(tb))
         assert res["log_path"].endswith("integration_sim_attempt1.log")
         assert (tmp_path / "sim_build" / "integration" / "Makefile").exists()

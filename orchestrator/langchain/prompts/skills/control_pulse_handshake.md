@@ -50,8 +50,7 @@ cycles against a golden that avoids them:
    beat/shift of a bus write, decode and latch it MID-SHIFT — on the same edge
    that completes the write — so the datapath launches the next cycle. A design
    that first registers "write done", THEN in a following state decodes the
-   command, pays one full cycle per op for nothing. (The AES golden decodes
-   START mid-shift; the delivered design paid +3 by registering first.)
+   command, pays one full cycle per op for nothing.
 2. **No single-purpose bridge / wait state between two registered
    inter-module handshakes.** If module A registers its output and module B
    registers its input, a state that exists only to "hand the token across" is

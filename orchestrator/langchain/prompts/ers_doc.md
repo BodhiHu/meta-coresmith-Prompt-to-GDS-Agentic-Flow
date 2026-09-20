@@ -148,7 +148,7 @@ GUIDELINES:
     the engine auto-fills `[max]` plus every 2^n crossing below it. For a
     `mode`, list the enumerated values in `boundary_values`.
   - The parameter NAME is the design's own vocabulary -- do NOT force a video
-    naming scheme; a codec has frame_width, an AES core has max_message_blocks
+    naming scheme; a video pipeline has frame_width, a cipher core has max_message_blocks
     and key_modes, a DMA has burst_len and addr_range.
   - SCOPE (define the boundary crisply): declare only DESIGN-PARAMETER axes --
     things the RTL datapath is parameterized by and must remain correct at
@@ -180,7 +180,7 @@ GUIDELINES:
   the allowed tolerance.
 - For stateful feedback algorithms, add invariants for context/predictor
   synchronization. Examples include encoder feedback reconstruction matching
-  decoder/golden reconstruction per macroblock, entropy/adaptive state matching
+  decoder/golden reconstruction per coding unit, entropy/adaptive state matching
   the emitted bitstream, packet order preservation, and atomic advancement of
   mode/metadata/payload state.
 - For framed/tiled/matrix/block algorithms, explicitly derive geometry from

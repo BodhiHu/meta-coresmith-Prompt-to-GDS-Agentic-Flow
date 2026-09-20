@@ -157,12 +157,26 @@ def _count_block_io_pads(block_diagram: dict) -> tuple[int, list[dict]]:
     details: list[dict] = []
 
     for block in blocks:
+        if not isinstance(block, dict):
+            continue
         name = block.get("name", "unknown")
         interfaces = block.get("interfaces", {})
         block_pads = 0
 
-        for port_name, port_info in interfaces.items():
-            if port_name in ("clk", "rst", "rst_n"):
+        # The block-diagram generator emits `interfaces` either as a
+        # {port_name: info} map or as a list of {name, width} entries.
+        if isinstance(interfaces, dict):
+            iface_items = list(interfaces.items())
+        elif isinstance(interfaces, list):
+            iface_items = [
+                (it.get("name", ""), it) if isinstance(it, dict) else (it, 1)
+                for it in interfaces
+            ]
+        else:
+            iface_items = []
+
+        for port_name, port_info in iface_items:
+            if not port_name or port_name in ("clk", "rst", "rst_n"):
                 continue
             if (name, port_name) in connected_ports:
                 continue
@@ -542,7 +556,7 @@ def _check_interface_family_coherence(
 # This gate has two halves that share one ``check`` id (the same split
 # ``inter_block_payload_protocol_coherence`` already uses):
 #   * deterministic -- named numeric quantities that disagree across artifacts
-#     (``orchestrator/architecture/cross_artifact.py``);
+#     (deterministic half removed in WP-10a);
 #   * LLM subagent -- semantic/scheduling contradictions, as an OWNED catalog
 #     entry so the shared "another subagent owns it" instruction cannot
 #     suppress it.
@@ -551,121 +565,6 @@ def _check_interface_family_coherence(
 CROSS_ARTIFACT_CHECK_ID = "cross_artifact_consistency"
 
 
-def _cross_artifact_gate_enabled() -> bool:
-    """Default-ON gate for the cross-artifact consistency checks."""
-    return (os.environ.get("CORESMITH_CROSS_ARTIFACT_GATE", "1") or "1") != "0"
-
-
-def _cross_artifact_artifact_count(ctx: dict) -> int:
-    """How many distinct architecture artifacts are available to compare."""
-    count = 0
-    if (ctx.get("block_diagram") or {}).get("blocks"):
-        count += 1
-    if (ctx.get("interface_contracts") or {}).get("contracts"):
-        count += 1
-    ers = ctx.get("ers_spec") or {}
-    if isinstance(ers, dict) and (ers.get("ers") or ers.get("prd")):
-        count += 1
-    root = ctx.get("project_root") or ""
-    if root:
-        arch = Path(root) / "arch"
-        count += sum(
-            1 for n in ("ers_spec.md", "frd_spec.md", "sad_spec.md")
-            if (arch / n).exists()
-        )
-    return count
-
-
-def _collect_cross_artifact_sources(
-    project_root: str,
-    block_diagram: dict | None,
-    interface_contracts: dict | None,
-) -> list:
-    """Build the artifact list the deterministic quantity scan reads.
-
-    Structured artifacts come from memory (they are what the caller froze);
-    the prose documents come from disk, which is where every downstream
-    consumer reads them from too.
-    """
-    from orchestrator.architecture.cross_artifact import (
-        ArtifactSource,
-        load_text_source,
-    )
-
-    sources: list = []
-    if (block_diagram or {}).get("blocks"):
-        sources.append(ArtifactSource(
-            artifact="block_diagram", kind="json", payload=block_diagram,
-            label=".coresmith/block_diagram.json",
-        ))
-    if (interface_contracts or {}).get("contracts"):
-        sources.append(ArtifactSource(
-            artifact="interface_contracts", kind="json",
-            payload=interface_contracts,
-            label=".coresmith/interface_contracts.json",
-        ))
-    arch_dir = Path(project_root or ".") / "arch"
-    for artifact, filename in (
-        ("ers", "ers_spec.md"),
-        ("frd", "frd_spec.md"),
-        ("sad", "sad_spec.md"),
-    ):
-        src = load_text_source(
-            artifact, arch_dir / filename, f"arch/{filename}",
-        )
-        if src is not None:
-            sources.append(src)
-    return sources
-
-
-def _check_cross_artifact_quantities(
-    project_root: str,
-    block_diagram: dict | None,
-    interface_contracts: dict | None,
-    memory_map: dict | None = None,
-    clock_tree: dict | None = None,
-    register_spec: dict | None = None,
-) -> list[dict]:
-    """Deterministic half of ``cross_artifact_consistency``.
-
-    Never guesses: a quantity it cannot name confidently is logged as a note
-    and skipped, not flagged. Fail-open -- a bug here must never break the
-    constraint pass.
-    """
-    if not _cross_artifact_gate_enabled():
-        return []
-    import logging
-
-    from orchestrator.architecture.cross_artifact import (
-        check_cross_artifact_quantities,
-    )
-
-    sources = _collect_cross_artifact_sources(
-        project_root, block_diagram, interface_contracts,
-    )
-    if len(sources) < 2:
-        return []
-    result = check_cross_artifact_quantities(
-        sources,
-        block_diagram=block_diagram,
-        interface_contracts=interface_contracts,
-        memory_map=memory_map,
-        clock_tree=clock_tree,
-        register_spec=register_spec,
-    )
-    if result.notes:
-        log = logging.getLogger("coresmith.constraints")
-        log.info(
-            "cross_artifact_consistency: %d quantity mention(s) deliberately "
-            "NOT judged (unnamed / approximate / ranged / ambiguous unit). "
-            "First few: %s",
-            len(result.notes), "; ".join(result.notes[:5]),
-        )
-    return result.violations
-
-
-# The catalog entry pins the evidence format
-# ``A: <artifact> — "<quote>" || B: <artifact> — "<quote>"``.
 _CROSS_ARTIFACT_SIDE_RE = re.compile(
     r"\b([AB])\s*:\s*(.*?)\s*[\u2014\-:]\s*[\"\u201c](.*?)[\"\u201d]",
     re.DOTALL,
@@ -675,9 +574,8 @@ _CROSS_ARTIFACT_SIDE_RE = re.compile(
 def _parse_candidate_locations(evidence: str) -> list[dict]:
     """Pull the two cited sides out of a subagent's ``evidence`` string.
 
-    LLMs drift, so this is best-effort: an unparseable evidence string yields
-    an empty list and the finding still surfaces (with its raw evidence), it
-    is simply not machine-split.
+    Best-effort: an unparseable evidence string yields an empty list and the
+    finding still surfaces with its raw evidence.
     """
     sides: list[dict] = []
     for m in _CROSS_ARTIFACT_SIDE_RE.finditer(evidence or ""):
@@ -1006,8 +904,8 @@ _CONSTRAINT_CATALOG: list[dict] = [
             "generation only after a request.\n"
             "   * `feedback_cycle = true`: BOTH sides must agree the edge "
             "is in a closed loop and reference the elasticity by name.\n\n"
-            "   This catches the v7/v8 codec-of-video_codec deadlock class where "
-            "scheduler/residual/history disagreed on backpressure ownership.\n\n"
+            "   This catches the deadlock class where the two sides of a feedback "
+            "loop disagree on backpressure ownership.\n\n"
             "Pass if every contract has a matching producer-side and "
             "consumer-side spec entry and no drift. Skip individual edges "
             "where the per-block spec for either end has not yet been "
@@ -1102,9 +1000,10 @@ _CONSTRAINT_CATALOG: list[dict] = [
         # Needs at least two artifacts to compare. Bundle-building already
         # concatenates them; this predicate just avoids a pointless subagent
         # on a design where nothing but the block diagram exists yet.
-        "applies": lambda ctx: _cross_artifact_gate_enabled() and (
-            _cross_artifact_artifact_count(ctx) >= 2
-        ),
+        "applies": lambda ctx: sum(
+            1 for k in ("block_diagram", "interface_contracts", "ers_spec")
+            if ctx.get(k)
+        ) >= 2,
     },
     {
         "id": "cross_spec_fifo_depth_adherence",
@@ -1116,10 +1015,9 @@ _CONSTRAINT_CATALOG: list[dict] = [
             "`semantics == \"elastic_fifo\"`. Those depths were chosen "
             "from the worst-case stall window of the feedback graph; "
             "the RTL author MUST size the FIFO to at least the declared "
-            "depth. The v9 video_codec codec_v3 chip_top deadlocked at 3.3% of "
-            "frame input because the frame_block_scheduler FIFO was "
-            "sized 256 against a contract that needed deeper buffering; "
-            "this constraint catches that class of bug before DV.\n\n"
+            "depth. A scheduler FIFO sized below the contract's stall window "
+            "deadlocks the chip a few percent into its input; this constraint "
+            "catches that class of bug before DV.\n\n"
             "For EACH contract entry where "
             "`flow_control_policy.semantics == \"elastic_fifo\"`:\n\n"
             "1. **Locate the producer block's RTL.** Grep its `*.v` for "
@@ -1345,6 +1243,31 @@ single violation MAY instead be reported with top-level ``violation_text`` /
 """
 
 
+def build_subagent_prompt(constraint: dict, artifact_bundle: str) -> str:
+    """One constraint subagent's user message: SHARED PREFIX first, charter last.
+
+    The eight subagents differ only in which constraint they check, and the
+    artifact bundle they share is the whole prompt by volume (measured: ~306 K
+    chars each, of which interface_contracts.json + block_diagram.json alone
+    are ~165 K, re-uploaded eight times at an 11 % prompt-cache hit rate).
+    Prompt caching is PREFIX-matched, so putting the per-subagent constraint
+    first made every one of the eight prompts diverge at character ~50 and none
+    of the shared bulk could be reused.
+
+    Bundle first, charter last => all eight prompts share a byte-identical
+    prefix. Nothing about WHAT a subagent checks changes.
+    """
+    return (
+        "## Artifact bundle\n"
+        f"{artifact_bundle}\n\n"
+        "## Constraint to verify\n"
+        f"**id:** `{constraint['id']}`\n\n"
+        f"**rule:**\n{constraint['description']}\n\n"
+        "Verify the constraint against the artifact bundle above. Respond "
+        "with JSON only."
+    )
+
+
 async def _run_constraint_subagent(
     constraint: dict,
     artifact_bundle: str,
@@ -1364,14 +1287,7 @@ async def _run_constraint_subagent(
 
     llm = ClaudeLLM(model=DEFAULT_MODEL, timeout=timeout_seconds)
 
-    user_prompt = (
-        "## Constraint to verify\n"
-        f"**id:** `{constraint['id']}`\n\n"
-        f"**rule:**\n{constraint['description']}\n\n"
-        "## Artifact bundle\n"
-        f"{artifact_bundle}\n\n"
-        "Verify the constraint. Respond with JSON only."
-    )
+    user_prompt = build_subagent_prompt(constraint, artifact_bundle)
 
     try:
         content = await llm.call(
@@ -1501,11 +1417,16 @@ async def check_constraints(
 
     with tracer.start_as_current_span("check_constraints") as span:
         shuttle_enabled = _shuttle_constraints_enabled(requirements, ers_spec)
-        shuttle_violations = (
-            _check_shuttle_constraints(block_diagram, ers_spec)
-            if shuttle_enabled
-            else []
-        )
+        # Fail-open like the other deterministic checks below: a shape the
+        # block diagram happens to emit must never break the whole pass.
+        try:
+            shuttle_violations = (
+                _check_shuttle_constraints(block_diagram, ers_spec)
+                if shuttle_enabled
+                else []
+            )
+        except Exception:  # noqa: BLE001
+            shuttle_violations = []
 
         # Tier-2 arch-time die-area rollup (deterministic; env-gated default ON;
         # no-ops without a resolvable die cap). Fail-open so a rollup error
@@ -1558,17 +1479,7 @@ async def check_constraints(
         # Deterministic half of cross_artifact_consistency: named numeric
         # quantities that two artifacts state differently. Env-gated default
         # ON; fail-open. The LLM half is the catalog entry of the same id.
-        try:
-            cross_artifact_violations = _check_cross_artifact_quantities(
-                project_root=project_root,
-                block_diagram=block_diagram or {},
-                interface_contracts=loaded_contracts or {},
-                memory_map=memory_map or {},
-                clock_tree=clock_tree or {},
-                register_spec=register_spec or {},
-            )
-        except Exception:  # noqa: BLE001
-            cross_artifact_violations = []
+        cross_artifact_violations: list[dict] = []  # WP-10a: deterministic half removed
 
         applicability_ctx = {
             "block_diagram": block_diagram or {},
@@ -1597,13 +1508,29 @@ async def check_constraints(
             os.environ.get("CORESMITH_CONSTRAINT_SUBAGENT_TIMEOUT", "600")
         )
 
-        subagent_results = await asyncio.gather(
-            *[
-                _run_constraint_subagent(c, artifact_bundle, timeout_seconds)
-                for c in applicable
-            ],
-            return_exceptions=False,
-        )
+        # CACHE WARM-UP: issue ONE subagent first, then the rest in parallel.
+        # Every prompt now shares a byte-identical prefix (the artifact
+        # bundle), but a cache entry only exists once some call has WRITTEN
+        # it -- firing all eight simultaneously means eight concurrent misses
+        # on the same prefix. One serial call primes it; the remaining N-1
+        # then run concurrently against a warm prefix.
+        subagent_results: list[list[dict]] = []
+        if applicable:
+            subagent_results.append(
+                await _run_constraint_subagent(
+                    applicable[0], artifact_bundle, timeout_seconds)
+            )
+            if len(applicable) > 1:
+                subagent_results.extend(
+                    await asyncio.gather(
+                        *[
+                            _run_constraint_subagent(
+                                c, artifact_bundle, timeout_seconds)
+                            for c in applicable[1:]
+                        ],
+                        return_exceptions=False,
+                    )
+                )
 
         llm_violations: list[dict] = [v for batch in subagent_results for v in batch]
         # LLM cross-artifact findings are CANDIDATES: render both cited sides

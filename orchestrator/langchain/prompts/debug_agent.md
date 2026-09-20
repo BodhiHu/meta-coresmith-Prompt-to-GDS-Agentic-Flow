@@ -9,7 +9,7 @@ JSON to the path specified in the user message.
 Given (read from disk -- file paths provided in user message):
 - Error logs (step logs in .coresmith/step_logs/ and .coresmith/blocks/<block>/previous_error.txt)
 - VCD waveform artifacts (`sim_build/<block>/dump.vcd` or
-  `sim_build/integration/dump.vcd`) and WaveKit audit reports
+  `sim_build/integration/dump.vcd`)
 - RTL source code (full Verilog file)
 - Testbench source code (full cocotb test file)
 - Microarchitecture specification (design intent)
@@ -64,9 +64,19 @@ COMMON FAILURE PATTERNS (check these FIRST before detailed analysis):
    or UARCH_SPEC_ERROR. Set confidence=0.99 and category=LOGIC_ERROR
    with diagnosis "false positive: prose words are not port names".
 
+FIRST, READ THE `Failed phase:` LINE IN THE USER MESSAGE. Not every failure
+came from a simulation. A PRE-SIMULATION phase (e.g. `conformance`) is decided
+by a deterministic gate that runs BEFORE the testbench is generated: no sim
+ran, so there is NO VCD and NO cocotb log for that attempt,
+and their absence is CORRECT, not a DV/process failure and not an
+infrastructure error. In a pre-simulation phase the evidence is the gate's
+report + the frozen interface contract + the RTL's declared ports, and nothing
+else; do not request, hunt for, or reason from simulation artifacts, and do not
+report the engine as broken for not producing them.
+
 Your job:
-1. Identify which signal diverged first. Read the WaveKit audit report and
-   inspect the VCD when it exists. If the VCD or WaveKit audit is missing,
+1. (SIMULATION PHASES ONLY -- skip entirely in a pre-simulation phase.)
+   Identify which signal diverged first.    Inspect the VCD when it exists. If the VCD is missing,
    empty, or header-only, classify that as a DV/process failure and include
    a concrete fix to restore waveform dumping/auditing.
 2. Determine the root cause category:

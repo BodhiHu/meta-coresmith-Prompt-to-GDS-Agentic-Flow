@@ -47,9 +47,20 @@ def _resolve_project_root() -> Path:
 PROJECT_ROOT = _resolve_project_root()
 # Add both the data root and the code root to sys.path
 _CODE_ROOT = Path(__file__).resolve().parent.parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
-if str(_CODE_ROOT) != str(PROJECT_ROOT):
-    sys.path.insert(0, str(_CODE_ROOT))
+for _root in (str(PROJECT_ROOT), str(_CODE_ROOT)):
+    # Idempotent: this module is re-executed per test (the webview tests load
+    # it by path with a fresh PROJECT_ROOT each time), and an unguarded insert
+    # grew sys.path by two entries per test -- every later import then paid a
+    # linear scan over the accumulated stale entries.
+    if _root not in sys.path:
+        sys.path.insert(0, _root)
+
+# The run-review loaders live next to this file (the directory name has a
+# hyphen, so it is not importable as a package).
+_EXT_DIR = str(Path(__file__).resolve().parent)
+if _EXT_DIR not in sys.path:
+    sys.path.insert(0, _EXT_DIR)
+import webview_loaders as _wl  # noqa: E402
 
 # Initialise lightweight OTel tracing (no-op if already done)
 from orchestrator.telemetry import init_telemetry
@@ -226,15 +237,12 @@ def get_live_calls(node_name: str) -> list[dict]:
                 stream_data = json.loads(stream_file.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
                 continue
-            # Clean up stale done files
+            # Skip stale done files. The viewer is strictly read-only, so
+            # they are never deleted here (the engine owns that directory).
             is_done = stream_data.get("done", False)
             if is_done:
                 done_ts = stream_data.get("done_ts", 0)
                 if now - done_ts > _DONE_FILE_MAX_AGE_S:
-                    try:
-                        stream_file.unlink(missing_ok=True)
-                    except OSError:
-                        pass
                     continue
             stream_ts = stream_data.get("started_ts")
             if stream_ts is None:
@@ -265,20 +273,9 @@ def get_live_calls(node_name: str) -> list[dict]:
             if not matched and not is_done:
                 orphan_candidates.append((stream_file, stream_data))
 
-    # Clean up orphan stream files: non-done files whose PID is no
-    # longer running and that didn't match any event window.
-    for stream_file, stream_data in orphan_candidates:
-        started = stream_data.get("started_ts", 0)
-        if now - started > _ORPHAN_MAX_AGE_S:
-            pid = stream_data.get("pid")
-            if pid:
-                try:
-                    _os.kill(pid, 0)
-                except (ProcessLookupError, OSError):
-                    try:
-                        stream_file.unlink(missing_ok=True)
-                    except OSError:
-                        pass
+    # Orphan stream files (non-done, dead PID, no matching window) are simply
+    # ignored: this server never writes to or deletes from the run directory.
+    del orphan_candidates
 
     if not all_calls:
         return []
@@ -526,9 +523,23 @@ def get_node_descriptions() -> dict:
     return out
 
 
-def get_node_trajectory(node_name: str, max_log_chars: int = 16000) -> list:
+_LEGACY_TURN_OUTPUT_MAX = 4000
+
+
+def _known_block_names() -> list[str]:
+    try:
+        return _wl.get_index(PROJECT_ROOT).block_names()
+    except Exception:
+        return []
+
+
+def get_node_trajectory(node_name: str, max_log_chars: int = 16000,
+                        block_filter: str = "") -> list:
     """Return a per-attempt trajectory for a node: enter/exit events,
     LLM calls within the window, and step_log file content.
+
+    ``block_filter`` restricts the attempts to a single block so the detail
+    panel never interleaves several blocks in one list.
 
     This is what the detail panel actually wants to render -- it interleaves
     LLM calls (from llm_calls.jsonl) with tool runs (from step_logs/) so the
@@ -563,6 +574,8 @@ def get_node_trajectory(node_name: str, max_log_chars: int = 16000) -> list:
         block = e.get("block") or e.get("graph", "")
         block_key = block or "__default__"
         if ts is None:
+            continue
+        if block_filter and block != block_filter:
             continue
         if "enter" in ev:
             prev = open_idx.get(block_key)
@@ -714,6 +727,56 @@ def get_node_trajectory(node_name: str, max_log_chars: int = 16000) -> list:
         except OSError:
             pass
 
+    def _codex_turns_for_call(call_id: int | None, call_ts: float, end_ts: float | None):
+        """Turns of the codex session joined to this call (by session id).
+
+        Time-window matching is wrong once blocks run in parallel: several
+        codex sessions overlap in time.  The run index joins each
+        llm_calls record to its session via ``usage.session_id ==
+        thread.started.thread_id`` so this only falls back to the window
+        when the join is unavailable (older runs).
+        """
+        session = None
+        if call_id is not None:
+            try:
+                idx = _wl.get_index(PROJECT_ROOT)
+                c = idx.call(call_id)
+                if c and c.get("session_key"):
+                    session = idx.codex.get(c["session_key"])
+            except Exception:
+                session = None
+        if session is None:
+            return _codex_turns_in(call_ts, end_ts)
+        out_turns = []
+        for entry in session["items"]:
+            t = _wl._summarize_item(entry, max_chars=_LEGACY_TURN_OUTPUT_MAX)
+            kind = t["kind"]
+            if kind == "command_execution":
+                kind = "local_shell_call"
+                summary = (t.get("command") or "")[:240]
+                full = {"command": t.get("command"), "exit_code": t.get("exit_code"),
+                        "status": t.get("status"), "output": t.get("output"),
+                        "output_len": t.get("output_len"), "truncated": t.get("truncated")}
+            elif kind == "agent_message":
+                summary = (t.get("text") or "")[:240]
+                full = {"text": t.get("text")}
+            elif kind == "file_change":
+                paths = [c.get("path") for c in t.get("changes", [])]
+                summary = ", ".join(str(p) for p in paths)[:240]
+                full = {"changes": t.get("changes"), "status": t.get("status")}
+            elif kind == "todo_list":
+                summary = "; ".join(("[x] " if i.get("completed") else "[ ] ") + str(i.get("text")) for i in t.get("items", []))[:240]
+                full = {"items": t.get("items")}
+            elif kind == "web_search":
+                summary = (t.get("query") or "")[:240]
+                full = {"query": t.get("query")}
+            else:
+                summary = (t.get("text") or t.get("message") or t.get("raw") or "")[:240]
+                full = t
+            out_turns.append({"type": "codex_turn", "ts": entry.get("ts"), "kind": kind,
+                              "summary": summary, "full": full})
+        return out_turns
+
     def _codex_turns_in(call_ts: float, end_ts: float | None):
         """Return concise turn summaries inside the call's window.
 
@@ -756,25 +819,38 @@ def get_node_trajectory(node_name: str, max_log_chars: int = 16000) -> list:
                 )
             else:
                 summary = json.dumps(item, default=str)[:240]
+            full = item or ev
+            # Command outputs reach 1 MB each; the detail panel only needs a
+            # preview here (the verbose viewer fetches /api/llm_call/<id>).
+            if isinstance(full, dict) and isinstance(full.get("aggregated_output"), str) \
+                    and len(full["aggregated_output"]) > _LEGACY_TURN_OUTPUT_MAX:
+                full = dict(full)
+                cut = len(full["aggregated_output"]) - _LEGACY_TURN_OUTPUT_MAX
+                full["aggregated_output"] = (
+                    full["aggregated_output"][:_LEGACY_TURN_OUTPUT_MAX]
+                    + f"\n... [{cut} chars elided -- open the call in the Blocks view for the full output]"
+                )
             out_turns.append({
                 "type": "codex_turn",
                 "ts": t,
                 "kind": kind,
                 "summary": summary,
-                "full": item or ev,
+                "full": full,
             })
         return out_turns
 
-    # Load LLM calls once, keep just the small subset we need
+    # Load LLM calls once, keep just the small subset we need.  The line
+    # number doubles as the call id used by /api/llm_call/<id>.
     llm_records: list[dict] = []
     if llm_log.exists():
-        for line in llm_log.read_text().splitlines():
+        for line_no, line in enumerate(llm_log.read_text().splitlines(), start=1):
             if not line.strip():
                 continue
             try:
                 r = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            r["_call_id"] = line_no
             llm_records.append(r)
 
     # For each attempt, gather LLM calls + step_log files inside the window
@@ -817,22 +893,31 @@ def get_node_trajectory(node_name: str, max_log_chars: int = 16000) -> list:
         exit_ts = a.get("exit_ts")
         block = a.get("block") or ""
 
-        # LLM calls in window
+        # LLM calls in window.  Blocks of one tier run in parallel, so a
+        # time window alone would pull in other blocks' calls: when the
+        # record names a block (run_name "... [Block Name]") it must be
+        # this attempt's block.
         calls = []
+        known_blocks = _known_block_names()
         for rec in llm_records:
             t = rec.get("ts")
             if t is None or t < enter_ts:
                 continue
             if exit_ts is not None and t > exit_ts:
                 continue
+            if block and known_blocks:
+                rec_block = _wl._block_from_run_name(rec.get("run_name", ""), known_blocks)
+                if rec_block and rec_block != block:
+                    continue
             dur = rec.get("duration_s")
             end_t = (t + dur) if dur else None
             start_match = _match_start(t, dur)
             run_name = (start_match or {}).get("run_name", "")
             heartbeats = _heartbeats_in(t, end_t)
-            codex_turns = _codex_turns_in(t, end_t)
+            codex_turns = _codex_turns_for_call(rec.get("_call_id"), t, end_t)
             calls.append({
                 "type": "llm_call",
+                "call_id": rec.get("_call_id"),
                 "ts": t,
                 "iso": rec.get("iso"),
                 "model": rec.get("model", ""),
@@ -1474,7 +1559,7 @@ def _build_backend_blocks_from_events() -> list[dict]:
             if block not in blocks:
                 blocks[block] = {"name": block, "success": False}
             node = ev.get("node", "")
-            if node == "Run PnR" and ev.get("type") == "graph_node_exit":
+            if node == "Run PnR" and ev.get("event") == "graph_node_exit":
                 blocks[block].update({
                     "success": ev.get("success", False),
                     "design_area_um2": ev.get("design_area_um2", 0),
@@ -1483,7 +1568,7 @@ def _build_backend_blocks_from_events() -> list[dict]:
                     "tns_ns": ev.get("tns_ns", 0),
                     "total_power_mw": ev.get("total_power_mw", 0),
                 })
-            if node == "Advance Block" and ev.get("type") == "graph_node_exit":
+            if node == "Advance Block" and ev.get("event") == "graph_node_exit":
                 blocks[block]["success"] = ev.get("success", False)
     except OSError:
         pass
@@ -1553,7 +1638,13 @@ def get_pending_interrupts() -> dict:
         for line in events_file.read_text().splitlines():
             if not line.strip():
                 continue
-            e = json.loads(line)
+            try:
+                e = json.loads(line)
+            except json.JSONDecodeError:
+                # The daemon appends to this file concurrently: a torn last line
+                # must not blank every interrupt parsed before it (a parked HITL
+                # block would vanish from the UI). Same skip as the other parsers.
+                continue
             node = e.get("node")
             event_type = e.get("event", "")
             block = e.get("block", "")
@@ -1861,13 +1952,26 @@ class WebviewHandler(SimpleHTTPRequestHandler):
             return
 
         # API: per-attempt trajectory for a node -- LLM calls + tool runs
+        # (optional ?block= filter keeps one block per list)
         if path.startswith("/api/node_trajectory/"):
+            from urllib.parse import parse_qs
             node_name = unquote(path.split("/api/node_trajectory/", 1)[1].strip("/"))
             if not node_name:
                 self._json_response({"error": "node_name required"}, status=400)
                 return
+            block_filter = parse_qs(parsed.query).get("block", [""])[0]
             try:
-                self._json_response(get_node_trajectory(node_name))
+                self._json_response(get_node_trajectory(node_name, block_filter=block_filter))
+            except Exception as exc:
+                self._json_response({"error": str(exc)}, status=500)
+            return
+
+        # API: run-review endpoints (read-only; see docs/WEBVIEW.md)
+        if (path.startswith("/api/run/") or path.startswith("/api/block/")
+                or path.startswith("/api/llm_call")
+                or path in ("/api/text", "/api/text_search", "/api/diff")):
+            try:
+                self._handle_review_api(path, parsed.query)
             except Exception as exc:
                 self._json_response({"error": str(exc)}, status=500)
             return
@@ -1959,12 +2063,101 @@ class WebviewHandler(SimpleHTTPRequestHandler):
 
         self.send_error(404)
 
+    _BLOCK_RE = __import__("re").compile(r"^[A-Za-z0-9_\-]+$")
+
+    def _handle_review_api(self, path: str, query: str):
+        """Dispatch the run-review endpoints backed by ``webview_loaders``."""
+        from urllib.parse import parse_qs
+        qs = {k: v[0] for k, v in parse_qs(query).items()}
+        root = PROJECT_ROOT
+        if path == "/api/run/overview":
+            return self._json_response(_wl.build_overview(root))
+        if path == "/api/run/blocks":
+            return self._json_response({"blocks": _wl.build_blocks_table(root)})
+        if path == "/api/run/decisions":
+            return self._json_response(_wl.build_decisions(root))
+        if path == "/api/run/settings":
+            return self._json_response(_wl.run_settings(root))
+        if path == "/api/run/integration":
+            return self._json_response(_wl.build_integration(root))
+        if path.startswith("/api/block/"):
+            parts = [unquote(p) for p in path[len("/api/block/"):].strip("/").split("/")]
+            if len(parts) != 2 or not self._BLOCK_RE.match(parts[0]):
+                return self._json_response({"error": "expected /api/block/<name>/<trajectory|review|files>"}, status=400)
+            block, what = parts
+            if what == "trajectory":
+                return self._json_response(_wl.build_block_trajectory(root, block))
+            if what == "review":
+                return self._json_response(_wl.build_block_review(root, block))
+            if what == "files":
+                idx = _wl.get_index(root)
+                return self._json_response(_wl.block_files(root, block, idx.blocks_meta.get(block)))
+            return self._json_response({"error": f"unknown block view {what!r}"}, status=404)
+        if path == "/api/llm_calls":
+            return self._json_response({"calls": _wl.list_calls(root, qs.get("block"), qs.get("node"))})
+        if path.startswith("/api/llm_call/"):
+            parts = path[len("/api/llm_call/"):].strip("/").split("/")
+            try:
+                call_id = int(parts[0])
+            except ValueError:
+                return self._json_response({"error": "call id must be an integer"}, status=400)
+            if len(parts) == 1:
+                data = _wl.build_call_detail(root, call_id)
+            elif len(parts) == 3 and parts[1] == "turn":
+                try:
+                    data = _wl.build_call_turn(root, call_id, int(parts[2]))
+                except ValueError:
+                    data = None
+            else:
+                data = None
+            if data is None:
+                return self._json_response({"error": "not found"}, status=404)
+            return self._json_response(data)
+        if path == "/api/text":
+            rel = qs.get("path", "")
+            try:
+                offset = int(qs.get("offset", "0"))
+                limit = int(qs.get("limit", "400"))
+            except ValueError:
+                return self._json_response({"error": "bad offset/limit"}, status=400)
+            data = _wl.text_slice(root, rel, offset=offset, limit=limit, tail=qs.get("tail") in ("1", "true"))
+            if data is None:
+                return self._json_response({"error": "not found"}, status=404)
+            return self._json_response(data)
+        if path == "/api/text_search":
+            data = _wl.text_search(root, qs.get("path", ""), qs.get("q", ""))
+            if data is None:
+                return self._json_response({"error": "not found"}, status=404)
+            return self._json_response(data)
+        if path == "/api/diff":
+            data = _wl.unified_diff(root, qs.get("a", ""), qs.get("b", ""))
+            if data is None:
+                return self._json_response({"error": "not found"}, status=404)
+            return self._json_response(data)
+        return self._json_response({"error": "unknown endpoint"}, status=404)
+
+    def _send_cors_header(self):
+        """Echo the request Origin only when it is THIS server's own origin.
+
+        A wildcard here let JavaScript on any page the developer happens to
+        visit read /api/artifacts (project RTL/specs) and /api/node_trajectory
+        (full LLM prompts + responses) off the loopback server -- binding to
+        127.0.0.1 does not help when the browser is the confused deputy. The
+        Surfer / fliplot iframes are served by this same server, so same-origin
+        is all they ever need.
+        """
+        origin = self.headers.get("Origin")
+        host = self.headers.get("Host") or ""
+        if origin and host and origin in (f"http://{host}", f"https://{host}"):
+            self.send_header("Access-Control-Allow-Origin", origin)
+        self.send_header("Vary", "Origin")
+
     def _json_response(self, data, status=200):
         body = json.dumps(data).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self._send_cors_header()
         self.end_headers()
         self.wfile.write(body)
 
@@ -1997,9 +2190,7 @@ class WebviewHandler(SimpleHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", mime)
         self.send_header("Content-Length", str(len(data)))
-        # Allow cross-origin fetches (Surfer / fliplot iframes need this to
-        # pull VCDs from /api/artifacts/).
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self._send_cors_header()
         self.end_headers()
         self.wfile.write(data)
 

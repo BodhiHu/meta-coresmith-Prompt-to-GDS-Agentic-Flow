@@ -139,6 +139,17 @@ class TestDiskFaults:
         scratch = tmp_path / "codex-call-scratch" / "adder8.v"
         assert scratch.exists()
 
+    def test_empty_target_never_escapes_the_run_root(self, backend, tmp_path):
+        """An absolute rtl path cited in the prompt is OUTSIDE the run root --
+        the fault must not truncate it (same containment as the success path)."""
+        outside = tmp_path.parent / "outside_rtl"
+        (outside / "rtl").mkdir(parents=True, exist_ok=True)
+        victim = outside / "rtl" / "adder8.v"
+        victim.write_text("module adder8(); endmodule\n")
+        backend.set_schedule(FaultSchedule.single(FaultClass.JSON_DISK_MISMATCH))
+        backend.generate(None, "sys", f"Write the module to {victim}.", None)
+        assert victim.read_text() != ""
+
     def test_json_disk_mismatch_writes_empty_target(self, backend, tmp_path):
         backend.set_schedule(FaultSchedule.single(FaultClass.JSON_DISK_MISMATCH))
         out = backend.generate(None, "sys", self._PROMPT, None)

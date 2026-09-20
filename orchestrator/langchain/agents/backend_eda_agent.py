@@ -125,10 +125,15 @@ class BackendEDAAgent:
                 ),
                 run_name=f"Backend EDA [{self.step}]",
             )
-            if result and len(result.strip()) > 50:
+            # ClaudeLLM.call() returns "[ClaudeLLM error: ...]" banners instead
+            # of raising on timeout/stall/non-zero exit, and those banners are
+            # long enough to pass the length check -- reject them explicitly so
+            # the baseline script is used rather than a banner fed to the tool.
+            if result and "[ClaudeLLM error:" not in result and len(result.strip()) > 50:
                 return result.strip()
             logger.warning(
-                "Backend EDA agent returned empty/short response for %s",
+                "Backend EDA agent returned empty/short/error response for %s "
+                "-- using baseline",
                 self.step,
             )
             return baseline_script

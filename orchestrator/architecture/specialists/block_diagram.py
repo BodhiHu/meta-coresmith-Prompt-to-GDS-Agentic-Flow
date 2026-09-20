@@ -369,7 +369,9 @@ async def analyze_block_diagram(
                 f"{json.dumps(existing_diagram, indent=2)}"
             )
 
-        target_path = Path(project_root) / ".coresmith" / "block_diagram.json"
+        # The LLM writes a DRAFT; the architecture graph imports it into the
+        # project database, which regenerates the read-only block_diagram.json.
+        target_path = Path(project_root) / ".coresmith" / "drafts" / "block_diagram.json"
         target_path.parent.mkdir(parents=True, exist_ok=True)
 
         parts.append(
