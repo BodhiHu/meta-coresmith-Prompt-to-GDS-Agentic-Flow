@@ -12,13 +12,14 @@ TASK:
 SDC TEMPLATE (adapt the port name):
 ```sdc
 create_clock -name clk -period {period_ns} [get_ports <clock_port_name>]
-set_input_delay -clock clk {input_delay_ns} [all_inputs]
+set_input_delay -clock clk {input_delay_ns} [remove_from_collection [all_inputs] [get_ports <clock_port_name>]]
 set_output_delay -clock clk {output_delay_ns} [all_outputs]
 ```
 
 RULES:
 - The `create_clock` must reference the EXACT clock port name from the Verilog
   module declaration. Do NOT guess -- read the port list.
+- Never apply input delay to the clock port itself.
 - Input delay = 20% of clock period.
 - Output delay = 20% of clock period.
 - If the module has no clock port (pure combinational), create a virtual clock:

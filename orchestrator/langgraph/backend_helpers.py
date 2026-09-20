@@ -99,9 +99,11 @@ def render_layout_image(
     ]
 
     try:
+        render_env = os.environ.copy()
+        render_env.setdefault("QT_QPA_PLATFORM", "offscreen")
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout,
-            cwd=str(PROJECT_ROOT),
+            cwd=str(PROJECT_ROOT), env=render_env,
         )
         if result.returncode == 0 and Path(output_path).exists():
             log(f"  [IMG] Rendered {Path(output_path).name}", GREEN)
@@ -424,7 +426,8 @@ write_verilog -noattr {out / f"{design_name}_netlist.v"}
     sdc_path = out / f"{design_name}.sdc"
     sdc_path.write_text(
         f"create_clock -name clk -period {period_ns} [get_ports clk]\n"
-        f"set_input_delay {period_ns * 0.2:.1f} -clock clk [all_inputs]\n"
+        f"set_input_delay {period_ns * 0.2:.1f} -clock clk "
+        "[remove_from_collection [all_inputs] [get_ports clk]]\n"
         f"set_output_delay {period_ns * 0.2:.1f} -clock clk [all_outputs]\n"
     )
 

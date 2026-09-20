@@ -58,7 +58,9 @@ Macro cell names: `{macro_names}`.
      (a design with 0 as-routed router violations measured 1,732 flat-Magic
      items, all of this class). `drc check; drc catchup` on the hierarchical
      layout is the gating check.
-   - Saves DRC report: `drc listall why {output_dir}/magic_drc.rpt`
+   - Saves DRC report by capturing `set drc_result [drc listall why]`, then
+     writing `$drc_result` to `{output_dir}/magic_drc.rpt` with Tcl
+     `open`/`puts`/`close` (Magic 8.3 accepts no filename argument)
    - Counts violations: `set drc_count [drc count total]; puts "DRC_COUNT: $drc_count"`
    - Extracts LVS SPICE from the cell named `{design_name}` (top cell name
      must be `{design_name}` in the `.subckt`/`.ends`). Use a
@@ -107,7 +109,7 @@ Do not report `success: false` for a zero-violation run.
   "clean": true,
   "violation_count": 0,
   "violations_by_rule": {{}},
-  "streamout": "klayout-def2gds",
+  "streamout": "<actual method: klayout-def2gds or magic-gds-write>",
   "gds_path": "{output_dir}/{design_name}.gds",
   "spice_path": "{output_dir}/{design_name}.spice",
   "report_path": "{output_dir}/magic_drc.rpt"

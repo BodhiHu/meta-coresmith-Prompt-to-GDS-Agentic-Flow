@@ -295,13 +295,16 @@ report_tns
 report_power
 
 # =====================================================================
-# 13. METAL DENSITY FILL (Efabless shuttle requirement)
+# 13. METAL DENSITY FILL
 # =====================================================================
 puts "\n========== 13. Metal Density Fill =========="
 
-density_fill -rules $tech_lef
-
-puts "Density fill done."
+# OpenROAD density_fill requires a dedicated fill-rules JSON.  A technology
+# LEF is not a rules file; passing it raises DPL-0077 and printing "done" after
+# catching that error fabricates completion.  This deployment does not ship a
+# validated fill-rules JSON, so report the step honestly and leave it to a
+# deployment/shuttle profile that owns such rules.
+puts "Density fill: NOT RUN (no validated fill-rules JSON configured)"
 
 # =====================================================================
 # 14. WRITE OUTPUTS

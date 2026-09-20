@@ -53,9 +53,11 @@ DRC PATTERNS (Sky130 Magic rules):
 3. Metal density too low (density check, fill check):
    Root cause: missing density_fill step in PnR.
    Category: DRC_DENSITY
-   Auto-fix: ensure density_fill is in the PnR TCL.  If already present,
-   this is informational -- some shuttles accept it.
-   Action: auto_retry or continue.
+   Auto-fix only when the active deployment supplies a validated fill-rules
+   JSON: run `density_fill -rules <that-json>`. A technology LEF is not a fill
+   rules file. Without validated rules, report density fill as NOT RUN and
+   escalate the shuttle/profile requirement; never print a fabricated "done".
+   Action: auto_retry with valid rules, otherwise ask_human.
 
 4. Via spacing / enclosure violations:
    Root cause: detailed router placed illegal vias.

@@ -929,13 +929,16 @@ report_tns
 report_power
 
 # =====================================================================
-# 13. METAL DENSITY FILL (Efabless shuttle requirement)
+# 13. METAL DENSITY FILL
 # =====================================================================
 puts "\\n========== 13. Metal Density Fill =========="
 
-density_fill -rules $tech_lef
-
-puts "Density fill done."
+# OpenROAD density_fill requires a dedicated fill-rules JSON.  A technology
+# LEF is not a rules file; passing it raises DPL-0077 and printing "done" after
+# catching that error fabricates completion.  This deployment does not ship a
+# validated fill-rules JSON, so report the step honestly and leave it to a
+# deployment/shuttle profile that owns such rules.
+puts "Density fill: NOT RUN (no validated fill-rules JSON configured)"
 
 # =====================================================================
 # 14. WRITE OUTPUTS
@@ -1263,14 +1266,18 @@ class RunDrcMagic(EdaTool):
             "transistor-level macro layout.\n"
             "- Run DRC HIERARCHICALLY -- do NOT flatten for the gating count "
             "(flattening reports thousands of PDK-derivation sliver artifacts). "
-            "`drc check; drc catchup` then `drc listall why <report>`.\n"
+            "`drc check; drc catchup`; capture `set drc_result [drc listall "
+            "why]`, then write `$drc_result` to the report with Tcl `open`, "
+            "`puts`, and `close` (Magic 8.3 does not accept a filename "
+            "argument to `drc listall why`).\n"
             "- Extract LVS SPICE CONNECTIVITY-ONLY (no parasitics): "
             "`extract do local; extract no capacitance; extract no coupling; "
             "extract no resistance; extract all; ext2spice lvs; "
             "ext2spice cthresh infinite; ext2spice rthresh infinite`.\n"
-            "- The signoff GDS is written by the deployment (KLayout streamout "
-            "from the DEF, Magic `gds write` fallback) -- you do not need to "
-            "script the DEF-to-GDS conversion yourself."
+            "- With `run_drc --script`, your Magic script owns GDS generation: "
+            "write it to a temporary path with `gds write`, verify it is "
+            "non-empty, then rename it into place. Report the streamout method "
+            "as `magic-gds-write`; do not claim KLayout streamout."
         )
 
 

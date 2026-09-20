@@ -60,7 +60,8 @@ CS="${CORESMITH_CLI:-coresmith}"
 3. Run the PnR verb through the CLI:
    ```bash
    "$CS" tool run_pnr --design {design_name} --script {tcl_path} \
-       --out-dir {output_dir} --json
+       --out-dir {output_dir} \
+       --timeout-s "${{CORESMITH_PNR_TOOL_TIMEOUT:-1650}}" --json
    ```
    Exit code: 0 pass / 1 checker fail (read `.checks[]`; the route-DRC checker is
    BLOCKING) / 3 infra / 4 unsupported. The JSON carries `.metrics` (WNS/TNS,
@@ -106,7 +107,14 @@ has caused step-timeout kills of routes that were converging cleanly.
 
 ## PDN pin layer / metal-4 min-area (REQUIRED on sky130)
 
-**Put the top-level PDN pins on met5, not met4.** met4 pin emission at
+The reference script uses met4 top-level PDN pins and an unconditional met4
+stripe; keep that internally consistent for macro-free core designs. **Do not
+change only `-pins` to met5.** A met5 pin with no met5 shape makes `pdngen`
+fail with `PDN-0111`.
+
+For macro/user-project designs that need met5 boundary pins, put the top-level
+PDN pins on met5 and also add an unconditional met5 stripe plus a met4/met5
+connection before `pdngen`. met4 pin emission at
 the die boundary produces min-area stub rectangles (Magic `met4.4a`,
 ~0.24 um^2) that NO connection option can fix -- they are grid-emission
 geometry, not via geometry. Use met4 for straps only:
@@ -115,12 +123,16 @@ geometry, not via geometry. Use met4 for straps only:
         -starts_with POWER \
         -voltage_domain CORE \
         -pins met5
+    add_pdn_stripe -grid stdcell_grid -layer met5 -width 1.6 \
+        -pitch 40.0 -offset 15.0 -starts_with POWER
+    add_pdn_connect -grid stdcell_grid -layers {{met4 met5}}
 
 met5 as the top-level PDN pin layer is also the standard sky130 posture
 for macro/user-project designs: the harness power ring is normally met
 with met5 straps, so this matches how the chip actually takes power.
 
-Measured evidence for why met4 pins must not be used: on a sky130 chip
+Measured evidence for why macro/user-project designs may require met5 pins:
+on a sky130 chip
 with three SRAM macros, `-pins met4` produced 83 Magic violations, 100%
 of them `met4.4a`, as 76x76 rectangles in narrow bands at the die edges,
 while OpenROAD's own detailed-route DRC was 0. Adding `-max_columns 2`

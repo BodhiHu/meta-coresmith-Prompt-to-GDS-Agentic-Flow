@@ -94,7 +94,7 @@ Do not report `success: false` for a zero-violation run.
   "clean": true,
   "violation_count": 0,
   "violations_by_rule": {{}},
-  "streamout": "klayout-def2gds",
+  "streamout": "magic-gds-write",
   "gds_path": "{output_dir}/{design_name}.gds",
   "spice_path": "{output_dir}/{design_name}.spice",
   "report_path": "{output_dir}/magic_drc.rpt"
