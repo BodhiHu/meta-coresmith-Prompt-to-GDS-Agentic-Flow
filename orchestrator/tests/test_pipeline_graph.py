@@ -894,6 +894,23 @@ class TestInternalNodes:
         assert result["completed_blocks"][0]["name"] == "scrambler"
 
     @pytest.mark.asyncio
+    async def test_block_done_cannot_record_failed_timing_as_success(self, tmp_path):
+        state = _block_state(_make_block("scrambler"), tmp_path=str(tmp_path))
+        state.update(sim_passed=True, synth_success=True, timing_ok=False)
+        block_dir = tmp_path / ".coresmith" / "blocks" / "scrambler"
+        block_dir.mkdir(parents=True, exist_ok=True)
+        (block_dir / "constraints.json").write_text("[]")
+        (block_dir / "previous_error.txt").write_text(
+            "PPA gate: STA ran but produced no parseable timing"
+        )
+
+        result = await block_done_node(state)
+
+        completed = result["completed_blocks"][0]
+        assert completed["success"] is False
+        assert completed["synth_success"] is True
+
+    @pytest.mark.asyncio
     async def test_block_done_skip(self, tmp_path):
         state = _block_state(_make_block("scrambler"), tmp_path=str(tmp_path))
         state["human_response"] = {"action": "skip"}

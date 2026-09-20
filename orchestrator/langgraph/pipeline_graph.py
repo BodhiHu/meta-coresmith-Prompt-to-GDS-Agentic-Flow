@@ -2942,6 +2942,12 @@ def _evaluate_ppa_gate(
         _timing_failed = any(
             (c or {}).get("metric") == "wns_ns" and (c or {}).get("passed") is False
             for c in (checks or []))
+        # Preserve a failed timing verdict even when WNS itself is absent. The
+        # caller previously reconstructed timing_ok solely from wns_ns, turning
+        # fail-closed "STA ran but produced no timing" into None (not measured),
+        # which route_after_synth intentionally allows through.
+        if _timing_failed:
+            _meta["timing_verdict_failed"] = True
         (block_dir / ("previous_error.txt" if _timing_failed
                       else "ppa_advisory.txt")).write_text(_err)
         return False, reasons, dict(_meta)
@@ -3924,13 +3930,13 @@ async def synthesize_node(state: BlockState) -> dict:
         report_path=(result or {}).get("report_path", ""),
     )
 
+    timing_ok = _timing_ok_from_ppa_meta(ppa_meta)
     return {
         "synth_success": synth_ok,
         "synth_gate_count": gate_count,
         "ppa_ok": ppa_ok,
         "ppa_reasons": ppa_reasons,
-        "timing_ok": (None if ppa_meta.get("wns_ns") is None
-                      else bool(float(ppa_meta["wns_ns"]) >= 0.0)),
+        "timing_ok": timing_ok,
         "gate_sim_ok": gate_sim_ok,
         "gate_sim_status": gate_sim_status,
         "gate_sim_reason": gate_sim_reason,
@@ -3942,6 +3948,14 @@ async def synthesize_node(state: BlockState) -> dict:
 # ---------------------------------------------------------------------------
 # Node: diagnose
 # ---------------------------------------------------------------------------
+
+def _timing_ok_from_ppa_meta(ppa_meta: dict | None) -> bool | None:
+    """Translate PPA timing metadata without losing fail-closed outcomes."""
+    meta = ppa_meta or {}
+    if meta.get("timing_verdict_failed"):
+        return False
+    wns = meta.get("wns_ns")
+    return None if wns is None else bool(float(wns) >= 0.0)
 
 def _compose_actionable_error(diag: dict, raw_log: str, max_chars: int = 5000) -> str:
     """Build an actionable ``previous_error.txt`` from a structured diagnosis.
@@ -4758,6 +4772,7 @@ async def block_done_node(state: BlockState) -> dict:
 
     all_passed = (
         sim_passed and synth_success
+        and state.get("timing_ok") is not False
         and not is_skip and not is_abort and not is_escalate
     )
 
