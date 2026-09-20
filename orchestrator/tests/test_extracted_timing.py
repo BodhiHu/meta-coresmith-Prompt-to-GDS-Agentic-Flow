@@ -236,6 +236,26 @@ def test_malformed_def_cannot_prove_unannotated_drivers_benign(tmp_path):
     assert result["functional_unannotated_drivers"]
 
 
+def test_specialnet_connection_is_functional_not_unconnected(tmp_path):
+    class SpecialnetDriver(_FakeStaTool):
+        def run(self, request):
+            components = "".join(
+                f"- clkload{i} fake_cell + PLACED ( {i} {i} ) N ;\n"
+                for i in range(10)
+            )
+            request.inputs["routed_def"].write_text(
+                "DESIGN chip_top ;\nCOMPONENTS 10 ;\n" + components
+                + "END COMPONENTS\nNETS 0 ;\nEND NETS\n"
+                "SPECIALNETS 1 ;\n- clock_spine ( clkload0 Y ) ;\n"
+                "END SPECIALNETS\nEND DESIGN\n"
+            )
+            return super().run(request)
+
+    result = _run(tmp_path, SpecialnetDriver())
+    assert result["met"] is False
+    assert "clkload0/Y" in result["functional_unannotated_drivers"]
+
+
 def test_worst_slack_across_all_reported_groups_is_authoritative(tmp_path):
     def producer(out):
         _write_clean_reports(out)

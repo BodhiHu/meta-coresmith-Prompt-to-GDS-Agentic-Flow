@@ -241,7 +241,6 @@ def _unannotated_driver_evidence(
     ):
         return declared, [], names
     components = set(component_names)
-    nets_text = nets_match.group(2)
 
     unconnected: list[str] = []
     functional_or_unknown: list[str] = []
@@ -261,7 +260,9 @@ def _unannotated_driver_evidence(
             continue
         connected = re.search(
             rf"\(\s*{re.escape(instance)}\s+{re.escape(pin)}\s*\)",
-            nets_text,
+            # Search the full, structurally validated DEF so SPECIALNETS and
+            # other legal connection sections cannot hide a functional load.
+            def_text,
         )
         if connected:
             functional_or_unknown.append(name)
