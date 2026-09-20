@@ -229,10 +229,18 @@ class TestRouteAfterLVS:
 
 
 class TestRouteAfterTiming:
-    def test_met_goes_to_advance(self):
-        # After timing_signoff MET -> generate_wrapper (was advance_block before
-        # the wrapper-generation step was inserted into the backend pipeline).
-        assert route_after_timing({"timing_result": {"met": True}}) == "generate_wrapper"
+    def test_met_without_chassis_goes_to_advance(self, tmp_path):
+        assert route_after_timing({
+            "project_root": str(tmp_path), "timing_result": {"met": True},
+        }) == "advance_block"
+
+    def test_met_with_declared_chassis_keeps_wrapper_flow(self, tmp_path):
+        inputs = tmp_path / "inputs"
+        inputs.mkdir()
+        (inputs / "task.yaml").write_text("chassis: caravel\n")
+        assert route_after_timing({
+            "project_root": str(tmp_path), "timing_result": {"met": True},
+        }) == "generate_wrapper"
 
     def test_violated_goes_to_diagnose(self):
         assert route_after_timing({"timing_result": {"met": False}}) == "diagnose"
@@ -340,9 +348,11 @@ class TestInternalNodes:
         assert result["backend_done"] is True
 
     @pytest.mark.asyncio
-    async def test_advance_block_precheck_hard_fail_not_overridden_by_llm(self):
+    async def test_advance_block_precheck_hard_fail_not_overridden_by_llm(self, tmp_path):
+        (tmp_path / "inputs").mkdir()
+        (tmp_path / "inputs" / "task.yaml").write_text("chassis: caravel\n")
         state = {
-            "project_root": "/tmp/test",
+            "project_root": str(tmp_path),
             "current_block": {"name": "top"},
             "attempt": 1,
             "drc_result": {"clean": True},
@@ -351,6 +361,38 @@ class TestInternalNodes:
             "precheck_result": {"pass": False, "llm_analysis": {"submission_ready": True}},
             "route_result": {"success": True},
             "step_log_paths": {},
+            "constraints": [],
+        }
+        result = await advance_block_node(state)
+        assert result["completed_blocks"][0]["success"] is False
+
+    @pytest.mark.asyncio
+    async def test_advance_core_only_reports_submission_not_applicable(self, tmp_path):
+        (tmp_path / "inputs").mkdir()
+        (tmp_path / "inputs" / "task.yaml").write_text("chassis: none\n")
+        state = {
+            "project_root": str(tmp_path), "current_block": {"name": "chip_top"},
+            "attempt": 1, "drc_result": {"clean": True},
+            "lvs_result": {"match": True}, "timing_result": {"met": True},
+            "route_result": {"success": True}, "step_log_paths": {},
+            "constraints": [],
+        }
+        result = await advance_block_node(state)
+        block = result["completed_blocks"][0]
+        assert block["success"] is True
+        assert block["wrapper_status"] == "not_applicable"
+        assert block["precheck_status"] == "not_applicable"
+        assert block["precheck_ok"] is None
+        assert block["submission_ready"] is None
+        assert result["precheck_result"]["pass"] is None
+
+    @pytest.mark.asyncio
+    async def test_core_only_still_requires_all_physical_gates(self, tmp_path):
+        state = {
+            "project_root": str(tmp_path), "current_block": {"name": "chip_top"},
+            "attempt": 1, "drc_result": {"clean": True},
+            "lvs_result": {"match": False}, "timing_result": {"met": True},
+            "route_result": {"success": True}, "step_log_paths": {},
             "constraints": [],
         }
         result = await advance_block_node(state)

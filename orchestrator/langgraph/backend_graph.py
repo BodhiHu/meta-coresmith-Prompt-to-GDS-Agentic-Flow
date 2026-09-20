@@ -2449,9 +2449,12 @@ async def advance_block_node(state: BackendState) -> dict:
     drc_clean = _drc.get("clean", False) or _drc.get("waived", False)
     lvs_match = _lvs.get("match", False) or _lvs.get("waived", False)
     timing_met = (state.get("timing_result") or {}).get("met", False)
+    from orchestrator.chassis.profile import declared_chassis
+    core_only = declared_chassis(_pr(state)) is None
     precheck = state.get("precheck_result") or {}
     precheck_ok = precheck.get("pass", False)
-    all_pass = drc_clean and lvs_match and timing_met and precheck_ok
+    all_pass = (drc_clean and lvs_match and timing_met
+                and (core_only or precheck_ok))
     # A waived check satisfies the gate but is NEVER silent: the waivers ride
     # in the block result and every report downstream.
     waivers = [r["waiver"] for r in (_drc, _lvs)
@@ -2484,6 +2487,10 @@ async def advance_block_node(state: BackendState) -> dict:
             "drc_clean": drc_clean,
             "lvs_match": lvs_match,
             "timing_met": timing_met,
+            "wrapper_status": "not_applicable" if core_only else "complete",
+            "precheck_status": "not_applicable" if core_only else "pass",
+            "precheck_ok": None if core_only else True,
+            "submission_ready": None if core_only else True,
             "synth_gate_count": state.get("synth_gate_count", 0),
             "gds_path": state.get("gds_path", ""),
             "routed_def_path": state.get("routed_def_path", ""),
@@ -2512,6 +2519,9 @@ async def advance_block_node(state: BackendState) -> dict:
             "lvs_match": lvs_match,
             "timing_met": timing_met,
             "precheck_ok": precheck_ok,
+            "wrapper_status": "not_applicable" if core_only else "failed",
+            "precheck_status": "not_applicable" if core_only else "fail",
+            "submission_ready": None if core_only else False,
             "step_log_paths": step_logs,
             "gds_path": state.get("gds_path", ""),
             "routed_def_path": state.get("routed_def_path", ""),
@@ -2527,9 +2537,18 @@ async def advance_block_node(state: BackendState) -> dict:
         "block": block_name, "success": result["success"], "graph": "backend",
     })
 
-    return {
+    out = {
         "completed_blocks": [result],
     }
+    if core_only:
+        reason = "No chassis declared; wrapper and MPW submission checks do not apply"
+        out.update({
+            "wrapper_result": {"status": "not_applicable", "reason": reason},
+            "precheck_result": {
+                "status": "not_applicable", "pass": None, "reason": reason,
+            },
+        })
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -2848,13 +2867,18 @@ route_after_lvs.__edge_labels__ = {
 
 
 def route_after_timing(state: BackendState) -> str:
-    """Route after timing: MET -> generate_wrapper, VIOLATED -> diagnose."""
+    """Route timing-clean cores by the task's explicit chassis declaration."""
     met = (state.get("timing_result") or {}).get("met", False)
-    return "generate_wrapper" if met else "diagnose"
+    if not met:
+        return "diagnose"
+    from orchestrator.chassis.profile import declared_chassis
+    return ("generate_wrapper" if declared_chassis(_pr(state)) is not None
+            else "advance_block")
 
 
 route_after_timing.__edge_labels__ = {
     "generate_wrapper": "MET",
+    "advance_block": "MET (NO CHASSIS)",
     "diagnose": "VIOLATED",
 }
 
