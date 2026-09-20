@@ -64,6 +64,45 @@ def test_distinct_uncoded_requirements_remain_distinct(tmp_path):
     assert count == 4
 
 
+def test_hyphenated_prose_is_not_mistaken_for_a_coded_id(tmp_path):
+    _write_ers(tmp_path, {
+        "functional_requirements": [
+            "Single-outstanding requests must hold until accepted.",
+            "Single-outstanding responses must hold until accepted.",
+        ],
+    })
+
+    _, count = _load_ers_validation_context(str(tmp_path))
+
+    assert count == 2
+
+
+def test_uncoded_signal_requirements_preserve_case(tmp_path):
+    _write_ers(tmp_path, {
+        "functional_requirements": [
+            "Drive pin A after reset.",
+            "Drive pin a after reset.",
+        ],
+    })
+
+    _, count = _load_ers_validation_context(str(tmp_path))
+
+    assert count == 2
+
+
+def test_explicit_dict_ids_are_authoritative_and_case_normalized(tmp_path):
+    _write_ers(tmp_path, {
+        "validation_dv_requirements": [
+            {"id": "val-001", "requirement": "first wording"},
+            {"id": "VAL-001", "requirement": "second wording"},
+        ],
+    })
+
+    _, count = _load_ers_validation_context(str(tmp_path))
+
+    assert count == 1
+
+
 def test_duplicate_coded_requirement_is_counted_once(tmp_path):
     _write_ers(tmp_path, {
         "functional_requirements": ["FR-ONE: first wording"],

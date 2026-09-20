@@ -9186,15 +9186,21 @@ def _load_ers_validation_context(project_root: str) -> tuple[str, int]:
     ers = data.get("ers", data)
     requirement_identities: set[str] = set()
 
-    def _identity(text: str) -> str:
+    def _identity(text: str, *, explicit_id: bool = False) -> str:
         normalized = " ".join(text.split())
+        if explicit_id:
+            return f"id:{normalized.casefold()}"
+        # Infer IDs only from conventional all-uppercase coded prefixes.
+        # Ordinary prose may begin with a hyphenated word (for example,
+        # "Single-outstanding ...") and must remain a distinct text record.
         coded = re.match(
-            r"^([A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)+)(?=\s*:|\s|$)",
+            r"^([A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+)(?=\s*:|\s|$)",
             normalized,
         )
         if coded:
             return f"id:{coded.group(1).casefold()}"
-        return f"text:{normalized.casefold()}"
+        # Signal names can be case-sensitive, so do not case-fold prose.
+        return f"text:{normalized}"
 
     def _count_value(value) -> None:
         if isinstance(value, list):
@@ -9208,7 +9214,9 @@ def _load_ers_validation_context(project_root: str) -> tuple[str, int]:
             declared_id = value.get("id")
             requirement = value.get("requirement")
             if isinstance(declared_id, str) and declared_id.strip():
-                requirement_identities.add(_identity(declared_id))
+                requirement_identities.add(
+                    _identity(declared_id, explicit_id=True)
+                )
                 return
             if isinstance(requirement, str) and requirement.strip():
                 requirement_identities.add(_identity(requirement))
