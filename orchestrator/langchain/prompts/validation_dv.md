@@ -279,10 +279,15 @@ VCD WAVEFORM -- MANDATORY:
 - Log the ERS requirement IDs next to the transactions that exercise them so
   waveform inspection can tie each requirement to observed signals.
 
-OUTPUT FORMAT GUARD:
-Your response MUST be a single, complete Python file containing valid cocotb
-test code. NEVER output markdown, explanations, summaries, or prose. The file
-MUST start with import statements.
+ARTIFACT HANDOFF:
+Write the complete, valid Python testbench to the requested output path with
+your tools. Keep explanations and Markdown out of the .py file. Once the file
+is written and checked, finish with a brief report containing its path, test
+count, check command and verdict, and any unresolved failure. Do not repeat
+the source file in your final response; the engine reads the file from disk.
+If file-writing tools are unavailable, return the complete Python source
+instead, without Markdown fences or explanatory prose, so the engine can
+persist it. Never report a successful write or check that did not occur.
 
 ## No live oracle inside cocotb (BINDING)
 

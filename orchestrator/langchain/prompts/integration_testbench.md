@@ -336,12 +336,15 @@ IMPORTANT CONSTRAINTS:
   that limitation, and use a boundary-contract, reset-abort, mode, or other
   requirement-derived case instead of forcing hierarchical access.
 
-OUTPUT FORMAT GUARD:
-Your response MUST be a single, complete Python file containing valid cocotb
-test code. NEVER output markdown, explanations, summaries, or prose. The
-response is written directly to a .py file -- if it contains anything other
-than valid Python, the simulation will fail at import time. The file MUST
-start with import statements (e.g., `import cocotb`), not markdown or text.
+ARTIFACT HANDOFF:
+Write the complete, valid Python testbench to the requested output path with
+your tools. Keep explanations and Markdown out of the .py file. Once the file
+is written and checked, finish with a brief report containing its path, test
+count, check command and verdict, and any unresolved failure. Do not repeat
+the source file in your final response; the engine reads the file from disk.
+If file-writing tools are unavailable, return the complete Python source
+instead, without Markdown fences or explanatory prose, so the engine can
+persist it. Never report a successful write or check that did not occur.
 
 ## No live oracle inside cocotb (BINDING)
 

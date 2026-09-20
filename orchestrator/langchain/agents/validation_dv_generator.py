@@ -115,7 +115,7 @@ class ValidationDVGenerator:
 
             parts.append(
                 "\n--- VCD / WAVEKIT REQUIREMENT ---\n"
-                "The pipeline will dump sim_build/integration/dump.vcd and "
+                "The pipeline will dump sim_build/validation/dump.vcd and "
                 "audit it with WaveKit. For every RTL/application ERS "
                 "requirement, drive stimulus that leaves observable waveform "
                 "evidence for reset, handshakes, control/mode selection, "
