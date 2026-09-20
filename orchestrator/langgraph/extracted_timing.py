@@ -16,15 +16,14 @@ capability error; the graph never substitutes a local PDK or guesses RC rules.
 
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import math
 import re
 from pathlib import Path
 from typing import Any
 
 from orchestrator.pdk.base import ToolRequest
-
 
 _SLACK_RE = re.compile(
     r"^\s*(\S+)\s+slack\s+\((?:MET|VIOLATED)\)\s*$",

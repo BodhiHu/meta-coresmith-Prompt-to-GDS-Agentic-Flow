@@ -633,6 +633,7 @@ class TestRouteAfterIntegrationReview:
     async def test_resume_does_not_rerun_model_backed_review(self, tmp_path, monkeypatch):
         """A real LangGraph interrupt/resume approves the checkpointed review."""
         from langgraph.graph import END, START, StateGraph
+
         from orchestrator.langchain.agents import integration_review_agent
 
         spec = tmp_path / "arch" / "uarch_specs" / "leaf.md"
