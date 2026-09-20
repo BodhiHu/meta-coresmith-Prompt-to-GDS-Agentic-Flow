@@ -220,6 +220,44 @@ class TestProviderDetection:
 
 
 class TestOpenCodeJsonParsing:
+    def test_tool_rounds_sum_usage_and_return_only_final_answer(self):
+        events = [
+            {"type": "step_start"},
+            {"type": "text", "part": {"type": "text", "text": "Checking files."}},
+            {"type": "tool_use", "part": {"tool": "read"}},
+            {"type": "step_finish", "part": {
+                "reason": "tool-calls", "cost": 0.25,
+                "tokens": {"input": 100, "output": 20, "reasoning": 5,
+                           "total": 165, "cache": {"read": 30, "write": 10}},
+            }},
+            {"type": "step_start"},
+            {"type": "text", "part": {"type": "text", "text": '{"ok":'}},
+            {"type": "text", "part": {"type": "text", "text": 'true}'}},
+            {"type": "step_finish", "part": {
+                "reason": "stop", "cost": 0.5,
+                "tokens": {"input": 10, "output": 4, "reasoning": 2,
+                           "total": 106, "cache": {"read": 90, "write": 0}},
+            }},
+        ]
+        text, usage = _parse_opencode_json("\n".join(map(json.dumps, events)))
+        assert json.loads(text) == {"ok": True}
+        assert usage == {
+            "input_tokens": 110, "output_tokens": 24, "total_tokens": 271,
+            "cache_read_input_tokens": 120, "cache_creation_input_tokens": 10,
+            "reasoning_output_tokens": 7, "total_cost_usd": 0.75,
+        }
+
+    def test_incomplete_final_step_does_not_return_earlier_commentary(self):
+        events = [
+            {"type": "step_start"},
+            {"type": "text", "part": {"type": "text", "text": "I will check."}},
+            {"type": "step_finish", "part": {"tokens": {"input": 10}}},
+            {"type": "step_start"},
+        ]
+        text, usage = _parse_opencode_json("\n".join(map(json.dumps, events)))
+        assert text == ""
+        assert usage["input_tokens"] == 10
+
     def test_parse_text_and_usage(self):
         stdout = (
             '{"type":"step_start","part":{"type":"step-start"}}\n'
