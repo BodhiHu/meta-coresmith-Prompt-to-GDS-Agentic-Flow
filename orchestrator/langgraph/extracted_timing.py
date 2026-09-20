@@ -220,6 +220,29 @@ def _unannotated_driver_evidence(
     if def_text is None:
         return declared, [], names
 
+    components_match = re.search(
+        r"(?ms)^\s*COMPONENTS\s+(\d+)\s*;(.*?)^\s*END\s+COMPONENTS\s*$",
+        def_text,
+    )
+    nets_match = re.search(
+        r"(?ms)^\s*NETS\s+(\d+)\s*;(.*?)^\s*END\s+NETS\s*$",
+        def_text,
+    )
+    if components_match is None or nets_match is None:
+        return declared, [], names
+    component_names = re.findall(
+        r"(?m)^\s*-\s+(\S+)\s+\S+", components_match.group(2)
+    )
+    net_entries = re.findall(r"(?m)^\s*-\s+\S+", nets_match.group(2))
+    if (
+        len(component_names) != int(components_match.group(1))
+        or len(set(component_names)) != len(component_names)
+        or len(net_entries) != int(nets_match.group(1))
+    ):
+        return declared, [], names
+    components = set(component_names)
+    nets_text = nets_match.group(2)
+
     unconnected: list[str] = []
     functional_or_unknown: list[str] = []
     for name in names:
@@ -227,9 +250,18 @@ def _unannotated_driver_evidence(
             functional_or_unknown.append(name)
             continue
         instance, pin = name.rsplit("/", 1)
+        # DEF escaping and hierarchical instance names need a real DEF parser;
+        # do not infer disconnection from a regex normalization guess.
+        if (
+            re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.$]*", instance) is None
+            or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.$]*", pin) is None
+            or instance not in components
+        ):
+            functional_or_unknown.append(name)
+            continue
         connected = re.search(
             rf"\(\s*{re.escape(instance)}\s+{re.escape(pin)}\s*\)",
-            def_text,
+            nets_text,
         )
         if connected:
             functional_or_unknown.append(name)

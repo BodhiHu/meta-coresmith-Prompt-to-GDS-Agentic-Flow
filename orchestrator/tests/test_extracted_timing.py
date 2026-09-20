@@ -79,7 +79,14 @@ class _Deployment:
 def _inputs(tmp_path):
     routed = tmp_path / "chip_top_routed.def"
     sdc = tmp_path / "chip_top.sdc"
-    routed.write_text("DESIGN chip_top ;\nEND DESIGN\n")
+    components = "".join(
+        f"- clkload{i} fake_cell + PLACED ( {i} {i} ) N ;\n"
+        for i in range(10)
+    )
+    routed.write_text(
+        "DESIGN chip_top ;\nCOMPONENTS 10 ;\n" + components
+        + "END COMPONENTS\nNETS 0 ;\nEND NETS\nEND DESIGN\n"
+    )
     sdc.write_text("create_clock -period 40 [get_ports clk]\n")
     netlist = tmp_path / "chip_top_pnr.v"
     netlist.write_text("module chip_top(input clk); endmodule\n")
@@ -184,8 +191,13 @@ def test_missing_spef_fails_even_when_reports_claim_pass(tmp_path):
 def test_wholly_unannotated_functional_driver_fails(tmp_path):
     class ConnectedDriver(_FakeStaTool):
         def run(self, request):
+            components = "".join(
+                f"- clkload{i} fake_cell + PLACED ( {i} {i} ) N ;\n"
+                for i in range(10)
+            )
             request.inputs["routed_def"].write_text(
-                "DESIGN chip_top ;\nNETS 1 ;\n"
+                "DESIGN chip_top ;\nCOMPONENTS 10 ;\n" + components
+                + "END COMPONENTS\nNETS 1 ;\n"
                 "- functional_net ( clkload0 Y ) ( u0 A ) ;\n"
                 "END NETS\nEND DESIGN\n"
             )
@@ -195,6 +207,33 @@ def test_wholly_unannotated_functional_driver_fails(tmp_path):
     assert result["met"] is False
     assert result["functional_unannotated_drivers"] == ["clkload0/Y"]
     assert "wholly unannotated" in result["error"]
+
+
+def test_unresolved_unannotated_driver_is_not_assumed_disconnected(tmp_path):
+    def producer(out):
+        _write_clean_reports(out)
+        (out / "parasitic_annotation.rpt").write_text(
+            "Found 1 unannotated driver.\n ghost/Y\n"
+            "Found 0 partially unannotated drivers.\n"
+        )
+
+    result = _run(tmp_path, _FakeStaTool(producer))
+    assert result["met"] is False
+    assert result["functional_unannotated_drivers"] == ["ghost/Y"]
+
+
+def test_malformed_def_cannot_prove_unannotated_drivers_benign(tmp_path):
+    class MalformedDef(_FakeStaTool):
+        def run(self, request):
+            request.inputs["routed_def"].write_text(
+                "DESIGN chip_top ;\nCOMPONENTS 10 ;\n- clkload0 fake_cell ;\n"
+                "NETS 0 ;\nEND DESIGN\n"
+            )
+            return super().run(request)
+
+    result = _run(tmp_path, MalformedDef())
+    assert result["met"] is False
+    assert result["functional_unannotated_drivers"]
 
 
 def test_worst_slack_across_all_reported_groups_is_authoritative(tmp_path):
