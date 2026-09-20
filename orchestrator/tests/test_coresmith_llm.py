@@ -1360,11 +1360,11 @@ class TestOpenCodeEndpointSelection:
 
     def test_muse_spark_endpoint_maps_every_tier(self, monkeypatch):
         monkeypatch.setenv("CORESMITH_OPENCODE_ENDPOINT", "muse-spark")
-        expected = "meta-model-api/muse-spark-1.1"
+        expected = "meta-model-api/muse-spark-1.3-contributor"
         assert DEFAULT_MUSE_SPARK_MODEL == expected
         assert set(_MUSE_SPARK_MODEL_MAP.values()) == {expected}
         # Every tier the OpenRouter route knows is also routable on Muse Spark:
-        # the Model API currently exposes exactly one model.
+        # all tiers use the selected default version.
         assert set(_MUSE_SPARK_MODEL_MAP) == set(_OPENCODE_MODEL_MAP)
         assert _resolve_model(DEFAULT_MODEL, "opencode_cli") == expected
         assert _resolve_model(BLOCK_MODEL, "opencode_cli") == expected
@@ -1381,6 +1381,10 @@ class TestMuseSparkModelDetection:
     @pytest.mark.parametrize(
         "slug",
         [
+            "meta-model-api/muse-spark-1.3-contributor",
+            "META-MODEL-API/MUSE-SPARK-1.3-CONTRIBUTOR",
+            "meta-model-api/muse-spark-1.3",
+            "meta-model-api/muse-spark-1.2-contributor",
             "meta-model-api/muse-spark-1.1",
             "openrouter/meta/muse-spark-1.1",
             "META-MODEL-API/MUSE-SPARK-1.1",
@@ -1397,13 +1401,7 @@ class TestMuseSparkModelDetection:
 
 
 class TestMuseSparkVariantHandling:
-    """Muse Spark silently accepts any --variant, so CoreSmith must not send one.
-
-    Verified against a live Meta Model API key: low/high/max/minimal and an
-    outright bogus value all return 200 and none of them move the reported
-    reasoning-token count. Emitting the flag would advertise a reasoning cap
-    that is not in force.
-    """
+    """Do not advertise an effort cap without a configured variant mapping."""
 
     @pytest.mark.parametrize("variant", ["low", "high", "max", "minimal", "bogusvalue"])
     def test_variant_is_dropped_for_muse_spark(self, variant):
@@ -1431,6 +1429,16 @@ class TestMuseSparkProviderInjection:
         assert provider["options"]["baseURL"] == MUSE_SPARK_BASE_URL
         assert provider["api"] == "https://api.meta.ai/v1"
         assert MUSE_SPARK_MODEL_ID in provider["models"]
+        assert provider["models"][MUSE_SPARK_MODEL_ID]["name"] == (
+            "Muse Spark 1.3 (Contributor)"
+        )
+
+    @pytest.mark.parametrize("model_id", ["muse-spark-1.1", "muse-spark-1.3"])
+    def test_registers_explicit_meta_model_override(self, model_id):
+        cfg = json.loads(_inject_muse_spark_provider(
+            "", f"{MUSE_SPARK_PROVIDER_ID}/{model_id}",
+        ))
+        assert model_id in cfg["provider"][MUSE_SPARK_PROVIDER_ID]["models"]
 
     def test_api_key_is_referenced_by_env_not_inlined(self, monkeypatch):
         monkeypatch.setenv(MUSE_SPARK_API_KEY_ENV, "LLM_secret_value")
@@ -1482,7 +1490,9 @@ class TestMuseSparkInvocation:
             model._generate_via_cli("system", "hello")
 
         cmd = watchdog.call_args.args[0]
-        assert cmd[cmd.index("--model") + 1] == "meta-model-api/muse-spark-1.1"
+        assert cmd[cmd.index("--model") + 1] == (
+            "meta-model-api/muse-spark-1.3-contributor"
+        )
         assert "--variant" not in cmd
 
         env = watchdog.call_args.kwargs["process_env"]

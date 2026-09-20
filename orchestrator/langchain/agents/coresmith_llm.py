@@ -798,7 +798,7 @@ _OPENCODE_MODEL_MAP = {
 }
 
 # --- Muse Spark endpoint (Meta Model API) -----------------------------------
-# Meta's Model API serves Muse Spark 1.1 over an OpenAI-*chat-completions*
+# Meta's Model API serves Muse Spark over an OpenAI-*chat-completions*
 # compatible surface (POST {base}/chat/completions), so OpenCode must load the
 # "@ai-sdk/openai-compatible" adapter for it.
 #
@@ -810,7 +810,7 @@ _OPENCODE_MODEL_MAP = {
 # claim is what makes the adapter choice actually stick. Do not rename this to
 # "meta" without re-verifying against a live key.
 MUSE_SPARK_PROVIDER_ID = "meta-model-api"
-MUSE_SPARK_MODEL_ID = "muse-spark-1.1"
+MUSE_SPARK_MODEL_ID = "muse-spark-1.3-contributor"
 MUSE_SPARK_BASE_URL = "https://api.meta.ai/v1"
 MUSE_SPARK_NPM = "@ai-sdk/openai-compatible"
 # Secret is read from the environment at call time and never persisted by
@@ -824,8 +824,8 @@ MUSE_SPARK_OUTPUT_LIMIT = 65_536
 
 DEFAULT_MUSE_SPARK_MODEL = f"{MUSE_SPARK_PROVIDER_ID}/{MUSE_SPARK_MODEL_ID}"
 
-# Every CoreSmith tier maps onto the single Muse Spark model the Model API
-# currently exposes (GET /v1/models returns exactly muse-spark-1.1).
+# Every CoreSmith tier uses the same default Muse Spark model. Explicit model
+# overrides can select other versions available to the operator's API key.
 _MUSE_SPARK_MODEL_MAP = {
     tier: DEFAULT_MUSE_SPARK_MODEL for tier in _OPENCODE_MODEL_MAP
 }
@@ -839,7 +839,7 @@ def _is_muse_spark_model(resolved_model: str) -> bool:
     OpenRouter's ``openrouter/meta/muse-spark-1.1``) still gets the
     model-specific handling.
     """
-    return MUSE_SPARK_MODEL_ID in (resolved_model or "").lower()
+    return (resolved_model or "").lower().rsplit("/", 1)[-1].startswith("muse-spark-")
 
 
 # Default model used by every agent unless overridden. Set the CORESMITH_MODEL
@@ -909,7 +909,7 @@ def _opencode_endpoint_models(endpoint: str) -> tuple[dict, str]:
     return _OPENCODE_MODEL_MAP, DEFAULT_OPENCODE_MODEL
 
 
-def muse_spark_provider_config() -> dict:
+def muse_spark_provider_config(model_id: str = MUSE_SPARK_MODEL_ID) -> dict:
     """The OpenCode provider block that registers the Meta Model API.
 
     Returned as a plain dict so callers can merge it into an existing
@@ -926,8 +926,10 @@ def muse_spark_provider_config() -> dict:
             "apiKey": "{env:%s}" % MUSE_SPARK_API_KEY_ENV,
         },
         "models": {
-            MUSE_SPARK_MODEL_ID: {
-                "name": "Muse Spark 1.1",
+            model_id: {
+                "name": "Muse Spark " + model_id.removeprefix("muse-spark-").replace(
+                    "-contributor", " (Contributor)"
+                ),
                 "limit": {
                     "context": MUSE_SPARK_CONTEXT_LIMIT,
                     "output": MUSE_SPARK_OUTPUT_LIMIT,
@@ -937,7 +939,9 @@ def muse_spark_provider_config() -> dict:
     }
 
 
-def _inject_muse_spark_provider(config_content: str) -> str:
+def _inject_muse_spark_provider(
+    config_content: str, resolved_model: str = DEFAULT_MUSE_SPARK_MODEL,
+) -> str:
     """Merge the Muse Spark provider block into an OPENCODE_CONFIG_CONTENT blob.
 
     Operator-supplied keys win: if the blob already registers
@@ -958,7 +962,10 @@ def _inject_muse_spark_provider(config_content: str) -> str:
     providers = config.setdefault("provider", {})
     if not isinstance(providers, dict):
         raise ValueError("OPENCODE_CONFIG_CONTENT 'provider' must be an object")
-    providers.setdefault(MUSE_SPARK_PROVIDER_ID, muse_spark_provider_config())
+    model_id = MUSE_SPARK_MODEL_ID
+    if resolved_model.startswith(MUSE_SPARK_PROVIDER_ID + "/"):
+        model_id = resolved_model.split("/", 1)[1]
+    providers.setdefault(MUSE_SPARK_PROVIDER_ID, muse_spark_provider_config(model_id))
     return _json.dumps(config)
 
 
@@ -1009,16 +1016,14 @@ def _normalize_opencode_variant(variant: str, resolved_model: str) -> str:
     if not v:
         return ""
     if _is_muse_spark_model(resolved_model):
-        # Verified against a live Meta Model API key: muse-spark-1.1 accepts
-        # EVERY --variant value -- low/high/max/minimal and even "bogusvalue"
-        # all return 200, and the reported reasoning-token counts do not track
-        # the flag. Shipping it would put a reasoning cap in the command line
-        # and the logs that is not actually in force, which is precisely the
-        # footgun the Kimi normalisation above exists to prevent.
+        # CoreSmith's Muse provider does not configure OpenCode variant
+        # mappings. The earlier 1.1 integration accepted arbitrary flags
+        # without applying an effort cap; that experiment does not establish
+        # which reasoning controls newer Meta API models support.
         logger.warning(
-            "CORESMITH_OPENCODE_VARIANT=%r has no effect on %s: the Meta Model "
-            "API silently ignores --variant. Omitting the flag so it does not "
-            "imply a reasoning cap that is not applied.",
+            "CORESMITH_OPENCODE_VARIANT=%r has no configured mapping for %s "
+            "in CoreSmith's Muse provider. Omitting the flag and using the "
+            "model's default reasoning settings.",
             variant, resolved_model,
         )
         return ""
@@ -2663,7 +2668,7 @@ class ClaudeLLM:
                     f"the daemon."
                 )
             process_env["OPENCODE_CONFIG_CONTENT"] = _inject_muse_spark_provider(
-                process_env.get("OPENCODE_CONFIG_CONTENT", "")
+                process_env.get("OPENCODE_CONFIG_CONTENT", ""), resolved_model
             )
 
         logger.info(
