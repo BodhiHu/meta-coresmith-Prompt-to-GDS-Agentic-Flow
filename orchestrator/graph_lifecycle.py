@@ -72,10 +72,45 @@ class GraphLifecycle:
 
     # -- Recovery helpers ---------------------------------------------------
 
+    @staticmethod
+    def _pid_is_alive(pid: object) -> bool:
+        try:
+            value = int(pid)
+            if value <= 0:
+                return False
+            os.kill(value, 0)
+            return True
+        except (TypeError, ValueError, ProcessLookupError):
+            return False
+        except PermissionError:
+            return True
+
+    def _foreign_live_daemon_owns_project(self) -> bool:
+        """Whether another live daemon owns lifecycle recovery for this run."""
+        daemon_path = os.path.join(
+            self.project_root, ".coresmith", "daemon.json"
+        )
+        try:
+            with open(daemon_path, encoding="utf-8") as fh:
+                daemon_pid = json.load(fh).get("pid")
+        except (OSError, ValueError, AttributeError):
+            return False
+        try:
+            daemon_pid = int(daemon_pid)
+        except (TypeError, ValueError):
+            return False
+        return daemon_pid != os.getpid() and self._pid_is_alive(daemon_pid)
+
     def _close_orphaned_events(self) -> None:
         """Close orphaned graph_node_enter events from a prior crash."""
         try:
             from orchestrator.langgraph.event_stream import write_graph_event
+            # A short-lived MCP/tool process may instantiate GraphLifecycle
+            # against a project currently owned by the daemon. It is an
+            # observer, not a server restart, and must not close the daemon's
+            # live node in the shared event log.
+            if self._foreign_live_daemon_owns_project():
+                return
             log_path = os.path.join(self.project_root, ".coresmith", "pipeline_events.jsonl")
             if not os.path.isfile(log_path):
                 return
@@ -97,6 +132,9 @@ class GraphLifecycle:
                 elif etype == "graph_node_exit" and node:
                     open_enters.pop(node, None)
             for node, ev in open_enters.items():
+                writer_pid = ev.get("pid")
+                if writer_pid is not None and self._pid_is_alive(writer_pid):
+                    continue
                 write_graph_event(self.project_root, node, "graph_node_exit", {
                     "block": ev.get("block", ""),
                     "server_restart": True,
