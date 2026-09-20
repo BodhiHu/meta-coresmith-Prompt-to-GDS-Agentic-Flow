@@ -396,6 +396,215 @@ def _check_decomposed_bundle(conn, src, dst, expected_width):
     return issues
 
 
+def _contract_payload_connections(
+    edges: list[dict],
+    modules: dict[str, VerilogModule],
+) -> list[dict]:
+    """Project canonical contract payload fields into compatibility checks.
+
+    Block-diagram connections often carry only a channel label and total data
+    width.  Fuzzy matching that shape can select the channel's 1-bit valid or
+    ready strobe instead of its payload.  Interface contracts declare the
+    producer/consumer channel prefixes and every payload field, so derive exact
+    endpoint candidates from those authoritative declarations.
+
+    Handshake strobes are deliberately excluded: ``data_width_bits`` describes
+    payload, and ready runs opposite the payload direction.  Protocol
+    conformance checks those controls separately.
+    """
+    from orchestrator.langgraph.contract_conformance import (
+        canonical_port,
+        channel_base,
+    )
+
+    checks: list[dict] = []
+    for edge in edges or []:
+        if not isinstance(edge, dict):
+            continue
+        is_contract_edge = any(
+            key in edge for key in (
+                "producer_block", "consumer_block",
+                "producer_port", "consumer_port",
+            )
+        )
+        if not is_contract_edge:
+            checks.append(edge)
+            continue
+        producer = edge.get("producer_block") or edge.get("from_block")
+        consumer = edge.get("consumer_block") or edge.get("to_block")
+        fields = edge.get("fields") or []
+        if not producer or not consumer:
+            checks.append(edge)
+            continue
+        producer_port = edge.get("producer_port") or edge.get("from_port") or ""
+        consumer_port = edge.get("consumer_port") or edge.get("to_port") or ""
+        normalized = {
+            **edge,
+            "from_block": producer,
+            "to_block": consumer,
+            "from_port": producer_port,
+            "to_port": consumer_port,
+            "interface": str(edge.get("edge_id") or edge.get("interface") or ""),
+            "data_width": edge.get("data_width_bits") or edge.get("data_width") or 0,
+        }
+
+        # A per-field direction can describe feedback or bidirectional data.
+        # The legacy checker models one producer-output -> consumer-input arc,
+        # so do not reinterpret such an edge as a forward flattened payload.
+        # Keep it in the normalized legacy path until the direction vocabulary
+        # can be mapped without guessing.
+        has_directed_field = any(
+            isinstance(field_spec, dict) and any(
+                field_spec.get(key) for key in ("dir", "direction", "towards")
+            )
+            for field_spec in fields
+        )
+        if has_directed_field:
+            checks.append(normalized)
+            continue
+
+        # Some contracts name one real packed payload port at each endpoint.
+        # Those are already the most precise mapping available; compare them
+        # directly instead of assuming that every fields[] entry is flattened
+        # into a separate RTL port.
+        src_module = modules.get(producer)
+        dst_module = modules.get(consumer)
+        src_exact = src_module.port_by_name(producer_port) if src_module else None
+        dst_exact = dst_module.port_by_name(consumer_port) if dst_module else None
+        if src_exact is not None and dst_exact is not None:
+            checks.append({
+                **normalized,
+                "from_port_candidates": [producer_port],
+                "to_port_candidates": [consumer_port],
+                "strict_contract_payload": True,
+            })
+            continue
+
+        # Fieldless or otherwise unprojectable contract edges still receive
+        # the legacy check.  They must never disappear merely because another
+        # edge in the same contract file has explicit payload fields.
+        if not fields:
+            checks.append(normalized)
+            continue
+        pchan = channel_base(
+            producer_port
+        )
+        cchan = channel_base(
+            consumer_port
+        )
+        projected = 0
+        for field_spec in fields:
+            field = (
+                field_spec.get("name")
+                if isinstance(field_spec, dict)
+                else field_spec
+            )
+            if not field:
+                continue
+            pport, pbare = canonical_port(pchan, field)
+            cport, cbare = canonical_port(cchan, field)
+            width = 0
+            if isinstance(field_spec, dict):
+                try:
+                    width = int(field_spec.get("width") or 0)
+                except (TypeError, ValueError):
+                    width = 0
+                if width <= 0:
+                    try:
+                        width = abs(
+                            int(field_spec["msb"]) - int(field_spec["lsb"])
+                        ) + 1
+                    except (KeyError, TypeError, ValueError):
+                        width = 0
+            if width <= 0 and len(fields) == 1:
+                try:
+                    width = int(
+                        edge.get("data_width_bits")
+                        or edge.get("data_width")
+                        or 0
+                    )
+                except (TypeError, ValueError):
+                    width = 0
+            checks.append({
+                "from_block": producer,
+                "to_block": consumer,
+                "from_port": pport,
+                "to_port": cport,
+                "from_port_candidates": list(dict.fromkeys(
+                    name for name in (pport, pbare) if name
+                )),
+                "to_port_candidates": list(dict.fromkeys(
+                    name for name in (cport, cbare) if name
+                )),
+                "interface": str(edge.get("edge_id") or field),
+                "data_width": width,
+                "contract_edge_id": edge.get("edge_id", ""),
+                "contract_field": str(field),
+                "strict_contract_payload": True,
+            })
+            projected += 1
+        if projected == 0:
+            checks.append(normalized)
+    return checks
+
+
+def _find_contract_payload_port(
+    module: VerilogModule,
+    candidates: list[str],
+) -> VerilogPort | None:
+    """Resolve a contract payload by exact canonical/bare name only."""
+    found = [module.port_by_name(name) for name in candidates]
+    found = [port for port in found if port is not None]
+    unique = {port.name: port for port in found}
+    return next(iter(unique.values())) if len(unique) == 1 else None
+
+
+def merge_contract_compatibility_connections(
+    architecture_connections: list[dict],
+    contract_edges: list[dict],
+) -> list[dict]:
+    """Overlay named contract channels without hiding unrelated legacy edges.
+
+    A complete contract edge replaces the fuzzier block-diagram connection for
+    the same named channel.  Connections that have no matching contract remain
+    in the check, which matters for older and partially populated projects.
+    """
+    if not contract_edges:
+        return list(architecture_connections or [])
+
+    def _key(value) -> str:
+        return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
+
+    retained: list[dict] = []
+    for conn in architecture_connections or []:
+        from_block = conn.get("from_block", conn.get("from", ""))
+        to_block = conn.get("to_block", conn.get("to", ""))
+        candidates = [
+            edge for edge in contract_edges
+            if isinstance(edge, dict)
+            and (edge.get("producer_block") or edge.get("from_block")) == from_block
+            and (edge.get("consumer_block") or edge.get("to_block")) == to_block
+        ]
+        interface = _key(conn.get("interface", conn.get("name", "")))
+        from_port = str(conn.get("from_port") or "")
+        to_port = str(conn.get("to_port") or "")
+        covered = False
+        for edge in candidates:
+            edge_id = _key(edge.get("edge_id"))
+            named_channel = bool(interface and interface in edge_id)
+            exact_endpoints = bool(
+                from_port and to_port
+                and from_port == (edge.get("producer_port") or edge.get("from_port"))
+                and to_port == (edge.get("consumer_port") or edge.get("to_port"))
+            )
+            if named_channel or exact_endpoints:
+                covered = True
+                break
+        if not covered:
+            retained.append(conn)
+    return [*contract_edges, *retained]
+
+
 def check_integration_compatibility(
     connections: list[dict],
     modules: dict[str, VerilogModule],
@@ -412,6 +621,11 @@ def check_integration_compatibility(
         List of IntegrationMismatch objects for all issues found.
     """
     mismatches: list[IntegrationMismatch] = []
+
+    # Canonical interface-contract edges are richer than block-diagram channel
+    # labels.  When present, check their explicit payload fields rather than
+    # guessing one representative port for the whole channel.
+    connections = _contract_payload_connections(connections, modules)
 
     for conn in connections:
         from_block = conn.get("from_block", conn.get("from", ""))
@@ -454,7 +668,15 @@ def check_integration_compatibility(
             continue
 
         # Find source output port
-        src_port = _find_port_fuzzy(src_module, from_port, interface_name, prefer_direction="output")
+        if conn.get("strict_contract_payload"):
+            src_port = _find_contract_payload_port(
+                src_module, conn.get("from_port_candidates") or [from_port]
+            )
+        else:
+            src_port = _find_port_fuzzy(
+                src_module, from_port, interface_name,
+                prefer_direction="output",
+            )
         if not src_port:
             if not str(from_port).strip():
                 # rung3-fixes-1: PORT-LESS connection (the block diagram carried
@@ -514,7 +736,15 @@ def check_integration_compatibility(
             ))
 
         # Find destination input port
-        dst_port = _find_port_fuzzy(dst_module, to_port, interface_name, prefer_direction="input")
+        if conn.get("strict_contract_payload"):
+            dst_port = _find_contract_payload_port(
+                dst_module, conn.get("to_port_candidates") or [to_port]
+            )
+        else:
+            dst_port = _find_port_fuzzy(
+                dst_module, to_port, interface_name,
+                prefer_direction="input",
+            )
         if not dst_port:
             if not str(to_port).strip():
                 # rung3-fixes-1: port-less destination (see the source branch

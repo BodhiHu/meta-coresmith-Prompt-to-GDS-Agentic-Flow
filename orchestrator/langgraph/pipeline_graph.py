@@ -7011,12 +7011,25 @@ async def _prepare_integration_check(state: OrchestratorState) -> dict:
             from orchestrator.langgraph.gate_guard import gate_guard
             from orchestrator.langgraph.integration_helpers import (
                 check_integration_compatibility,
+                load_interface_contract_edges,
+                merge_contract_compatibility_connections,
+            )
+
+            # The block diagram usually names only a channel and its aggregate
+            # payload width.  Prefer canonical contract edges, whose explicit
+            # fields resolve the actual payload ports; falling back preserves
+            # legacy projects without interface_contracts.json.
+            contract_edges = await asyncio.to_thread(
+                load_interface_contract_edges, pr
+            )
+            compatibility_connections = merge_contract_compatibility_connections(
+                connections, contract_edges
             )
 
             gr = gate_guard(
                 "integration_compat",
                 check_integration_compatibility,
-                connections,
+                compatibility_connections,
                 modules,
             )
             if gr.errored:
@@ -7287,14 +7300,21 @@ async def _approve_integration_check(state: OrchestratorState, bundle: dict) -> 
             "outer_agent_guidance": (
                 "Integration Lead agent found issues. As the outer-loop "
                 "diagnostic agent, diagnose and fix before escalating:\n"
-                "1. WIDTH_MISMATCH: Read both block RTL files. Edit the RTL "
-                "on disk, then resume_pipeline(action='fix_rtl', "
-                "rtl_fix_description='Fixed width ...')\n"
-                "2. MISSING_PORT: Edit the block RTL to add it.\n"
-                "3. DIRECTION_ERROR: Fix the port direction.\n"
+                "1. WIDTH_MISMATCH: Compare the canonical interface-contract "
+                "field with both reported RTL ports and the actual chip_top "
+                "connection. If the checker selected a handshake/control port "
+                "for a payload field, repair the checker mapping and preserve "
+                "the passing RTL. Edit RTL only when those exact payload "
+                "endpoints have a real width mismatch.\n"
+                "2. MISSING_PORT: Confirm the canonical contract field and "
+                "actual connected port before adding or renaming RTL.\n"
+                "3. DIRECTION_ERROR: Confirm the exact contract endpoint, then "
+                "fix a real port-direction defect.\n"
                 "4. LINT_ERRORS: Read the lint log and edit "
                 f"{top_rtl_path} directly.\n"
-                "5. After fixing, resume_pipeline(action='fix_rtl').\n"
+                "5. After an RTL fix, resume_pipeline(action='fix_rtl'); after "
+                "an engine/checker fix, reload the engine and resume with the "
+                "review action supported by this checkpoint.\n"
                 "6. Only escalate for architectural issues.\n"
                 "7. ACCEPT: chip_top already lint-passes and the "
                 "mismatches are acceptable for this run -- proceed "
