@@ -363,7 +363,10 @@ class TestInternalNodes:
             "attempt": 1,
             "drc_result": {"clean": True},
             "lvs_result": {"match": True},
-            "timing_result": {"met": True},
+            "timing_result": {
+                "met": True, "source": "extracted_rcx_sta",
+                "extraction_complete": True,
+            },
             "precheck_result": {"pass": False, "llm_analysis": {"submission_ready": True}},
             "route_result": {"success": True},
             "step_log_paths": {},
@@ -379,7 +382,10 @@ class TestInternalNodes:
         state = {
             "project_root": str(tmp_path), "current_block": {"name": "chip_top"},
             "attempt": 1, "drc_result": {"clean": True},
-            "lvs_result": {"match": True}, "timing_result": {"met": True},
+            "lvs_result": {"match": True}, "timing_result": {
+                "met": True, "source": "extracted_rcx_sta",
+                "extraction_complete": True,
+            },
             "route_result": {"success": True}, "step_log_paths": {},
             "constraints": [],
         }
@@ -397,7 +403,10 @@ class TestInternalNodes:
         state = {
             "project_root": str(tmp_path), "current_block": {"name": "chip_top"},
             "attempt": 1, "drc_result": {"clean": True},
-            "lvs_result": {"match": False}, "timing_result": {"met": True},
+            "lvs_result": {"match": False}, "timing_result": {
+                "met": True, "source": "extracted_rcx_sta",
+                "extraction_complete": True,
+            },
             "route_result": {"success": True}, "step_log_paths": {},
             "constraints": [],
         }

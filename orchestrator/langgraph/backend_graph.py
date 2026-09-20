@@ -387,7 +387,8 @@ def _resolve_netlist(state: BackendState) -> tuple[str, str]:
                     clk_port = "clk"
                 sdc.write_text(
                     f"create_clock -name clk -period {period_ns} [get_ports {clk_port}]\n"
-                    f"set_input_delay {period_ns * 0.2:.1f} -clock clk [all_inputs]\n"
+                    f"set_input_delay {period_ns * 0.2:.1f} -clock clk "
+                    f"[remove_from_collection [all_inputs] [get_ports {clk_port}]]\n"
                     f"set_output_delay {period_ns * 0.2:.1f} -clock clk [all_outputs]\n"
                 )
             return str(rtl_path), str(sdc)
@@ -915,10 +916,10 @@ async def flat_top_synthesis_node(state: BackendState) -> dict:
             "chip_gate_sim_ok": _gs_ok,
             "chip_gate_sim_status": _gs_status,
             "chip_gate_sim_reason": _gs_reason,
-            # Hand diagnose something to work with. Only on a real FAIL: a
-            # not_run must not look like an error downstream.
-            **({"previous_error":
-                f"chip_top gate-sim FAIL: {_gs_reason}"} if _gs_ok is False else {}),
+            "previous_error": (
+                f"chip_top gate-sim {_gs_status}: {_gs_reason}"
+                if _gs_ok is not True and _gs_status != "disabled" else ""
+            ),
         }
     else:
         # A FAILED synthesis carries its per-attempt history into previous_error
@@ -1061,9 +1062,9 @@ def route_after_flat_synth(state: BackendState) -> str:
     design that does not work -- and it was recorded in state and ignored, which
     is the one outcome an honest gate must not have.
 
-    ``chip_gate_sim_ok is None`` means the gate did not APPLY (disabled, no
-    integration TB, toolchain absent). That is not a verdict and must not block:
-    it is already logged with a reason at the point it happened.
+    Missing or unsupported simulation evidence blocks the full backend.
+    An explicit disabled status is the only opt-out, and remains visible as
+    disabled rather than a simulation pass.
 
     ``stop_after_gate_sim`` ends the graph here in EVERY outcome -- pass, fail
     and did-not-apply alike. The caller asked for the flat netlist plus the
@@ -1084,7 +1085,10 @@ def route_after_flat_synth(state: BackendState) -> str:
         return END
     if not (netlist and Path(netlist).exists()):
         return "diagnose"
-    if state.get("chip_gate_sim_ok") is False:
+    from orchestrator.harness.gate_sim import STATUS_DISABLED
+    if (state.get("chip_gate_sim_ok") is False
+            or (state.get("chip_gate_sim_ok") is not True
+                and state.get("chip_gate_sim_status") != STATUS_DISABLED)):
         return "diagnose"
     return "run_pnr"
 
@@ -1846,13 +1850,14 @@ def _conditional_pass_allowed(wns_ns, *, waiver_exists: bool) -> bool:
 
 
 async def timing_signoff_node(state: BackendState) -> dict:
-    """LLM-assisted post-route timing sign-off analysis.
+    """Run deterministic post-route RCX+STA through the active deployment.
 
-    The LLM analyzes timing results from PnR and provides expert assessment:
-    whether violations are waivable, which paths are critical, and specific
-    recommendations for fixing timing closure issues.
+    PnR timing estimates and model opinions are not sign-off evidence.  This
+    node consumes the actual routed DEF, renders the active deployment's own
+    extraction recipe, invokes its ``run_sta`` tool, and accepts timing only
+    when the extracted setup/hold/constraint/parasitic reports are complete.
     """
-    from orchestrator.langchain.agents.backend_eda_agent import BackendEDAAgent
+    from orchestrator.langgraph.extracted_timing import run_extracted_timing
 
     block = state["current_block"]
     block_name = block["name"]
@@ -1861,98 +1866,62 @@ async def timing_signoff_node(state: BackendState) -> dict:
         "block": block_name, "graph": "backend",
     })
 
-    timing = state.get("timing_result") or {}
-    power = state.get("power_result") or {}
-    floorplan = state.get("floorplan_result") or {}
     target_mhz = state.get("target_clock_mhz", 50.0)
-    period_ns = 1000.0 / target_mhz
-
-    wns = timing.get("wns_ns", 0.0)
-    tns = timing.get("tns_ns", 0.0)
-    # Missing setup/hold measurements are unknown, not zero-slack results.
-    setup_slack = timing.get("setup_slack_ns")
-    hold_slack = timing.get("hold_slack_ns")
+    netlist_path, sdc_path = _resolve_netlist(state)
+    routed_def = state.get("routed_def_path", "")
+    attempt = int(state.get("attempt", 1) or 1)
+    timing_dir = Path(_output_dir(state)) / "extracted_timing" / f"attempt_{attempt}"
 
     with _tracer.start_as_current_span(f"Timing Sign-off [{block_name}]") as span:
         span.set_attribute("block_name", block_name)
+        result = await asyncio.to_thread(
+            run_extracted_timing,
+            block_name=block_name,
+            routed_def_path=routed_def,
+            sdc_path=sdc_path,
+            netlist_path=netlist_path,
+            output_dir=timing_dir,
+            timeout_s=_eda_timeout("CORESMITH_STA_TIMEOUT", 1800),
+        )
+        met = result.get("met") is True
+        setup_slack = result.get("setup_slack_ns")
+        hold_slack = result.get("hold_slack_ns")
+        wns = result.get("wns_ns")
+        tns = result.get("tns_ns")
+        sign_off = result.get("sign_off", "FAIL")
 
-        agent = BackendEDAAgent(step="timing_signoff")
-        analysis = await agent.analyze(context={
-            "design_name": block_name,
-            "target_clock_mhz": target_mhz,
-            "period_ns": f"{period_ns:.2f}",
-            "gate_count": state.get("synth_gate_count", 0),
-            "wns_ns": wns,
-            "tns_ns": tns,
-            "setup_slack_ns": setup_slack,
-            "hold_slack_ns": hold_slack,
-            "total_power_mw": power.get("total_power_mw", 0),
-            "dynamic_power_mw": power.get("dynamic_power_mw", 0),
-            "leakage_power_mw": power.get("leakage_power_mw", 0),
-            "design_area_um2": (state.get("place_result") or {}).get(
-                "design_area_um2", floorplan.get("design_area_um2", 0)),
-            "die_area_um2": floorplan.get("die_area_um2", 0),
-            "utilization_pct": floorplan.get("utilization", 0),
-            "prior_failure": state.get("previous_error", "None"),
-            "constraints": _format_constraints(state),
-        })
-
-        sign_off = analysis.get("sign_off", "FAIL")
-        met = analysis.get("timing_met", wns >= 0)
-
-        # The categorical sign-off verdict is authoritative. An agent may
-        # report non-negative estimated slack while rejecting sign-off because
-        # evidence is incomplete; never pass that contradictory response.
-        if sign_off == "FAIL":
-            met = False
-
-        # CONDITIONAL_PASS is met ONLY with non-negative slack, a recorded
-        # waiver, or an explicit operator opt-in (A-Fix 2h) -- otherwise it is
-        # fail-closed and routes to diagnose.
-        if sign_off == "CONDITIONAL_PASS":
-            _waiver = (Path(_pr(state)) / ".coresmith" / "waivers"
-                       / f"timing_{block_name}.json")
-            if _conditional_pass_allowed(wns, waiver_exists=_waiver.exists()):
-                met = True
-                log(f"  [STA] Timing CONDITIONAL PASS @ {target_mhz} MHz "
-                    f"(WNS={wns:.2f} ns) -- {analysis.get('assessment', '')}",
-                    YELLOW)
-            else:
-                met = False
-                log(f"  [STA] CONDITIONAL_PASS REJECTED @ {target_mhz} MHz "
-                    f"(WNS={wns:.2f} ns < 0, no waiver) -- fail-closed, routing "
-                    f"to diagnose", RED)
-        elif met:
-            log(f"  [STA] Timing met @ {target_mhz} MHz (WNS={wns:.2f} ns)", GREEN)
+        if met:
+            log(
+                f"  [STA] Extracted timing met @ {target_mhz} MHz "
+                f"(setup={setup_slack:.2f} ns, hold={hold_slack:.2f} ns)",
+                GREEN,
+            )
         else:
-            log(f"  [STA] Timing VIOLATED: WNS={wns:.2f} ns, TNS={tns:.2f} ns", RED)
-            if analysis.get("recommendations"):
-                for rec in analysis["recommendations"]:
-                    log(f"        → {rec}", YELLOW)
+            reasons = result.get("failure_reasons") or [
+                result.get("error", "extracted timing did not pass")
+            ]
+            log(
+                "  [STA] Extracted timing FAILED: " + "; ".join(reasons),
+                RED,
+            )
 
         span.set_attribute("timing_met", met)
-        span.set_attribute("wns_ns", wns)
+        if isinstance(wns, (int, float)):
+            span.set_attribute("wns_ns", wns)
         span.set_attribute("sign_off", sign_off)
+        span.set_attribute(
+            "extraction_complete", bool(result.get("extraction_complete"))
+        )
 
     write_graph_event(_pr(state), "Timing Sign-off", "graph_node_exit", {
         "block": block_name, "met": met, "wns_ns": wns, "tns_ns": tns,
         "sign_off": sign_off,
-        "assessment": analysis.get("assessment", ""),
+        "extraction_complete": result.get("extraction_complete", False),
+        "failure_reasons": result.get("failure_reasons", []),
         "graph": "backend",
     })
 
-    result = {
-        "met": met,
-        "wns_ns": wns,
-        "tns_ns": tns,
-        "setup_slack_ns": setup_slack,
-        "hold_slack_ns": hold_slack,
-        "max_clock_mhz": target_mhz,
-        "sign_off": sign_off,
-        "assessment": analysis.get("assessment", ""),
-        "power_assessment": analysis.get("power_assessment", ""),
-        "recommendations": analysis.get("recommendations", []),
-    }
+    result["target_clock_mhz"] = target_mhz
 
     out: dict = {
         "timing_result": result,
@@ -1960,10 +1929,27 @@ async def timing_signoff_node(state: BackendState) -> dict:
         # Clear a failure from an earlier attempt once this attempt passes.
         "previous_error": "",
     }
+    if result.get("spef_path"):
+        out["spef_path"] = result["spef_path"]
+    if isinstance(result.get("total_power_mw"), (int, float)):
+        out["power_result"] = {
+            **(state.get("power_result") or {}),
+            "success": met,
+            "total_power_mw": result["total_power_mw"],
+            "source": "post_route_extracted_sta",
+            "activity_basis": "active deployment defaults",
+        }
+    if isinstance(result.get("design_area_um2"), (int, float)):
+        out["place_result"] = {
+            **(state.get("place_result") or {}),
+            "design_area_um2": result["design_area_um2"],
+            "utilization": result.get("utilization_pct"),
+            "area_source": "post_route_sta_database",
+        }
     if not met:
+        reasons = result.get("failure_reasons") or [result.get("error", "")]
         out["previous_error"] = (
-            f"Timing sign-off {sign_off}: WNS={wns:.2f} ns; "
-            f"{analysis.get('assessment', '')}"
+            f"Extracted timing sign-off {sign_off}: " + "; ".join(reasons)
         )[:3000]
 
     return out
@@ -2516,12 +2502,30 @@ async def advance_block_node(state: BackendState) -> dict:
     _lvs = state.get("lvs_result") or {}
     drc_clean = _drc.get("clean", False) or _drc.get("waived", False)
     lvs_match = _lvs.get("match", False) or _lvs.get("waived", False)
-    timing_met = (state.get("timing_result") or {}).get("met", False)
+    timing = state.get("timing_result") or {}
+    # Completion backstop: a positive PnR estimate (or a legacy checkpoint)
+    # must never be mistaken for deterministic extracted timing evidence.
+    timing_met = (
+        timing.get("met") is True
+        and timing.get("source") == "extracted_rcx_sta"
+        and timing.get("extraction_complete") is True
+    )
+    integrated_design = bool(
+        state.get("flat_netlist_path") or state.get("integration_top_path")
+    )
+    chip_gate_ok = (
+        not integrated_design
+        or state.get("chip_gate_sim_ok") is True
+        or (
+            state.get("chip_gate_sim_ok") is None
+            and state.get("chip_gate_sim_status") == "disabled"
+        )
+    )
     from orchestrator.chassis.profile import declared_chassis
     core_only = declared_chassis(_pr(state)) is None
     precheck = state.get("precheck_result") or {}
     precheck_ok = precheck.get("pass", False)
-    all_pass = (drc_clean and lvs_match and timing_met
+    all_pass = (drc_clean and lvs_match and timing_met and chip_gate_ok
                 and (core_only or precheck_ok))
     # A waived check satisfies the gate but is NEVER silent: the waivers ride
     # in the block result and every report downstream.
@@ -2532,7 +2536,6 @@ async def advance_block_node(state: BackendState) -> dict:
     step_logs = dict(state.get("step_log_paths") or {})
 
     if all_pass:
-        timing = state.get("timing_result") or {}
         floorplan = state.get("floorplan_result") or {}
         route = state.get("route_result") or {}
         result = {
@@ -2543,10 +2546,16 @@ async def advance_block_node(state: BackendState) -> dict:
             "total_power_mw": power.get("total_power_mw", 0),
             "dynamic_power_mw": power.get("dynamic_power_mw", 0),
             "leakage_power_mw": power.get("leakage_power_mw", 0),
-            "timing_wns_ns": timing.get("wns_ns", 0),
-            "timing_tns_ns": timing.get("tns_ns", 0),
-            "setup_slack_ns": timing.get("setup_slack_ns", 0),
-            "hold_slack_ns": timing.get("hold_slack_ns", 0),
+            "timing_wns_ns": timing.get("wns_ns"),
+            "timing_tns_ns": timing.get("tns_ns"),
+            "setup_slack_ns": timing.get("setup_slack_ns"),
+            "hold_slack_ns": timing.get("hold_slack_ns"),
+            "timing_source": timing.get("source"),
+            "timing_sign_off": timing.get("sign_off"),
+            "timing_extraction_complete": timing.get(
+                "extraction_complete", False
+            ),
+            "timing_analysis_scope": timing.get("analysis_scope", ""),
             "design_area_um2": (state.get("place_result") or {}).get("design_area_um2", 0),
             "die_area_um2": floorplan.get("die_area_um2", 0),
             "utilization_pct": floorplan.get("utilization", 0),
@@ -2555,6 +2564,10 @@ async def advance_block_node(state: BackendState) -> dict:
             "drc_clean": drc_clean,
             "lvs_match": lvs_match,
             "timing_met": timing_met,
+            "chip_gate_sim_ok": state.get("chip_gate_sim_ok"),
+            "chip_gate_sim_status": state.get("chip_gate_sim_status", ""),
+            "chip_gate_sim_reason": state.get("chip_gate_sim_reason", ""),
+            "chip_gate_sim_accepted": chip_gate_ok,
             "wrapper_status": "not_applicable" if core_only else "complete",
             "precheck_status": "not_applicable" if core_only else "pass",
             "precheck_ok": None if core_only else True,
@@ -2586,6 +2599,19 @@ async def advance_block_node(state: BackendState) -> dict:
             "drc_clean": drc_clean,
             "lvs_match": lvs_match,
             "timing_met": timing_met,
+            "timing_source": timing.get("source"),
+            "timing_sign_off": timing.get("sign_off"),
+            "timing_extraction_complete": timing.get(
+                "extraction_complete", False
+            ),
+            "timing_wns_ns": timing.get("wns_ns"),
+            "timing_tns_ns": timing.get("tns_ns"),
+            "setup_slack_ns": timing.get("setup_slack_ns"),
+            "hold_slack_ns": timing.get("hold_slack_ns"),
+            "chip_gate_sim_ok": state.get("chip_gate_sim_ok"),
+            "chip_gate_sim_status": state.get("chip_gate_sim_status", ""),
+            "chip_gate_sim_reason": state.get("chip_gate_sim_reason", ""),
+            "chip_gate_sim_accepted": chip_gate_ok,
             "precheck_ok": precheck_ok,
             "wrapper_status": "not_applicable" if core_only else "failed",
             "precheck_status": "not_applicable" if core_only else "fail",
@@ -2655,12 +2681,28 @@ async def backend_complete_node(state: BackendState) -> dict:
             "drc_clean": blk.get("drc_clean", False),
             "lvs_match": blk.get("lvs_match", False),
             "timing_met": blk.get("timing_met", False),
+            "timing_source": blk.get("timing_source"),
+            "timing_sign_off": blk.get("timing_sign_off"),
+            "timing_extraction_complete": blk.get(
+                "timing_extraction_complete", False
+            ),
+            "chip_gate_sim_ok": blk.get("chip_gate_sim_ok"),
+            "chip_gate_sim_status": blk.get("chip_gate_sim_status", ""),
+            "chip_gate_sim_reason": blk.get("chip_gate_sim_reason", ""),
+            "chip_gate_sim_accepted": blk.get(
+                "chip_gate_sim_accepted", False
+            ),
             "precheck_ok": blk.get("precheck_ok", False),
         }
         if blk.get("success"):
             entry.update({
                 "total_power_mw": blk.get("total_power_mw", 0),
-                "timing_wns_ns": blk.get("timing_wns_ns", 0),
+                "timing_wns_ns": blk.get("timing_wns_ns"),
+                "wns_ns": blk.get("timing_wns_ns"),
+                "tns_ns": blk.get("timing_tns_ns"),
+                "setup_slack_ns": blk.get("setup_slack_ns"),
+                "hold_slack_ns": blk.get("hold_slack_ns"),
+                "timing_analysis_scope": blk.get("timing_analysis_scope", ""),
                 "gds_path": blk.get("gds_path", ""),
                 "routed_def_path": blk.get("routed_def_path", ""),
             })
@@ -2678,14 +2720,6 @@ async def backend_complete_node(state: BackendState) -> dict:
                     "design_area_um2": pnr_metrics.get("design_area_um2", 0),
                     "die_area_um2": pnr_metrics.get("die_area_um2", 0),
                     "utilization_pct": pnr_metrics.get("utilization_pct", 0),
-                    "wns_ns": pnr_metrics.get("wns_ns", 0),
-                    "tns_ns": pnr_metrics.get("tns_ns", 0),
-                    "setup_slack_ns": pnr_metrics.get("setup_slack_ns", 0),
-                    "hold_slack_ns": pnr_metrics.get("hold_slack_ns", 0),
-                    "total_power_mw": pnr_metrics.get("total_power_mw", 0),
-                    "dynamic_power_mw": pnr_metrics.get("dynamic_power_mw", 0),
-                    "leakage_power_mw": pnr_metrics.get("leakage_power_mw", 0),
-                    "timing_met": pnr_metrics.get("timing_met", False),
                 })
                 # DRC report -- apply the same signed-off hard-macro interior
                 # exclusion as the gate so the summary verdict is consistent.
