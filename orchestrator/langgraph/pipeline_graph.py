@@ -9166,7 +9166,13 @@ route_after_integration_dv_decision.__edge_labels__ = {
 
 
 def _load_ers_validation_context(project_root: str) -> tuple[str, int]:
-    """Load ERS context for validation DV and count likely RTL-checkable reqs."""
+    """Load ERS context and count unique declared requirement records.
+
+    Nested fields such as ``covers`` are traceability references, not new
+    requirements. A requirement object therefore contributes one identity and
+    its metadata is not recursively counted. Exact duplicate coded IDs or
+    uncoded requirement strings contribute once.
+    """
     ers_path = Path(project_root) / ".coresmith" / "ers_spec.json"
     if not ers_path.exists():
         return "", 0
@@ -9178,19 +9184,35 @@ def _load_ers_validation_context(project_root: str) -> tuple[str, int]:
         return raw, 0
 
     ers = data.get("ers", data)
-    req_count = 0
+    requirement_identities: set[str] = set()
+
+    def _identity(text: str) -> str:
+        normalized = " ".join(text.split())
+        coded = re.match(
+            r"^([A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)+)(?=\s*:|\s|$)",
+            normalized,
+        )
+        if coded:
+            return f"id:{coded.group(1).casefold()}"
+        return f"text:{normalized.casefold()}"
 
     def _count_value(value) -> None:
-        nonlocal req_count
         if isinstance(value, list):
             for item in value:
                 if isinstance(item, str):
-                    req_count += 1
+                    if item.strip():
+                        requirement_identities.add(_identity(item))
                 elif isinstance(item, dict):
-                    if item.get("requirement") or item.get("id"):
-                        req_count += 1
                     _count_value(item)
         elif isinstance(value, dict):
+            declared_id = value.get("id")
+            requirement = value.get("requirement")
+            if isinstance(declared_id, str) and declared_id.strip():
+                requirement_identities.add(_identity(declared_id))
+                return
+            if isinstance(requirement, str) and requirement.strip():
+                requirement_identities.add(_identity(requirement))
+                return
             for nested in value.values():
                 _count_value(nested)
 
@@ -9203,7 +9225,7 @@ def _load_ers_validation_context(project_root: str) -> tuple[str, int]:
     ):
         _count_value(ers.get(key))
 
-    return json.dumps(data, indent=2), req_count
+    return json.dumps(data, indent=2), len(requirement_identities)
 
 
 # ---------------------------------------------------------------------------
@@ -10077,7 +10099,11 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
 
             log(f"\n{'='*60}", GREEN)
             log("  VALIDATION DV PASSED", GREEN)
-            log(f"  {test_count} tests, ERS requirements covered", GREEN)
+            log(
+                f"  {test_count} tests; {requirement_count} unique ERS "
+                "requirement records supplied as validation context",
+                GREEN,
+            )
             log(f"{'='*60}\n", GREEN)
             write_graph_event(pr, "Validation DV", "graph_node_exit", {
                 "passed": True,
