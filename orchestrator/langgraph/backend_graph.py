@@ -1501,7 +1501,7 @@ async def run_pnr_node(state: BackendState) -> dict:
 
     return {
         "floorplan_result": {"success": True, "design_area_um2": result.get("design_area_um2", 0)},
-        "place_result": {"success": True},
+        "place_result": {"success": True, "design_area_um2": result.get("design_area_um2", 0)},
         "cts_result": {"success": True},
         "route_result": {
             "success": True,
@@ -1869,8 +1869,9 @@ async def timing_signoff_node(state: BackendState) -> dict:
 
     wns = timing.get("wns_ns", 0.0)
     tns = timing.get("tns_ns", 0.0)
-    setup_slack = timing.get("setup_slack_ns", 0.0)
-    hold_slack = timing.get("hold_slack_ns", 0.0)
+    # Missing setup/hold measurements are unknown, not zero-slack results.
+    setup_slack = timing.get("setup_slack_ns")
+    hold_slack = timing.get("hold_slack_ns")
 
     with _tracer.start_as_current_span(f"Timing Sign-off [{block_name}]") as span:
         span.set_attribute("block_name", block_name)
@@ -1888,7 +1889,8 @@ async def timing_signoff_node(state: BackendState) -> dict:
             "total_power_mw": power.get("total_power_mw", 0),
             "dynamic_power_mw": power.get("dynamic_power_mw", 0),
             "leakage_power_mw": power.get("leakage_power_mw", 0),
-            "design_area_um2": (state.get("place_result") or {}).get("design_area_um2", 0),
+            "design_area_um2": (state.get("place_result") or {}).get(
+                "design_area_um2", floorplan.get("design_area_um2", 0)),
             "die_area_um2": floorplan.get("die_area_um2", 0),
             "utilization_pct": floorplan.get("utilization", 0),
             "prior_failure": state.get("previous_error", "None"),
@@ -1897,6 +1899,12 @@ async def timing_signoff_node(state: BackendState) -> dict:
 
         sign_off = analysis.get("sign_off", "FAIL")
         met = analysis.get("timing_met", wns >= 0)
+
+        # The categorical sign-off verdict is authoritative. An agent may
+        # report non-negative estimated slack while rejecting sign-off because
+        # evidence is incomplete; never pass that contradictory response.
+        if sign_off == "FAIL":
+            met = False
 
         # CONDITIONAL_PASS is met ONLY with non-negative slack, a recorded
         # waiver, or an explicit operator opt-in (A-Fix 2h) -- otherwise it is
@@ -1946,9 +1954,17 @@ async def timing_signoff_node(state: BackendState) -> dict:
         "recommendations": analysis.get("recommendations", []),
     }
 
-    out: dict = {"timing_result": result, "phase": "signoff"}
+    out: dict = {
+        "timing_result": result,
+        "phase": "signoff",
+        # Clear a failure from an earlier attempt once this attempt passes.
+        "previous_error": "",
+    }
     if not met:
-        out["previous_error"] = f"Timing violated: WNS={wns:.2f} ns"
+        out["previous_error"] = (
+            f"Timing sign-off {sign_off}: WNS={wns:.2f} ns; "
+            f"{analysis.get('assessment', '')}"
+        )[:3000]
 
     return out
 
