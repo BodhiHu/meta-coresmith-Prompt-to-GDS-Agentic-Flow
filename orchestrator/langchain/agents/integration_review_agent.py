@@ -53,18 +53,22 @@ def _endpoint_block(endpoint: Any) -> str | None:
 def _filter_connections_for_blocks(
     block_diagram: dict[str, Any],
     block_names: list[str],
+    context_block_names: list[str] | None = None,
 ) -> tuple[dict[str, Any], int]:
-    """Return a copy containing only connections fully inside block_names.
+    """Keep current-tier edges whose two specifications are available.
 
     The pipeline reviews one tier at a time. Architecture diagrams can contain
     edges to later-tier blocks whose uArch specs have not been generated yet;
-    those edges are not actionable during the current tier review.
+    those edges are not actionable during the current tier review. Existing
+    adjacent specs from earlier tiers are read-only context, so their edges
+    must be reviewed when the current endpoint becomes available.
     """
     review_blocks = set(block_names)
+    available_blocks = review_blocks | set(context_block_names or [])
     filtered = dict(block_diagram)
     filtered_blocks = []
     for block in block_diagram.get("blocks", []):
-        if not isinstance(block, dict) or block.get("name") in review_blocks:
+        if not isinstance(block, dict) or block.get("name") in available_blocks:
             filtered_blocks.append(block)
     filtered["blocks"] = filtered_blocks
 
@@ -76,7 +80,8 @@ def _filter_connections_for_blocks(
             continue
         src = _endpoint_block(conn.get("from") or conn.get("source") or conn.get("src"))
         dst = _endpoint_block(conn.get("to") or conn.get("dest") or conn.get("destination"))
-        if src in review_blocks and dst in review_blocks:
+        if (src in available_blocks and dst in available_blocks
+                and (src in review_blocks or dst in review_blocks)):
             kept.append(conn)
         else:
             deferred += 1
@@ -226,11 +231,34 @@ class IntegrationReviewAgent:
             bd_path = root / ".coresmith" / "block_diagram.json"
             review_bd_path = bd_path
             deferred_connection_count = 0
+            context_specs: dict[str, Path] = {}
+            context_before: dict[Path, bytes] = {}
             if bd_path.exists():
                 try:
                     block_diagram = json.loads(bd_path.read_text())
+                    current = set(block_names)
+                    neighbors = set()
+                    for conn in block_diagram.get("connections", []):
+                        if not isinstance(conn, dict):
+                            continue
+                        endpoints = {
+                            _endpoint_block(conn.get("from") or conn.get("source") or conn.get("src")),
+                            _endpoint_block(conn.get("to") or conn.get("dest") or conn.get("destination")),
+                        }
+                        if endpoints & current:
+                            neighbors.update(endpoints - current - {None})
+                    for name in sorted(neighbors):
+                        src = root / "arch" / "uarch_specs" / f"{name}.md"
+                        if not src.is_file():
+                            continue
+                        dst = review_dir / "context" / f"{name}.md"
+                        dst.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(src, dst)
+                        context_specs[name] = dst
+                        context_before[dst] = dst.read_bytes()
+                        context_before[src] = src.read_bytes()
                     filtered, deferred_connection_count = _filter_connections_for_blocks(
-                        block_diagram, block_names
+                        block_diagram, block_names, list(context_specs)
                     )
                     review_bd_path = root / ".coresmith" / "integration_review_block_diagram.json"
                     review_bd_path.write_text(json.dumps(filtered, indent=2))
@@ -246,6 +274,17 @@ class IntegrationReviewAgent:
             for sp in spec_paths:
                 parts.append(f"- {sp}")
 
+            if context_specs:
+                parts.extend([
+                    "", "## Read-only Adjacent uArch Specs",
+                    "These existing specs belong to other tiers. Read them to check both "
+                    "ends of the connections. Do not edit them or their canonical originals. "
+                    "Only the current-tier review copies listed above may be edited. "
+                    "If a fix requires changing another tier, report it as an unresolved "
+                    "issue requiring that block's re-verification; do not claim it fixed.",
+                ])
+                parts.extend(f"- {name}: {path}" for name, path in context_specs.items())
+
             parts.append("")
             parts.append("## Authoritative Interface Contracts")
             from orchestrator.langgraph.contract_conformance import format_contract_port_table
@@ -253,7 +292,7 @@ class IntegrationReviewAgent:
             from .contract_lookup import format_block_contracts_prompt, load_block_contracts
             from .rtl_generator import _constraint_precedence_line
             parts.append(_constraint_precedence_line())
-            for name in block_names:
+            for name in [*block_names, *context_specs]:
                 table = format_contract_port_table(project_root, name)
                 if table:
                     parts.append(f"### {name}\n{table}")
@@ -268,12 +307,11 @@ class IntegrationReviewAgent:
             )
             parts.append("")
             parts.append("## Architecture Files")
-            parts.append(f"- Current-tier block diagram connections: {review_bd_path}")
+            parts.append(f"- Reviewable block diagram connections (including available adjacent tiers): {review_bd_path}")
             if deferred_connection_count:
                 parts.append(
-                    f"- Deferred cross-tier/future-tier connections: {deferred_connection_count}. "
-                    "Do not count these as current-tier issues because the connected "
-                    "uArch specs do not exist yet."
+                    f"- Connections outside this review's available scope: {deferred_connection_count}. "
+                    "These either lack a generated endpoint spec or do not touch the current tier."
                 )
 
             ers_path = root / "arch" / "ers_spec.md"
@@ -295,11 +333,12 @@ class IntegrationReviewAgent:
 
             parts.append("")
             parts.append(
-                "Check every connection in the current-tier block diagram. For each, verify "
+                "Check every connection in the reviewable block diagram. For each, verify "
                 "port widths, directions, protocols, and clock/reset naming match "
                 "across connected blocks. Do not report missing ports or missing specs "
-                "for deferred cross-tier/future-tier connections. If you find mismatches, "
-                "edit the uArch spec files on disk to fix them. Report a summary of findings."
+                "for connections outside the available scope. If you find mismatches, "
+                "edit only current-tier review copies to fix them. Adjacent context specs "
+                "are read-only. Report a summary of findings and unresolved issues."
             )
 
             user_message = "\n".join(parts)
@@ -309,6 +348,10 @@ class IntegrationReviewAgent:
                 prompt=user_message,
                 run_name="Integration Review",
             )
+
+            for path, before in context_before.items():
+                if not path.exists() or path.read_bytes() != before:
+                    raise ValueError(f"Integration review changed read-only adjacent spec: {path}")
 
             summary = content.strip() if content else "No issues found."
 

@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
@@ -46,3 +47,64 @@ async def test_no_uarch_check_call_before_specs_exist(tmp_path, monkeypatch):
                             interface_contracts=contracts)
     names = [c.kwargs["run_name"] for c in call.call_args_list]
     assert "constraint_subagent:cross_spec_contract_adherence" not in names
+
+
+def _seed_cross_tier_review(root):
+    specs = root / "arch" / "uarch_specs"
+    specs.mkdir(parents=True)
+    (specs / "core.md").write_text("# current CPU spec")
+    (specs / "spi.md").write_text("# previously verified SPI spec")
+    (root / ".coresmith").mkdir()
+    diagram = {
+        "blocks": [{"name": n} for n in ("core", "spi", "future")],
+        "connections": [
+            {"from": "core.req", "to": "spi.req"},
+            {"from": "spi.rsp", "to": "core.rsp"},
+            {"from": "core.out", "to": "future.in"},
+        ],
+    }
+    (root / ".coresmith" / "block_diagram.json").write_text(json.dumps(diagram))
+    return diagram
+
+
+@pytest.mark.asyncio
+async def test_review_includes_available_cross_tier_edges_without_adopting_neighbor(tmp_path):
+    from orchestrator.langchain.agents.integration_review_agent import IntegrationReviewAgent
+
+    diagram = _seed_cross_tier_review(tmp_path)
+    agent = IntegrationReviewAgent()
+
+    async def review(**kwargs):
+        prompt = kwargs["prompt"]
+        context = tmp_path / "arch/uarch_specs_review/context/spi.md"
+        assert str(context) in prompt and "read-only" in prompt.lower()
+        assert context.read_text() == "# previously verified SPI spec"
+        filtered = json.loads((tmp_path / ".coresmith/integration_review_block_diagram.json").read_text())
+        assert filtered["connections"] == diagram["connections"][:2]
+        assert {b["name"] for b in filtered["blocks"]} == {"core", "spi"}
+        return '{"issues_found": 0, "issues_fixed": 0}'
+
+    agent.llm.call = AsyncMock(side_effect=review)
+    result = await agent.review(["core"], str(tmp_path))
+    assert set(result["reviewed_specs"]) == {"core"}
+    assert result["edited_blocks"] == []
+    assert (tmp_path / "arch/uarch_specs/spi.md").read_text() == "# previously verified SPI spec"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("relative", [
+    "arch/uarch_specs_review/context/spi.md", "arch/uarch_specs/spi.md",
+])
+async def test_review_rejects_mutated_adjacent_spec(tmp_path, relative):
+    from orchestrator.langchain.agents.integration_review_agent import IntegrationReviewAgent
+
+    _seed_cross_tier_review(tmp_path)
+    agent = IntegrationReviewAgent()
+
+    async def corrupt_context(**kwargs):
+        Path(tmp_path / relative).write_text("unverified replacement")
+        return '{"issues_found": 0, "issues_fixed": 0}'
+
+    agent.llm.call = AsyncMock(side_effect=corrupt_context)
+    with pytest.raises(ValueError, match="read-only adjacent spec"):
+        await agent.review(["core"], str(tmp_path))
