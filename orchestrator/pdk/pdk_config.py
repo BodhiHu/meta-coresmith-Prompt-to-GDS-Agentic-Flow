@@ -36,6 +36,10 @@ def _cells_from_dict(data: dict[str, Any] | None) -> "CellConfig":
         clkbuf_root=d.get("clkbuf_root", ""),
         fillers=list(d.get("fillers", []) or []),
         dont_use=list(d.get("dont_use", []) or []),
+        tie_high_cell=d.get("tie_high_cell", ""),
+        tie_high_port=d.get("tie_high_port", ""),
+        tie_low_cell=d.get("tie_low_cell", ""),
+        tie_low_port=d.get("tie_low_port", ""),
     )
 
 
@@ -94,6 +98,10 @@ class CellConfig:
     clkbuf_root: str = ""        # CTS root buffer
     fillers: list[str] = field(default_factory=list)       # filler/decap order
     dont_use: list[str] = field(default_factory=list)      # resizer exclusions
+    tie_high_cell: str = ""    # constant-one cell master (Yosys hilomap)
+    tie_high_port: str = ""    # constant-one output pin
+    tie_low_cell: str = ""     # constant-zero cell master
+    tie_low_port: str = ""     # constant-zero output pin
 
 
 @dataclass

@@ -345,6 +345,111 @@ def describe_synth_attempt_history(history: list[dict]) -> str:
 # Flat Top-Level Synthesis (Yosys)
 # ---------------------------------------------------------------------------
 
+_LITERAL_CELL_PIN_RE = re.compile(
+    r"\.\s*([A-Za-z_][A-Za-z0-9_$]*)\s*\(\s*"
+    r"(\d+\s*'\s*[bBdDhH]\s*[0]+|"
+    r"\d+\s*'\s*[bBdDhH]\s*[1]+)\s*\)"
+)
+
+
+def verify_physical_constant_mapping(
+    script_path: str | Path,
+    netlist_path: str | Path,
+    hilomap_command: str,
+    tie_cells: tuple[str, ...],
+) -> dict:
+    """Fail closed when synthesis leaves literal constants on cell pins.
+
+    A logical ``.D(1'h0)`` simulates correctly but has no physical driver for
+    routing or extraction. The synthesis script must run the deployment's exact
+    hilomap command after its final ABC pass and before writing the netlist, and
+    the emitted netlist must contain no literal-valued named cell connection.
+    Tie instances are reported for provenance but are not required when the
+    design contains no constant sinks.
+    """
+    script = Path(script_path)
+    netlist = Path(netlist_path)
+    if not hilomap_command.strip():
+        return {
+            "ok": False,
+            "reason": "active deployment has no physical constant-cell mapping",
+            "literal_pin_constants": [],
+            "tie_instance_count": 0,
+        }
+    if not script.is_file():
+        return {
+            "ok": False,
+            "reason": f"synthesis script missing: {script}",
+            "literal_pin_constants": [],
+            "tie_instance_count": 0,
+        }
+    if not netlist.is_file():
+        return {
+            "ok": False,
+            "reason": f"synthesized netlist missing: {netlist}",
+            "literal_pin_constants": [],
+            "tie_instance_count": 0,
+        }
+
+    commands: list[str] = []
+    for raw_line in script.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw_line.split("#", 1)[0]
+        commands.extend(
+            " ".join(part.split())
+            for part in line.split(";") if part.strip()
+        )
+    expected = " ".join(hilomap_command.split())
+    hilomap_indexes = [i for i, command in enumerate(commands) if command == expected]
+    abc_indexes = [i for i, command in enumerate(commands) if command.startswith("abc ")]
+    write_indexes = [
+        i for i, command in enumerate(commands)
+        if command.startswith("write_verilog ")
+    ]
+    ordered = bool(
+        hilomap_indexes and abc_indexes and write_indexes
+        and max(abc_indexes) < max(hilomap_indexes) < min(write_indexes)
+    )
+    if not ordered:
+        return {
+            "ok": False,
+            "reason": (
+                "synthesis script must run the deployment hilomap command "
+                "after final abc and before write_verilog: " + expected
+            ),
+            "literal_pin_constants": [],
+            "tie_instance_count": 0,
+        }
+
+    text = netlist.read_text(encoding="utf-8", errors="replace")
+    literals = [
+        {"pin": match.group(1), "value": "".join(match.group(2).split())}
+        for match in _LITERAL_CELL_PIN_RE.finditer(text)
+    ]
+    unique_tie_cells = tuple(dict.fromkeys(cell for cell in tie_cells if cell))
+    tie_count = sum(
+        len(re.findall(r"(?<![A-Za-z0-9_$])" + re.escape(cell) + r"\s+", text))
+        for cell in unique_tie_cells
+    )
+    if literals:
+        sample = ", ".join(
+            f".{item['pin']}({item['value']})" for item in literals[:8]
+        )
+        return {
+            "ok": False,
+            "reason": (
+                f"synthesized netlist retains {len(literals)} literal constant "
+                f"cell-pin connection(s): {sample}"
+            ),
+            "literal_pin_constants": literals,
+            "tie_instance_count": tie_count,
+        }
+    return {
+        "ok": True,
+        "reason": "deployment hilomap ran after abc; no literal cell-pin constants remain",
+        "literal_pin_constants": [],
+        "tie_instance_count": tie_count,
+    }
+
 def generate_flat_synthesis_script(
     design_name: str,
     top_rtl_path: str,
@@ -378,13 +483,22 @@ def generate_flat_synthesis_script(
     if not (top_module and module_declared_in(top_rtl_path, top_module)):
         top_module = Path(top_rtl_path).stem
 
+    from orchestrator.pdk.registry import get_deployment
+    deployment = get_deployment()
+    hilomap_command = deployment.yosys_hilomap_command()
+    if not hilomap_command:
+        raise ValueError(
+            f"deployment '{deployment.name}' does not declare physical "
+            "constant cells (cells.tie_high_* / cells.tie_low_*)"
+        )
+
     # --- SRAM macro awareness (5th fix) ---------------------------------
     # If the RTL instantiates a pre-built macro, read its verilog as a
     # blackbox (so `hierarchy -check` resolves the instance instead of
-    # erroring) + its liberty, and map constants to tie cells so the macro's
-    # tie-offs don't leave unroutable one_/zero_ nets. Macro blackbox reads
+    # erroring) + its liberty. Physical constant mapping is required for every
+    # design below, whether or not a macro is present. Macro blackbox reads
     # MUST precede the design reads.
-    macro_bb = macro_libs = macro_hilomap = ""
+    macro_bb = macro_libs = _macro_hilomap = ""
     try:
         from orchestrator.langgraph.macro_backend import synth_injection
         from orchestrator.langgraph.macro_registry import (
@@ -398,13 +512,13 @@ def generate_flat_synthesis_script(
             if Path(rf).exists():
                 for mi in detect_instantiated_macros(rf, registry):
                     used[mi.name] = mi
-        macro_bb, macro_libs, macro_hilomap = synth_injection(list(used.values()))
+        macro_bb, macro_libs, _macro_hilomap = synth_injection(list(used.values()))
     except Exception as exc:  # never let macro logic break std-cell synth
         log(f"  [MACRO] synth injection skipped: {exc}", YELLOW)
 
     bb_block = (macro_bb + "\n") if macro_bb else ""
     lib_block = (macro_libs + "\n") if macro_libs else ""
-    hilomap_block = (macro_hilomap + "\n") if macro_hilomap else ""
+    hilomap_block = hilomap_command + "\n"
 
     script = f"""# Flat top-level synthesis for {design_name} (Sky130 HD)
 # Generated by coresmith backend_helpers.generate_flat_synthesis_script

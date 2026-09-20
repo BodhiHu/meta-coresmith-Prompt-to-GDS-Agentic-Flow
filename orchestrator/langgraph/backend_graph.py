@@ -723,6 +723,43 @@ async def flat_top_synthesis_node(state: BackendState) -> dict:
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     result_json_path = str(Path(output_dir) / "synth_result.json")
 
+    # Verilog constants have no physical driver. Require the active deployment
+    # to name real tie masters/pins before asking the synthesis driver to run;
+    # an unsupported BYO-PDK must fail here with an actionable capability error
+    # rather than reaching LVS with floating extracted sinks.
+    try:
+        from orchestrator.pdk.registry import get_deployment
+        _deployment = get_deployment()
+        _constant_mapping_command = _deployment.yosys_hilomap_command()
+        _tie_cells = (
+            _deployment.pdk.cells.tie_high_cell,
+            _deployment.pdk.cells.tie_low_cell,
+        )
+    except Exception as _exc:  # noqa: BLE001
+        _constant_mapping_command = ""
+        _tie_cells = ()
+        _constant_mapping_error = str(_exc)
+    else:
+        _constant_mapping_error = ""
+    if not _constant_mapping_command:
+        _reason = (
+            "Physical synthesis requires deployment-configured constant cells "
+            "(cells.tie_high_cell/tie_high_port and "
+            "cells.tie_low_cell/tie_low_port) for Yosys hilomap"
+        )
+        if _constant_mapping_error:
+            _reason += f": {_constant_mapping_error}"
+        write_graph_event(pr, "Flat Top Synthesis", "graph_node_exit", {
+            "design_name": design_name, "success": False,
+            "constant_mapping_missing": True, "graph": "backend",
+        })
+        return {
+            "phase": "synth",
+            "previous_error": _reason,
+            "flat_netlist_path": "",
+            "flat_sdc_path": "",
+        }
+
     _input_paths = rec["sources"]
     input_lines = [f"- Selected source: `{path}`" for path in _input_paths]
 
@@ -840,6 +877,7 @@ async def flat_top_synthesis_node(state: BackendState) -> dict:
                 "result_json_path": result_json_path,
                 "sram_macro_directive": _sram_macro_directive or "(none)",
                 "sram_wrapper_lib": _sram_wrapper_lib or "(already in inputs)",
+                "constant_mapping_command": _constant_mapping_command,
             },
             result_json_path=result_json_path,
             # the driver retries Yosys internally -- its own summary is the only
@@ -884,6 +922,49 @@ async def flat_top_synthesis_node(state: BackendState) -> dict:
 
     if result.get("success"):
         _netlist = result.get("netlist_path", "")
+        from orchestrator.langgraph.backend_helpers import (
+            verify_physical_constant_mapping,
+        )
+        _constant_check = verify_physical_constant_mapping(
+            Path(output_dir) / f"synth_{design_name}.ys",
+            _netlist,
+            _constant_mapping_command,
+            _tie_cells,
+        )
+        result["physical_constant_mapping"] = _constant_check
+        try:
+            _persisted_result = json.loads(
+                Path(result_json_path).read_text(encoding="utf-8")
+            )
+            if not isinstance(_persisted_result, dict):
+                _persisted_result = {}
+            _persisted_result["physical_constant_mapping"] = _constant_check
+            Path(result_json_path).write_text(
+                json.dumps(_persisted_result, indent=2), encoding="utf-8"
+            )
+        except (OSError, json.JSONDecodeError):
+            pass
+        if not _constant_check["ok"]:
+            _reason = (
+                "Physical constant mapping validation failed: "
+                + _constant_check["reason"]
+            )
+            log(f"  [FLAT-SYNTH] {_reason}", RED)
+            write_graph_event(pr, "Flat Top Synthesis", "graph_node_exit", {
+                "design_name": design_name, "success": False,
+                "constant_mapping_failed": True,
+                "literal_pin_constants": len(
+                    _constant_check.get("literal_pin_constants", [])
+                ),
+                "graph": "backend",
+            })
+            return {
+                "phase": "synth",
+                "synth_attempt_history": _synth_history,
+                "previous_error": _reason,
+                "flat_netlist_path": "",
+                "flat_sdc_path": "",
+            }
         # Part C: bind each cs_mem_macro_shell / cs_rom_macro_shell leaf that
         # Part B emitted to a CONCRETE on-disk macro (pre-built, OpenRAM-
         # composed/generated), reusing the frontend resolver + the PDK. A

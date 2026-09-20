@@ -19,6 +19,8 @@ tool CLI, iterate on any errors until it succeeds, then report structured result
 - Prior failure: {prior_failure}
 - Constraints: {constraints}
 - Liberty (for the script's dfflibmap/abc lines): `{liberty_path}`
+- Physical constant mapping (from the active deployment):
+  `{constant_mapping_command}`
 
 ## Input Files
 
@@ -71,6 +73,11 @@ CS="${CORESMITH_CLI:-coresmith}"
    - Set `hierarchy -check -top {design_name}`
    - Follow the deployment's map-to-cells recipe (dfflibmap / abc against
      `{liberty_path}`) from the Tool notes
+   - Immediately AFTER the final `abc` and BEFORE `clean`, `opt_clean`, or
+     `write_verilog`, run the exact deployment-supplied physical constant
+     mapping command above. This is mandatory even without SRAM macros: a
+     literal such as `.D(1'h0)` has no routed physical driver and will fail LVS.
+     Do not substitute a PDK-specific cell name of your own.
    - Write the netlist to `{output_dir}/{design_name}_netlist.v`
    - Print a final `stat` so the cell count and area can be parsed
 

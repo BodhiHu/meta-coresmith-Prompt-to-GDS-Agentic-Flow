@@ -107,7 +107,8 @@ _CALLER_KEYS: dict[str, set[str]] = {
         "design_name", "target_clock_mhz", "period_ns", "liberty_path",
         "output_dir", "input_files", "input_delay_ns", "output_delay_ns",
         "attempt", "prior_failure", "constraints", "result_json_path",
-        "sram_macro_directive", "sram_wrapper_lib"},
+        "sram_macro_directive", "sram_wrapper_lib",
+        "constant_mapping_command"},
     "backend_pnr_llm.md": {
         "design_name", "target_clock_mhz", "period_ns", "gate_count",
         "tech_lef", "cell_lef", "liberty_path", "openroad_bin", "netlist_path",

@@ -310,6 +310,39 @@ class Deployment(ABC):
         """Macro power/ground pin + preferred lib corner defaults."""
         return {"power_pin": "", "ground_pin": "", "lib_corner": ""}
 
+    def yosys_hilomap_command(self) -> str:
+        """Return this PDK's physical constant-cell mapping command.
+
+        Physical implementation cannot route Verilog literal constants to cell
+        pins. A deployment therefore declares both tie masters and output pins;
+        an absent declaration is an unsupported capability, while a partial
+        declaration is a configuration error. BYO-PDK deployments may override
+        this method when their Yosys mapping needs a different command.
+        """
+        cells = self.pdk.cells
+        values = (
+            cells.tie_high_cell, cells.tie_high_port,
+            cells.tie_low_cell, cells.tie_low_port,
+        )
+        if not any(values):
+            return ""
+        if not all(values):
+            missing = [
+                name for name, value in zip(
+                    ("tie_high_cell", "tie_high_port",
+                     "tie_low_cell", "tie_low_port"),
+                    values,
+                ) if not value
+            ]
+            raise ValueError(
+                f"deployment '{self.name}' has incomplete constant-cell "
+                f"mapping; missing cells.{', cells.'.join(missing)}"
+            )
+        return (
+            f"hilomap -hicell {cells.tie_high_cell} {cells.tie_high_port} "
+            f"-locell {cells.tie_low_cell} {cells.tie_low_port}"
+        )
+
     def gds_layer_map(self) -> dict[tuple[int, int], Any] | None:
         """GDS (layer, datatype) -> render params for the 3D/2D viewer.
         Default ``None`` -> the viewer uses its built-in default map."""

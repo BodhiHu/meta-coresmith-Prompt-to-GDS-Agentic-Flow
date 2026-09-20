@@ -111,6 +111,14 @@ def test_pdk_config_carries_cells_and_pnr(tmp_path, monkeypatch):
     pdk = dep.pdk
     assert pdk.cells.tapcell == f"{_STD}__tapvpwrvgnd_1"
     assert pdk.cells.clkbuf_root == f"{_STD}__clkbuf_8"
+    assert pdk.cells.tie_high_cell == f"{_STD}__conb_1"
+    assert pdk.cells.tie_high_port == "HI"
+    assert pdk.cells.tie_low_cell == f"{_STD}__conb_1"
+    assert pdk.cells.tie_low_port == "LO"
+    assert dep.yosys_hilomap_command() == (
+        f"hilomap -hicell {_STD}__conb_1 HI "
+        f"-locell {_STD}__conb_1 LO"
+    )
     assert len(pdk.cells.fillers) == 7
     assert len(pdk.pnr.tracks) == 6
     # A float-fragile token must round-trip verbatim (1.70, not 1.7).
@@ -120,5 +128,7 @@ def test_pdk_config_carries_cells_and_pnr(tmp_path, monkeypatch):
     from orchestrator.pdk.pdk_config import PDKConfig
     rt = PDKConfig.from_dict(pdk.to_dict())
     assert rt.cells.tapcell == pdk.cells.tapcell
+    assert rt.cells.tie_low_cell == pdk.cells.tie_low_cell
+    assert rt.cells.tie_low_port == pdk.cells.tie_low_port
     assert rt.pnr.tracks == pdk.pnr.tracks
     assert rt.pnr.pdn == pdk.pnr.pdn

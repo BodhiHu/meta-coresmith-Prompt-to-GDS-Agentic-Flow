@@ -718,6 +718,13 @@ class TestFlatSynthAttemptHistoryWiring:
     def _syn_dir(self, tmp_path):
         d = tmp_path / "syn" / "output" / "chip_top"
         d.mkdir(parents=True, exist_ok=True)
+        (d / "synth_chip_top.ys").write_text(
+            "abc -liberty cells.lib\n"
+            "hilomap -hicell sky130_fd_sc_hd__conb_1 HI "
+            "-locell sky130_fd_sc_hd__conb_1 LO\n"
+            "clean\n"
+            "write_verilog chip_top_netlist.v\n"
+        )
         return d
 
     @pytest.mark.asyncio

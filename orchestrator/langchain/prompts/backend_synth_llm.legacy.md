@@ -7,6 +7,8 @@ succeeds, then report structured results.
 
 - Liberty: `{liberty_path}`
 - Yosys binary: `yosys` (available on PATH)
+- Physical constant mapping (from the active deployment):
+  `{constant_mapping_command}`
 
 ## Design Context
 
@@ -58,7 +60,11 @@ All outputs go in: `{output_dir}/`
      here, BEFORE `hierarchy`, when it is not `(none)`
    - Sets `hierarchy -check -top {design_name}`
    - Runs `proc; opt; fsm; opt; memory; opt`
-   - Maps to Sky130 HD cells: `techmap; opt; dfflibmap -liberty $lib; abc -liberty $lib; clean; opt_clean -purge`
+   - Maps to cells: `techmap; opt; dfflibmap -liberty $lib; abc -liberty $lib`
+   - Immediately after the final `abc`, runs the exact physical constant
+     mapping command above, before `clean`, `opt_clean`, or `write_verilog`.
+     A literal cell-pin connection such as `.D(1'h0)` is not physically routed.
+   - Then runs `clean; opt_clean -purge`
    - Writes netlist: `write_verilog -noattr {output_dir}/{design_name}_netlist.v`
    - Generates stats: `stat -liberty $lib`
 
