@@ -93,14 +93,18 @@ def _build_request(verb: str, args):
 
     inputs: dict[str, Path] = {}
     params: dict = {}
+    # Absolutize file arguments against the INVOKER's cwd. The engine helpers
+    # run tools rooted at PROJECT_ROOT (so project-relative $readmemh paths
+    # inside RTL resolve), which would silently re-anchor a shell-relative
+    # --rtl/--script to the wrong directory.
     rtls = getattr(args, "rtl", None)
     if rtls:
-        inputs["rtl"] = Path(rtls[0])
-        params["rtls"] = [str(Path(r)) for r in rtls]
+        inputs["rtl"] = Path(rtls[0]).resolve()
+        params["rtls"] = [str(Path(r).resolve()) for r in rtls]
     for key in ("script", "netlist", "sdc", "gds", "spice"):
         val = getattr(args, key, None)
         if val:
-            inputs[key] = Path(val)
+            inputs[key] = Path(val).resolve()
     # gen_macro carries scalar params, not file inputs.
     for key in ("width", "depth", "ports"):
         val = getattr(args, key, None)

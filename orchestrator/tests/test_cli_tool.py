@@ -216,3 +216,21 @@ def test_smoke_run_synth_generic(tmp_path):
     # PR3: the Yosys 0.65 box-format ("N cells") fix means gate_count is now the
     # recovered cell count, not a false 0.
     assert out["metrics"]["gate_count"] > 0, out["metrics"]
+
+
+class TestRelativePathAnchoring:
+    """Shell-relative --rtl must survive the engine's cwd=PROJECT_ROOT tool
+    invocation (main's readmemh fix re-anchors relative paths there)."""
+
+    def test_rtl_resolved_against_invoker_cwd(self, tmp_path, monkeypatch):
+        from orchestrator.harness import cli_tool
+
+        rtl = tmp_path / "unit.v"
+        rtl.write_text("module unit(input a, output y); assign y = a; endmodule\n")
+        monkeypatch.chdir(tmp_path)
+
+        ns = type("NS", (), {"rtl": ["unit.v"], "design": "unit",
+                             "out_dir": None, "timeout_s": None})()
+        req = cli_tool._build_request("run_lint", ns)
+        assert req.inputs["rtl"].is_absolute()
+        assert req.inputs["rtl"] == rtl.resolve()
