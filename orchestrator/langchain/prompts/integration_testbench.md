@@ -231,9 +231,12 @@ COCOTB RULES (same as per-block):
       await FallingEdge(dut.clk)
       dut.s_axis_tvalid.value = 1
       dut.s_axis_tdata.value = data
+      await ReadOnly()  # settle after drives, before accepting edge
+      accepted_at_next_edge = int(dut.s_axis_tready.value)
       await RisingEdge(dut.clk)
-      if int(dut.s_axis_tvalid.value) and int(dut.s_axis_tready.value):
+      if accepted_at_next_edge:
           accepted += 1
+          await FallingEdge(dut.clk)
           dut.s_axis_tvalid.value = 0
 
   Keep `tvalid` asserted across cycles until a sampled handshake occurs. Do
@@ -241,9 +244,15 @@ COCOTB RULES (same as per-block):
   data unless `tvalid` was already stable before the edge. This pattern is
   for INTERNAL AXI-Stream ports only.
 
-- PUBLISHED STREAM SAMPLER (the chip's top-level stream ports in_*/out_* ONLY):
-  drive and sample these ports exactly as the published grader does, never with
-  the internal AXI-Stream helper above:
+- PUBLISHED STREAM SAMPLER: Use this exception ONLY when an authoritative
+  published grading contract explicitly requires post-edge acceptance sampling.
+  Top-level placement or in_*/out_* port names alone do not establish that rule.
+  Otherwise capture settled valid/ready and payload BEFORE the accepting rising
+  edge, count each saved handshake once at that edge, and observe newly produced
+  status/retirement state after RisingEdge + ReadOnly. Activate monitors before
+  releasing reset, or keep ready low until they are active. Do not skip cycles
+  in which a real transfer or retirement could occur.
+  If that explicit post-edge contract applies, reproduce its sampler:
 
       # drive in_valid/in_data/in_last and out_ready for this cycle (writable phase)
       await RisingEdge(dut.clk)
@@ -265,6 +274,10 @@ COCOTB RULES (same as per-block):
   truncated by Verilator's VPI string buffer and produce false mismatches.
   Compare field-sized debug aliases or chunk wires instead.
 - Use `assert` for pass/fail.
+- Preserve exact expected stream length and full ordered content on retries.
+  Never hide lost or duplicate transfers by comparing only a prefix, relaxing
+  the count, or deduplicating equal payloads/addresses. Correct a driver or
+  monitor timing defect without weakening requirement-derived assertions.
 - Never create a pass/fail assertion from an "architecture sanity budget",
   "2x path length", "number of blocks", or other locally invented performance
   threshold. Those are measurement-only unless PRD/ERS/system invariants state

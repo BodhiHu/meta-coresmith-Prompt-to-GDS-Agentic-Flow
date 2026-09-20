@@ -98,8 +98,9 @@ When the DUT has AXI-Stream input (s_tvalid/s_tready) and output
     for AXI-Stream, srdy/drdy, and other synchronous valid/ready channels.
   - Every AXI-Stream send helper MUST be phase-safe. Drive
     ``tvalid/tdata/tlast`` before the rising edge that may accept the beat,
-    sample ``tready`` for that same rising edge, then deassert ``tvalid``
-    immediately after that rising edge if ``tready`` was high. Do NOT drive
+    sample settled ``tready`` before that same rising edge, then deassert
+    ``tvalid`` at the following falling edge if the saved ``tready`` was high.
+    Do NOT drive
     ``tvalid`` after a falling edge and then wait until the next falling edge
     to check ``tready``; the DUT can legally accept the beat on the intervening
     rising edge, causing the testbench to miss the handshake, duplicate the
@@ -112,13 +113,14 @@ When the DUT has AXI-Stream input (s_tvalid/s_tready) and output
             dut.s_axis_tlast.value = int(last)
             dut.s_axis_tvalid.value = 1
             for _ in range(max_wait):
+                await ReadOnly()  # settle combinational ready after our drives
                 ready = int(dut.s_axis_tready.value)
                 await RisingEdge(dut.clk)
                 if ready:
+                    await FallingEdge(dut.clk)  # change drives away from accept edge
                     dut.s_axis_tvalid.value = 0
                     dut.s_axis_tdata.value = 0
                     dut.s_axis_tlast.value = 0
-                    await FallingEdge(dut.clk)
                     return
                 await FallingEdge(dut.clk)
             raise TimeoutError("s_axis_tready never asserted")
@@ -376,5 +378,14 @@ on disk. If it does:
 4. Only do a full rewrite if the module interface changed (ports
    added/removed/resized) or the testbench has fundamental structural
    problems (import errors, wrong module name, etc.)
+
+When repairing a testbench, preserve the acceptance criteria. A failed exact
+stream comparison must remain an exact comparison of the COMPLETE stream and
+its length; do not replace it with prefix equality or an upper-bound count.
+Every valid/ready accepting edge is a transfer, even when its payload or address
+equals the preceding transfer. Do not hide duplicates by deduplicating them.
+If an assertion contradicts an authoritative requirement, identify that
+requirement and explain the correction; a failing run alone is not evidence
+that an assertion is wrong. Fix the driver or monitor when timing is at fault.
 
 Output format: a single Python file with all cocotb tests.
