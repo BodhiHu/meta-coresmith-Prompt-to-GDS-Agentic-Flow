@@ -567,7 +567,12 @@ def _parse_codex_json(stdout: str) -> tuple[str, dict]:
 
 
 def _parse_opencode_json(stdout: str) -> tuple[str, dict]:
-    """Parse OpenCode ``run --format json`` NDJSON events."""
+    """Return the final model step's text and usage summed across all steps.
+
+    Each tool round has its own step_start/step_finish pair and usage. Earlier
+    text is progress commentary, not part of the final structured response.
+    The complete trajectory is preserved separately by _log_opencode_turns.
+    """
     chunks: list[str] = []
     usage: dict = {}
     for raw in stdout.splitlines():
@@ -579,13 +584,15 @@ def _parse_opencode_json(stdout: str) -> tuple[str, dict]:
         except _json.JSONDecodeError:
             continue
         ev_type = obj.get("type")
-        if ev_type == "text":
+        if ev_type == "step_start":
+            chunks = []
+        elif ev_type == "text":
             part = obj.get("part") or {}
             if part.get("type") == "text":
                 chunks.append(part.get("text", "") or "")
         elif ev_type == "step_finish":
             tokens = (obj.get("part") or {}).get("tokens") or {}
-            usage = {
+            step_usage = {
                 "input_tokens": tokens.get("input", 0),
                 "output_tokens": tokens.get("output", 0),
                 "total_tokens": tokens.get("total", 0),
@@ -594,6 +601,8 @@ def _parse_opencode_json(stdout: str) -> tuple[str, dict]:
                 "reasoning_output_tokens": tokens.get("reasoning", 0),
                 "total_cost_usd": (obj.get("part") or {}).get("cost", 0),
             }
+            for key, value in step_usage.items():
+                usage[key] = usage.get(key, 0) + (value or 0)
     return "".join(chunks), usage
 
 
