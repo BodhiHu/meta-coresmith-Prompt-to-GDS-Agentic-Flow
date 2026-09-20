@@ -244,6 +244,7 @@ class TestOpenCodeJsonParsing:
             "input_tokens": 110, "output_tokens": 24, "total_tokens": 271,
             "cache_read_input_tokens": 120, "cache_creation_input_tokens": 10,
             "reasoning_output_tokens": 7, "total_cost_usd": 0.75,
+            "finish_reason": "stop",
         }
 
     def test_incomplete_final_step_does_not_return_earlier_commentary(self):
@@ -256,6 +257,20 @@ class TestOpenCodeJsonParsing:
         text, usage = _parse_opencode_json("\n".join(map(json.dumps, events)))
         assert text == ""
         assert usage["input_tokens"] == 10
+        assert usage["finish_reason"] == "incomplete"
+
+    @pytest.mark.parametrize("reason", ["length", "tool-calls", "content-filter"])
+    def test_preserves_unsuccessful_terminal_reason(self, reason):
+        _, usage = _parse_opencode_json(json.dumps({
+            "type": "step_finish", "part": {"reason": reason},
+        }))
+        assert usage["finish_reason"] == reason
+
+    def test_preserves_error_events_even_after_text(self):
+        _, usage = _parse_opencode_json(json.dumps({
+            "type": "error", "error": {"name": "APIError", "data": {"message": "quota"}},
+        }))
+        assert usage["provider_error"] == "quota"
 
     def test_parse_text_and_usage(self):
         stdout = (
@@ -466,13 +481,44 @@ class TestOpenCodeVariantInvocation:
         monkeypatch.setattr(coresmith_llm._time_mod, "sleep", lambda *_a, **_k: None)
         model = ClaudeLLM(model="opus-4.8", timeout=10)
         transient = ("[502 provider_unavailable]", "Network connection lost", 1,
-                     1.0, False, False, {})
-        ok = ("ready", "", 0, 1.0, False, False, {})
+                     1.0, False, False,
+                     {"input_tokens": 100, "output_tokens": 30,
+                      "total_cost_usd": 0.25, "finish_reason": "error"})
+        ok = ("ready", "", 0, 1.0, False, False,
+              {"input_tokens": 200, "output_tokens": 40,
+               "total_cost_usd": 0.5, "finish_reason": "stop"})
         with patch.object(model, "_run_cli_with_watchdog",
                           side_effect=[transient, ok]) as watchdog:
             output = model._generate_via_cli("system", "hello")
         assert output == "ready"
         assert watchdog.call_count == 2
+        record = json.loads((tmp_path / ".coresmith/llm_calls.jsonl").read_text())
+        assert record["usage"] == {
+            "input_tokens": 300, "output_tokens": 70, "total_cost_usd": 0.75,
+            "finish_reason": "stop", "opencode_attempts": 2,
+        }
+        assert record["duration_s"] == 4.0  # two attempts + two-second backoff
+
+    @pytest.mark.parametrize("usage", [
+        {"finish_reason": "length"}, {"finish_reason": "tool-calls"},
+        {"finish_reason": "incomplete"}, {"provider_error": "quota"},
+    ])
+    @patch(
+        "orchestrator.langchain.agents.coresmith_llm._find_opencode_binary",
+        return_value="/usr/bin/opencode",
+    )
+    def test_rejects_unsuccessful_stream_with_zero_exit_and_valid_text(
+        self, _mock_find, monkeypatch, tmp_path, usage,
+    ):
+        monkeypatch.setenv("CORESMITH_LLM_PROVIDER", "openrouter")
+        monkeypatch.setenv("CORESMITH_PROJECT_ROOT", str(tmp_path))
+        model = ClaudeLLM(model="opus-5", timeout=10)
+        with patch.object(model, "_run_cli_with_watchdog") as watchdog:
+            watchdog.return_value = ('{"ok":true}', "", 0, 1.0, False, False, usage)
+            output = model._generate_via_cli("system", "hello")
+        assert output.startswith("[ClaudeLLM error:")
+        record = json.loads((tmp_path / ".coresmith/llm_calls.jsonl").read_text())
+        assert record["error"]
 
     @patch(
         "orchestrator.langchain.agents.coresmith_llm._find_opencode_binary",
