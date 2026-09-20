@@ -47,6 +47,9 @@ verified backend-only requirements. All RTL/application requirements must be
 COCOTB RULES:
 - Use cocotb with Python 3.11+ syntax.
 - Use `cocotb.clock.Clock` for clock generation.
+- Derive the clock period from the design's target frequency in constraints,
+  the uArch spec, or ERS: `period_ns = 1000 / target_clock_mhz`. For example,
+  25 MHz requires 40 ns. Do not substitute a fixed 20 ns clock for every design.
 - Use active-low reset (`rst_n`) when present; otherwise adapt to the actual
   reset port in the top-level RTL.
 - Each DUT clock signal must have exactly one live cocotb Clock driver per test. Reuse a
