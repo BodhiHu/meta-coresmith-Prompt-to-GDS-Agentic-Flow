@@ -1240,6 +1240,21 @@ async def architecture_resume(req: ArchResumeRequest):
 async def architecture_pause():
     if _architecture.task is None or _architecture.task.done():
         return {"paused": False, "reason": "no running task"}
+    # Architecture generation uses the same executor-backed CLI calls as the
+    # frontend graph. Cancelling the asyncio wrapper cannot stop that blocking
+    # child, so reap its process group before cancelling the graph task.
+    try:
+        from orchestrator.langchain.agents.coresmith_llm import (
+            reap_active_cli_processes,
+        )
+        reaped = reap_active_cli_processes()
+        if reaped:
+            log.warning(
+                "architecture/pause reaped %d in-flight CLI process group(s)",
+                reaped,
+            )
+    except Exception:
+        log.warning("architecture/pause: CLI reap failed", exc_info=True)
     _architecture.task.cancel()
     try:
         await _architecture.task

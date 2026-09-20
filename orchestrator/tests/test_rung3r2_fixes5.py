@@ -192,6 +192,39 @@ class TestPauseReap:
         # The resume-after-pause path (no in-flight call registered) is unaffected.
         assert reap_active_cli_processes() == 0
 
+    def test_architecture_pause_reaps_before_cancelling(self, monkeypatch):
+        from orchestrator.daemon import server
+
+        events = []
+
+        async def exercise():
+            async def running():
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    events.append("cancelled")
+
+            task = asyncio.create_task(running())
+            await asyncio.sleep(0)
+            old_task = server._architecture.task
+            old_status = server._architecture.status
+            server._architecture.task = task
+            server._architecture.status = "running"
+            monkeypatch.setattr(
+                "orchestrator.langchain.agents.coresmith_llm.reap_active_cli_processes",
+                lambda: events.append("reaped") or 1,
+            )
+            try:
+                result = await server.architecture_pause()
+                assert result == {"paused": True}
+                assert server._architecture.status == "paused"
+            finally:
+                server._architecture.task = old_task
+                server._architecture.status = old_status
+
+        asyncio.run(exercise())
+        assert events == ["reaped", "cancelled"]
+
 
 # ===========================================================================
 # Item 3 -- fresh-session escalation for sticky respecs
