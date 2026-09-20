@@ -3306,6 +3306,12 @@ async def get_backend_state() -> str:
     completed = values.get("completed_blocks", [])
     block_queue = values.get("block_queue", [])
 
+    # The physical graph processes one assembled chip, not each frontend leaf.
+    flat_flow = bool(values.get("integration_top_path") or values.get("flat_netlist_path"))
+    total_blocks = 1 if flat_flow else len(block_queue)
+    completed_names = {b.get("name") for b in completed}
+    remaining_count = max(0, total_blocks - len(completed_names))
+
     interrupt_payload = None
     if state_snapshot.tasks:
         for task in state_snapshot.tasks:
@@ -3338,8 +3344,8 @@ async def get_backend_state() -> str:
             for b in completed
         ],
         "completed_count": len(completed),
-        "total_blocks": len(block_queue),
-        "remaining_count": len(block_queue) - values.get("current_block_index", 0),
+        "total_blocks": total_blocks,
+        "remaining_count": remaining_count,
         "backend_done": values.get("backend_done", False),
         "interrupt_payload": interrupt_payload,
         "checkpoint_id": (

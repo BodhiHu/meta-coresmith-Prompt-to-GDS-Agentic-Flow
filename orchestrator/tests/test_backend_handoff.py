@@ -132,12 +132,12 @@ def _synth_state(tmp_path, **over):
     return state
 
 
-def test_default_routing_is_unchanged(tmp_path):
+def test_full_flow_requires_a_gate_verdict(tmp_path):
     assert route_after_flat_synth(_synth_state(tmp_path)) == "run_pnr"
     assert route_after_flat_synth(
         _synth_state(tmp_path, chip_gate_sim_ok=False)) == "diagnose"
     assert route_after_flat_synth(
-        _synth_state(tmp_path, chip_gate_sim_ok=None)) == "run_pnr"
+        _synth_state(tmp_path, chip_gate_sim_ok=None)) == "diagnose"
     assert route_after_flat_synth({"flat_netlist_path": ""}) == "diagnose"
 
 

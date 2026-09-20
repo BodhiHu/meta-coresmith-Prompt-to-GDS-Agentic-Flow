@@ -54,7 +54,8 @@ def test_parsers_never_see_endif_as_a_port(tmp_path):
 
 
 def test_locked_boundary_parks_instead_of_llm_fallback():
-    src = inspect.getsource(pg.integration_check_node)
+    src = (inspect.getsource(pg._prepare_integration_check)
+           + inspect.getsource(pg._approve_integration_check))
     assert src.count("_park_caravel_assembly_failure(") >= 2
     assert "escalating to Integration Lead / fail-closed interrupt" not in src
     park = inspect.getsource(pg._park_caravel_assembly_failure)

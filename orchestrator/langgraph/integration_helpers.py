@@ -343,6 +343,57 @@ def _find_port_fuzzy(
     return _pick(substr_cands)
 
 
+def _check_decomposed_bundle(conn, src, dst, expected_width):
+    """Check all forward fields when an architectural port is a bundle.
+
+    Exact RTL signal names retain scalar checking. Opposite-direction ready
+    wires belong to their own edge and must not inflate the payload width.
+    """
+    interface = conn.get("interface", conn.get("name", ""))
+    src_name = conn.get("from_port") or interface
+    dst_name = conn.get("to_port") or interface
+    if not src_name or not dst_name:
+        return None
+    if src.port_by_name(src_name) or dst.port_by_name(dst_name):
+        return None
+    def fields(module, prefix, direction):
+        prefix = prefix + "_"
+        return {p.name[len(prefix):]: p for p in module.ports
+                if p.name.startswith(prefix) and p.direction == direction}
+    sf = fields(src, src_name, "output")
+    df = fields(dst, dst_name, "input")
+    if max(len(sf), len(df)) < 2:
+        return None
+    from_block = conn.get("from_block", conn.get("from", ""))
+    to_block = conn.get("to_block", conn.get("to", ""))
+    issues = []
+    for name in sorted(sf.keys() | df.keys()):
+        a, b = sf.get(name), df.get(name)
+        if a is None or b is None:
+            issues.append(IntegrationMismatch(
+                from_block=from_block, to_block=to_block,
+                issue_type="missing_bundle_field", severity="error",
+                description=f"Bundle '{interface}' field '{name}' is absent or has the wrong direction on one endpoint",
+                suggested_fix="Match every decomposed field at both bundle endpoints",
+                details={"source_fields": sorted(sf), "destination_fields": sorted(df)}))
+        elif a.width != b.width:
+            issues.append(IntegrationMismatch(
+                from_block=from_block, to_block=to_block,
+                issue_type="width_mismatch", severity="error",
+                description=f"Bundle field {from_block}.{a.name} is {a.width}-bit but {to_block}.{b.name} is {b.width}-bit",
+                suggested_fix="Correct the field width at the endpoints",
+                details={"src_width": a.width, "dst_width": b.width}))
+    width = sum(p.width for p in sf.values())
+    if not issues and expected_width > 0 and width != expected_width:
+        issues.append(IntegrationMismatch(
+            from_block=from_block, to_block=to_block,
+            issue_type="width_mismatch", severity="warning",
+            description=f"Architecture specifies {expected_width}-bit for '{interface}', but its decomposed fields total {width}-bit",
+            suggested_fix="Reconcile the architecture bundle width with its complete field set",
+            details={"actual_width": width, "expected_width": expected_width}))
+    return issues
+
+
 def check_integration_compatibility(
     connections: list[dict],
     modules: dict[str, VerilogModule],
@@ -393,6 +444,11 @@ def check_integration_compatibility(
                 description=f"Destination block '{to_block}' RTL not found",
                 suggested_fix=f"Ensure {to_block} RTL was generated and passed synthesis",
             ))
+            continue
+
+        bundle_issues = _check_decomposed_bundle(conn, src_module, dst_module, expected_width)
+        if bundle_issues is not None:
+            mismatches.extend(bundle_issues)
             continue
 
         # Find source output port

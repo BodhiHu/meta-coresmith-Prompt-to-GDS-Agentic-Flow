@@ -62,6 +62,7 @@ import time as _time
 from pathlib import Path
 from typing import Annotated, TypedDict
 
+from langgraph.func import task as _durable_task
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Send, interrupt
 from opentelemetry import trace
@@ -6343,7 +6344,7 @@ def _integration_handoff_context(pr: str, fallback_name: str,
     return design_name, summary
 
 
-async def integration_check_node(state: OrchestratorState) -> dict:
+async def _prepare_integration_check(state: OrchestratorState) -> dict:
     """Run the Integration Lead agent to check compatibility and generate top-level RTL.
 
     After all blocks complete, this node:
@@ -7189,362 +7190,420 @@ async def integration_check_node(state: OrchestratorState) -> dict:
             },
         }
 
-        async def adopt_result():
-            from orchestrator.harness.top_module import write_candidate_receipt
-            try:
-                write_candidate_receipt(pr, module_name, top_rtl_path, rtl_paths,
-                                        note="integration lead", integration_result=integration_result)
-                return integration_result
-            except (ValueError, OSError) as exc:
-                return await _park_caravel_assembly_failure(
-                    pr, design_name, rtl_paths, "top module mismatch", [str(exc)], top_rtl_path)
+        return {"review_bundle": {
+            "integration_result": integration_result,
+            "agent_result": agent_result,
+            "lint_result": lint_result,
+            "artifact_hashes": _integration_artifact_hashes(
+                [top_rtl_path, *rtl_paths.values(),
+                 Path(pr) / "inputs/task.yaml", Path(pr) / "inputs/requirements.md",
+                 Path(pr) / ".coresmith/interface_contracts.json"]),
+        }}
 
-        has_issues = len(errors) > 0 or not lint_clean
-        if has_issues:
-            log("  [INTEGRATION] Issues found -- interrupting for review", YELLOW)
+_integration_prepare_task = _durable_task(_prepare_integration_check)
 
-            payload = {
-                "type": "integration_failure",
-                "design_name": design_name,
-                "top_rtl_path": top_rtl_path,
-                "block_count": len(modules),
-                "error_count": len(errors),
-                "warning_count": len(warnings),
-                "lint_clean": lint_clean,
-                "mismatches": mismatches,
-                "lint_errors": lint_result.get("errors", "")[:3000],
-                "lint_log_path": lint_result.get("log_path", ""),
-                "block_rtl_paths": rtl_paths,
-                "skipped_connections": agent_result.get("skipped_connections", []),
-                "supported_actions": (
-                    # `accept` is only offered when the chip_top still
-                    # lint-passes despite the architectural mismatches --
-                    # the operator can then advance to DV without
-                    # regenerating, because the issues are naming /
-                    # design-intent drift rather than syntactic
-                    # violations.
-                    ["accept", "retry", "fix_rtl", "skip", "abort"]
-                    if lint_clean
-                    else ["retry", "fix_rtl", "skip", "abort"]
-                ),
-                "outer_agent_guidance": (
-                    "Integration Lead agent found issues. As the outer-loop "
-                    "diagnostic agent, diagnose and fix before escalating:\n"
-                    "1. WIDTH_MISMATCH: Read both block RTL files. Edit the RTL "
-                    "on disk, then resume_pipeline(action='fix_rtl', "
-                    "rtl_fix_description='Fixed width ...')\n"
-                    "2. MISSING_PORT: Edit the block RTL to add it.\n"
-                    "3. DIRECTION_ERROR: Fix the port direction.\n"
-                    "4. LINT_ERRORS: Read the lint log and edit "
-                    f"{top_rtl_path} directly.\n"
-                    "5. After fixing, resume_pipeline(action='fix_rtl').\n"
-                    "6. Only escalate for architectural issues.\n"
-                    "7. ACCEPT: chip_top already lint-passes and the "
-                    "mismatches are acceptable for this run -- proceed "
-                    "to DV without further regeneration."
-                ),
-                "reference_files": {
-                    "top_rtl": top_rtl_path,
-                    "architecture": ".coresmith/architecture_state.json",
-                    "block_diagram": ".coresmith/block_diagram_viz.json",
-                    "lint_log": lint_result.get("log_path", ""),
-                },
-            }
 
-            response = await _resolve_interrupt(payload)
+def _integration_artifact_hashes(paths) -> dict[str, str]:
+    """Bind approval to the exact files checked before the interrupt."""
+    return {str(path): hashlib.sha256(Path(path).read_bytes()).hexdigest()
+            for path in paths if path and Path(path).is_file()}
 
-            action = response.get("action", "abort")
-            write_graph_event(pr, "Integration Check", "graph_node_exit", {
-                "action": action,
-                "error_count": len(errors),
-                "lint_clean": lint_clean,
-            })
 
-            if action == "skip":
-                integration_result["skipped_by_user"] = True
-                log("  [INTEGRATION] Skipped by user/agent", YELLOW)
-            elif action == "accept":
-                # User/agent acknowledges the mismatch errors but the
-                # chip_top still lint-passes -- advance to DV with the
-                # existing top-level Verilog.  Mark the result so the
-                # router stops short-circuiting on error_count > 0.
-                integration_result["accepted_by_user"] = True
-                log(
-                    "  [INTEGRATION] Accepted despite "
-                    f"{len(errors)} error(s) (lint_clean=True); "
-                    "advancing to DV",
-                    YELLOW,
-                )
-            elif action == "abort":
-                integration_result["aborted"] = True
-                log("  [INTEGRATION] Aborted", RED)
-            elif action in ("retry", "fix_rtl"):
-                fix_desc = response.get("rtl_fix_description", "")
-                log(f"  [INTEGRATION] Fix applied: {fix_desc}", GREEN)
-                integration_result["fix_applied"] = fix_desc
-                # rung3-fixes-1 (defect 2): retry/fix_rtl records an on-disk edit
-                # but this node CANNOT re-run the compatibility check in place
-                # (that needs a restart_node so the RTL is re-parsed). Returning
-                # here let route_after_integration END the graph SILENTLY with
-                # errors still outstanding (status=done, pipeline_done=False, no
-                # park, no error_message) -- the operator got no signal and DV
-                # never ran. Fail-closed: RE-PARK a final integration_failure
-                # interrupt that surfaces the outstanding errors and forces an
-                # explicit accept (advance to DV; only when lint-clean) or abort
-                # (restart_node to re-check). NEVER a silent END.
-                repark_rounds = 0
-                while (
-                    action in ("retry", "fix_rtl")
-                    and (len(errors) > 0 or not lint_clean)
-                    and repark_rounds < _INTEGRATION_REPARK_CAP
-                ):
-                    repark_rounds += 1
-                    integration_result["repark_rounds"] = repark_rounds
-                    integration_result["fix_applied"] = (
-                        response.get("rtl_fix_description", "")
-                        if isinstance(response, dict)
-                        else integration_result.get("fix_applied", "")
-                    )
-                    _repark_actions = (
-                        ["accept", "abort"] if lint_clean else ["abort"]
-                    )
-                    _repark_msg = (
-                        f"Integration still reports {len(errors)} outstanding "
-                        "error(s)"
-                        + ("" if lint_clean else " and chip_top does not lint-clean")
-                        + f" after {repark_rounds} in-place fix attempt(s); the "
-                        "compatibility check cannot be re-run in this node. "
-                        + (
-                            "ACCEPT to advance to DV (chip_top lint-passes) or "
-                            if lint_clean else ""
-                        )
-                        + "ABORT and restart_node('integration_check') to "
-                        "re-parse and re-check the edited RTL from scratch."
-                    )
-                    integration_result["error_message"] = _repark_msg
-                    write_graph_event(
-                        pr, "Integration Check", "integration_repark", {
-                            "repark_round": repark_rounds,
-                            "error_count": len(errors),
-                            "lint_clean": lint_clean,
-                            "prior_action": action,
-                        },
-                    )
-                    log(
-                        f"  [INTEGRATION] Re-park (round {repark_rounds}): "
-                        f"{len(errors)} error(s) outstanding after '{action}'; "
-                        "forcing accept/abort (no silent END)",
-                        YELLOW,
-                    )
-                    repark_payload = {
-                        "type": "integration_failure",
-                        "design_name": design_name,
-                        "top_rtl_path": top_rtl_path,
-                        "block_count": len(modules),
-                        "error_count": len(errors),
-                        "warning_count": len(warnings),
-                        "lint_clean": lint_clean,
-                        "mismatches": mismatches,
-                        "repark_round": repark_rounds,
-                        "error_message": _repark_msg,
-                        "supported_actions": _repark_actions,
-                        "outer_agent_guidance": (
-                            "Re-park after retry/fix_rtl at integration_check: "
-                            "the outstanding errors were NOT cleared by an "
-                            "in-node re-check (there is none). Do NOT expect "
-                            "another retry to advance the graph. Either ACCEPT "
-                            "(only offered when chip_top lint-passes; proceeds "
-                            "to DV) or ABORT and "
-                            "restart_node('integration_check') so the edited "
-                            "RTL is re-parsed and re-checked from scratch."
-                        ),
-                        "block_rtl_paths": rtl_paths,
-                        "reference_files": {
-                            "top_rtl": top_rtl_path,
-                            "architecture": ".coresmith/architecture_state.json",
-                            "lint_log": lint_result.get("log_path", ""),
-                        },
-                    }
-                    response = await _resolve_interrupt(repark_payload)
-                    action = (
-                        response.get("action", "abort")
-                        if isinstance(response, dict) else "abort"
-                    )
+async def integration_check_node(state: OrchestratorState) -> dict:
+    """Prepare once per graph invocation, then approve that immutable result.
 
-                # Re-park resolved (or there was nothing to re-park) -- finalize
-                # on the terminal action. accept advances to DV (lint-clean
-                # only); abort/unknown terminates; skip is honored.
-                if action == "accept" and lint_clean:
-                    integration_result["accepted_by_user"] = True
-                    log(
-                        "  [INTEGRATION] Accepted at re-park; advancing to DV",
-                        YELLOW,
-                    )
-                elif action == "skip":
-                    integration_result["skipped_by_user"] = True
-                    log("  [INTEGRATION] Skipped at re-park", YELLOW)
-                elif action in ("retry", "fix_rtl"):
-                    if len(errors) > 0 or not lint_clean:
-                        # Re-park CAP exhausted with issues still outstanding
-                        # (a driver that kept sending retry). Fail-closed to a
-                        # LOUD terminal abort -- never a silent END.
-                        integration_result["aborted"] = True
-                        integration_result["error_message"] = (
-                            f"integration_check re-park cap "
-                            f"({_INTEGRATION_REPARK_CAP}) exhausted with "
-                            f"{len(errors)} error(s) still outstanding; "
-                            "aborting. Fix the RTL on disk then "
-                            "restart_node('integration_check') to re-check."
-                        )
-                        write_graph_event(
-                            pr, "Integration Check",
-                            "integration_repark_exhausted", {
-                                "repark_rounds": repark_rounds,
-                                "error_count": len(errors),
-                                "lint_clean": lint_clean,
-                            },
-                        )
-                        log(
-                            "  [INTEGRATION] Re-park cap exhausted -- "
-                            "aborting (fail-closed)",
-                            RED,
-                        )
-                    else:
-                        # Issues cleared between iterations -- record the fix
-                        # and let routing proceed.
-                        integration_result["fix_applied"] = (
-                            response.get("rtl_fix_description", fix_desc)
-                            if isinstance(response, dict) else fix_desc
-                        )
-                else:  # abort or unknown -> terminal, fail-closed
-                    integration_result["aborted"] = True
-                    log("  [INTEGRATION] Aborted at re-park", RED)
+    LangGraph restarts a node on interrupt resume. A durable task checkpoints
+    assembly and lint before review, so accepting cannot rerun the author or
+    retire the file the operator just reviewed. Explicit graph retries start
+    a new task and deliberately regenerate/recheck the candidate.
+    """
+    from langgraph.config import get_config
+    try:
+        get_config()
+    except RuntimeError:  # direct callers (including focused unit tests)
+        prepared = await _prepare_integration_check(state)
+    else:
+        prepared = await _integration_prepare_task(state)
+    if "review_bundle" not in prepared:
+        return prepared
+    return await _approve_integration_check(state, prepared["review_bundle"])
 
-            if lint_clean and not integration_result.get("aborted") and not integration_result.get("skipped_by_user"):
-                integration_result = await adopt_result()
-            return {"integration_result": integration_result}
 
-        if (
-            warnings
-            and not os.getenv("CORESMITH_NONBLOCKING_INTEGRATION_WARNINGS")
-        ):
-            log(
-                f"  [INTEGRATION] {len(warnings)} warning(s) -- triaging "
-                "for outer-agent review",
-                YELLOW,
-            )
+async def _approve_integration_check(state: OrchestratorState, bundle: dict) -> dict:
+    import copy
+    pr = state.get("project_root", str(PROJECT_ROOT))
+    integration_result = copy.deepcopy(bundle["integration_result"])
+    agent_result = bundle["agent_result"]
+    lint_result = bundle["lint_result"]
+    design_name = integration_result["design_name"]
+    module_name = integration_result["top_module"]
+    top_rtl_path = integration_result["top_rtl_path"]
+    rtl_paths = integration_result["block_rtl_paths"]
+    mismatches = integration_result["mismatches"]
+    lint_clean = integration_result["lint_clean"]
+    errors = [m for m in mismatches if m.get("severity") == "error"]
+    warnings = [m for m in mismatches if m.get("severity") == "warning"]
+    async def adopt_result():
+        from orchestrator.harness.top_module import write_candidate_receipt
+        expected = bundle.get("artifact_hashes", {})
+        if _integration_artifact_hashes(expected) != expected:
+            return {**integration_result, "aborted": True,
+                    "error": "reviewed_artifacts_changed",
+                    "reason": "Integration artifacts changed after review; restart integration_check to re-check them."}
+        try:
+            write_candidate_receipt(pr, module_name, top_rtl_path, rtl_paths,
+                                    note="integration lead", integration_result=integration_result)
+            return integration_result
+        except (ValueError, OSError) as exc:
+            return await _park_caravel_assembly_failure(
+                pr, design_name, rtl_paths, "top module mismatch", [str(exc)], top_rtl_path)
 
-            warning_payload = {
-                "type": "integration_warning_review",
-                "design_name": design_name,
-                "top_rtl_path": top_rtl_path,
-                "block_count": len(modules),
-                "error_count": 0,
-                "warning_count": len(warnings),
-                "lint_clean": True,
-                "warnings": warnings,
-                "mismatches": mismatches,
-                "block_rtl_paths": rtl_paths,
-                "skipped_connections": agent_result.get(
-                    "skipped_connections", []
-                ),
-                "supported_actions": [
-                    "accept",
-                    "retry",
-                    "fix_rtl",
-                    "abort",
-                ],
-                "outer_agent_guidance": (
-                    "Integration Lead agent flagged warnings but no hard "
-                    "errors. Architecture warnings have caused DV deadlocks "
-                    "in practice (closed AXI-Stream feedback loops without "
-                    "a bootstrap policy, etc.), so triage before letting "
-                    "the run reach DV:\n"
-                    "1. Read each warning's `description` and "
-                    "`suggested_fix`.\n"
-                    "2. If the warning is benign or compensated elsewhere, "
-                    "resume_pipeline(action='accept').\n"
-                    "3. If a block needs patching, edit it on disk, then "
-                    "resume_pipeline(action='fix_rtl', "
-                    "rtl_fix_description='...'). The run will END so you "
-                    "can issue restart_node for the affected stage.\n"
-                    "4. If the integration top should be regenerated, "
-                    "resume_pipeline(action='retry'). The run will END so "
-                    "you can restart_node('integration_check').\n"
-                    "5. If a uArch-level revision is needed (e.g. add a "
-                    "request-driven bootstrap path), "
-                    "resume_pipeline(action='abort') and escalate.\n"
-                    "Set CORESMITH_NONBLOCKING_INTEGRATION_WARNINGS=1 to "
-                    "restore the old non-blocking behavior."
-                ),
-                "reference_files": {
-                    "top_rtl": top_rtl_path,
-                    "architecture": ".coresmith/architecture_state.json",
-                    "block_diagram": ".coresmith/block_diagram_viz.json",
-                },
-            }
+    has_issues = len(errors) > 0 or not lint_clean
+    if has_issues:
+        log("  [INTEGRATION] Issues found -- interrupting for review", YELLOW)
 
-            response = await _resolve_interrupt(warning_payload)
-            action = (
-                response.get("action", "abort")
-                if isinstance(response, dict)
-                else "abort"
-            )
-            integration_result["warning_triage_action"] = action
+        payload = {
+            "type": "integration_failure",
+            "design_name": design_name,
+            "top_rtl_path": top_rtl_path,
+            "block_count": integration_result["block_count"],
+            "error_count": len(errors),
+            "warning_count": len(warnings),
+            "lint_clean": lint_clean,
+            "mismatches": mismatches,
+            "lint_errors": lint_result.get("errors", "")[:3000],
+            "lint_log_path": lint_result.get("log_path", ""),
+            "block_rtl_paths": rtl_paths,
+            "skipped_connections": agent_result.get("skipped_connections", []),
+            "supported_actions": (
+                # `accept` is only offered when the chip_top still
+                # lint-passes despite the architectural mismatches --
+                # the operator can then advance to DV without
+                # regenerating, because the issues are naming /
+                # design-intent drift rather than syntactic
+                # violations.
+                ["accept", "retry", "fix_rtl", "skip", "abort"]
+                if lint_clean
+                else ["retry", "fix_rtl", "skip", "abort"]
+            ),
+            "outer_agent_guidance": (
+                "Integration Lead agent found issues. As the outer-loop "
+                "diagnostic agent, diagnose and fix before escalating:\n"
+                "1. WIDTH_MISMATCH: Read both block RTL files. Edit the RTL "
+                "on disk, then resume_pipeline(action='fix_rtl', "
+                "rtl_fix_description='Fixed width ...')\n"
+                "2. MISSING_PORT: Edit the block RTL to add it.\n"
+                "3. DIRECTION_ERROR: Fix the port direction.\n"
+                "4. LINT_ERRORS: Read the lint log and edit "
+                f"{top_rtl_path} directly.\n"
+                "5. After fixing, resume_pipeline(action='fix_rtl').\n"
+                "6. Only escalate for architectural issues.\n"
+                "7. ACCEPT: chip_top already lint-passes and the "
+                "mismatches are acceptable for this run -- proceed "
+                "to DV without further regeneration."
+            ),
+            "reference_files": {
+                "top_rtl": top_rtl_path,
+                "architecture": ".coresmith/architecture_state.json",
+                "block_diagram": ".coresmith/block_diagram_viz.json",
+                "lint_log": lint_result.get("log_path", ""),
+            },
+        }
 
-            write_graph_event(pr, "Integration Check", "graph_node_exit", {
-                "action": action,
-                "warning_count": len(warnings),
-                "via": "warning_triage",
-            })
+        response = await _resolve_interrupt(payload)
 
-            if action == "accept":
-                integration_result["accepted_warnings"] = True
-                log(
-                    "  [INTEGRATION] Warnings accepted by outer agent",
-                    GREEN,
-                )
-            elif action in ("retry", "fix_rtl"):
-                fix_desc = response.get("rtl_fix_description", "")
-                integration_result["fix_applied"] = fix_desc
-                integration_result["aborted"] = True
-                log(
-                    f"  [INTEGRATION] {action} requested "
-                    f"(desc='{fix_desc}'); routing to END so outer agent "
-                    "can restart_node",
-                    YELLOW,
-                )
-            else:  # abort or unknown
-                integration_result["aborted"] = True
-                log(
-                    "  [INTEGRATION] Aborted on warning triage", RED
-                )
-
-            if lint_clean and not integration_result.get("aborted") and not integration_result.get("skipped_by_user"):
-                integration_result = await adopt_result()
-            return {"integration_result": integration_result}
-
-        integration_result = await adopt_result()
-        if not integration_result.get("lint_clean") or integration_result.get("aborted"):
-            return {"integration_result": integration_result}
-        log(f"\n{'='*60}", GREEN)
-        log("  INTEGRATION CHECK PASSED", GREEN)
-        log(f"  Top module: {module_name}", GREEN)
-        log(f"  {len(modules)} blocks, "
-            f"{agent_result.get('wire_count', 0)} wires", GREEN)
-        if warnings:
-            log(f"  {len(warnings)} warnings (non-blocking)", YELLOW)
-        log(f"{'='*60}\n", GREEN)
-
+        action = response.get("action", "abort")
         write_graph_event(pr, "Integration Check", "graph_node_exit", {
-            "success": True,
-            "top_module": module_name,
-            "block_count": len(modules),
-            "wire_count": agent_result.get("wire_count", 0),
-            "warnings": len(warnings),
+            "action": action,
+            "error_count": len(errors),
+            "lint_clean": lint_clean,
         })
 
+        if action == "skip":
+            integration_result["skipped_by_user"] = True
+            log("  [INTEGRATION] Skipped by user/agent", YELLOW)
+        elif action == "accept":
+            # User/agent acknowledges the mismatch errors but the
+            # chip_top still lint-passes -- advance to DV with the
+            # existing top-level Verilog.  Mark the result so the
+            # router stops short-circuiting on error_count > 0.
+            integration_result["accepted_by_user"] = True
+            log(
+                "  [INTEGRATION] Accepted despite "
+                f"{len(errors)} error(s) (lint_clean=True); "
+                "advancing to DV",
+                YELLOW,
+            )
+        elif action == "abort":
+            integration_result["aborted"] = True
+            log("  [INTEGRATION] Aborted", RED)
+        elif action in ("retry", "fix_rtl"):
+            fix_desc = response.get("rtl_fix_description", "")
+            log(f"  [INTEGRATION] Fix applied: {fix_desc}", GREEN)
+            integration_result["fix_applied"] = fix_desc
+            # rung3-fixes-1 (defect 2): retry/fix_rtl records an on-disk edit
+            # but this node CANNOT re-run the compatibility check in place
+            # (that needs a restart_node so the RTL is re-parsed). Returning
+            # here let route_after_integration END the graph SILENTLY with
+            # errors still outstanding (status=done, pipeline_done=False, no
+            # park, no error_message) -- the operator got no signal and DV
+            # never ran. Fail-closed: RE-PARK a final integration_failure
+            # interrupt that surfaces the outstanding errors and forces an
+            # explicit accept (advance to DV; only when lint-clean) or abort
+            # (restart_node to re-check). NEVER a silent END.
+            repark_rounds = 0
+            while (
+                action in ("retry", "fix_rtl")
+                and (len(errors) > 0 or not lint_clean)
+                and repark_rounds < _INTEGRATION_REPARK_CAP
+            ):
+                repark_rounds += 1
+                integration_result["repark_rounds"] = repark_rounds
+                integration_result["fix_applied"] = (
+                    response.get("rtl_fix_description", "")
+                    if isinstance(response, dict)
+                    else integration_result.get("fix_applied", "")
+                )
+                _repark_actions = (
+                    ["accept", "abort"] if lint_clean else ["abort"]
+                )
+                _repark_msg = (
+                    f"Integration still reports {len(errors)} outstanding "
+                    "error(s)"
+                    + ("" if lint_clean else " and chip_top does not lint-clean")
+                    + f" after {repark_rounds} in-place fix attempt(s); the "
+                    "compatibility check cannot be re-run in this node. "
+                    + (
+                        "ACCEPT to advance to DV (chip_top lint-passes) or "
+                        if lint_clean else ""
+                    )
+                    + "ABORT and restart_node('integration_check') to "
+                    "re-parse and re-check the edited RTL from scratch."
+                )
+                integration_result["error_message"] = _repark_msg
+                write_graph_event(
+                    pr, "Integration Check", "integration_repark", {
+                        "repark_round": repark_rounds,
+                        "error_count": len(errors),
+                        "lint_clean": lint_clean,
+                        "prior_action": action,
+                    },
+                )
+                log(
+                    f"  [INTEGRATION] Re-park (round {repark_rounds}): "
+                    f"{len(errors)} error(s) outstanding after '{action}'; "
+                    "forcing accept/abort (no silent END)",
+                    YELLOW,
+                )
+                repark_payload = {
+                    "type": "integration_failure",
+                    "design_name": design_name,
+                    "top_rtl_path": top_rtl_path,
+                    "block_count": integration_result["block_count"],
+                    "error_count": len(errors),
+                    "warning_count": len(warnings),
+                    "lint_clean": lint_clean,
+                    "mismatches": mismatches,
+                    "repark_round": repark_rounds,
+                    "error_message": _repark_msg,
+                    "supported_actions": _repark_actions,
+                    "outer_agent_guidance": (
+                        "Re-park after retry/fix_rtl at integration_check: "
+                        "the outstanding errors were NOT cleared by an "
+                        "in-node re-check (there is none). Do NOT expect "
+                        "another retry to advance the graph. Either ACCEPT "
+                        "(only offered when chip_top lint-passes; proceeds "
+                        "to DV) or ABORT and "
+                        "restart_node('integration_check') so the edited "
+                        "RTL is re-parsed and re-checked from scratch."
+                    ),
+                    "block_rtl_paths": rtl_paths,
+                    "reference_files": {
+                        "top_rtl": top_rtl_path,
+                        "architecture": ".coresmith/architecture_state.json",
+                        "lint_log": lint_result.get("log_path", ""),
+                    },
+                }
+                response = await _resolve_interrupt(repark_payload)
+                action = (
+                    response.get("action", "abort")
+                    if isinstance(response, dict) else "abort"
+                )
+
+            # Re-park resolved (or there was nothing to re-park) -- finalize
+            # on the terminal action. accept advances to DV (lint-clean
+            # only); abort/unknown terminates; skip is honored.
+            if action == "accept" and lint_clean:
+                integration_result["accepted_by_user"] = True
+                log(
+                    "  [INTEGRATION] Accepted at re-park; advancing to DV",
+                    YELLOW,
+                )
+            elif action == "skip":
+                integration_result["skipped_by_user"] = True
+                log("  [INTEGRATION] Skipped at re-park", YELLOW)
+            elif action in ("retry", "fix_rtl"):
+                if len(errors) > 0 or not lint_clean:
+                    # Re-park CAP exhausted with issues still outstanding
+                    # (a driver that kept sending retry). Fail-closed to a
+                    # LOUD terminal abort -- never a silent END.
+                    integration_result["aborted"] = True
+                    integration_result["error_message"] = (
+                        f"integration_check re-park cap "
+                        f"({_INTEGRATION_REPARK_CAP}) exhausted with "
+                        f"{len(errors)} error(s) still outstanding; "
+                        "aborting. Fix the RTL on disk then "
+                        "restart_node('integration_check') to re-check."
+                    )
+                    write_graph_event(
+                        pr, "Integration Check",
+                        "integration_repark_exhausted", {
+                            "repark_rounds": repark_rounds,
+                            "error_count": len(errors),
+                            "lint_clean": lint_clean,
+                        },
+                    )
+                    log(
+                        "  [INTEGRATION] Re-park cap exhausted -- "
+                        "aborting (fail-closed)",
+                        RED,
+                    )
+                else:
+                    # Issues cleared between iterations -- record the fix
+                    # and let routing proceed.
+                    integration_result["fix_applied"] = (
+                        response.get("rtl_fix_description", fix_desc)
+                        if isinstance(response, dict) else fix_desc
+                    )
+            else:  # abort or unknown -> terminal, fail-closed
+                integration_result["aborted"] = True
+                log("  [INTEGRATION] Aborted at re-park", RED)
+
+        if lint_clean and not integration_result.get("aborted") and not integration_result.get("skipped_by_user"):
+            integration_result = await adopt_result()
         return {"integration_result": integration_result}
+
+    if (
+        warnings
+        and not os.getenv("CORESMITH_NONBLOCKING_INTEGRATION_WARNINGS")
+    ):
+        log(
+            f"  [INTEGRATION] {len(warnings)} warning(s) -- triaging "
+            "for outer-agent review",
+            YELLOW,
+        )
+
+        warning_payload = {
+            "type": "integration_warning_review",
+            "design_name": design_name,
+            "top_rtl_path": top_rtl_path,
+            "block_count": integration_result["block_count"],
+            "error_count": 0,
+            "warning_count": len(warnings),
+            "lint_clean": True,
+            "warnings": warnings,
+            "mismatches": mismatches,
+            "block_rtl_paths": rtl_paths,
+            "skipped_connections": agent_result.get(
+                "skipped_connections", []
+            ),
+            "supported_actions": [
+                "accept",
+                "retry",
+                "fix_rtl",
+                "abort",
+            ],
+            "outer_agent_guidance": (
+                "Integration Lead agent flagged warnings but no hard "
+                "errors. Architecture warnings have caused DV deadlocks "
+                "in practice (closed AXI-Stream feedback loops without "
+                "a bootstrap policy, etc.), so triage before letting "
+                "the run reach DV:\n"
+                "1. Read each warning's `description` and "
+                "`suggested_fix`.\n"
+                "2. If the warning is benign or compensated elsewhere, "
+                "resume_pipeline(action='accept').\n"
+                "3. If a block needs patching, edit it on disk, then "
+                "resume_pipeline(action='fix_rtl', "
+                "rtl_fix_description='...'). The run will END so you "
+                "can issue restart_node for the affected stage.\n"
+                "4. If the integration top should be regenerated, "
+                "resume_pipeline(action='retry'). The run will END so "
+                "you can restart_node('integration_check').\n"
+                "5. If a uArch-level revision is needed (e.g. add a "
+                "request-driven bootstrap path), "
+                "resume_pipeline(action='abort') and escalate.\n"
+                "Set CORESMITH_NONBLOCKING_INTEGRATION_WARNINGS=1 to "
+                "restore the old non-blocking behavior."
+            ),
+            "reference_files": {
+                "top_rtl": top_rtl_path,
+                "architecture": ".coresmith/architecture_state.json",
+                "block_diagram": ".coresmith/block_diagram_viz.json",
+            },
+        }
+
+        response = await _resolve_interrupt(warning_payload)
+        action = (
+            response.get("action", "abort")
+            if isinstance(response, dict)
+            else "abort"
+        )
+        integration_result["warning_triage_action"] = action
+
+        write_graph_event(pr, "Integration Check", "graph_node_exit", {
+            "action": action,
+            "warning_count": len(warnings),
+            "via": "warning_triage",
+        })
+
+        if action == "accept":
+            integration_result["accepted_warnings"] = True
+            log(
+                "  [INTEGRATION] Warnings accepted by outer agent",
+                GREEN,
+            )
+        elif action in ("retry", "fix_rtl"):
+            fix_desc = response.get("rtl_fix_description", "")
+            integration_result["fix_applied"] = fix_desc
+            integration_result["aborted"] = True
+            log(
+                f"  [INTEGRATION] {action} requested "
+                f"(desc='{fix_desc}'); routing to END so outer agent "
+                "can restart_node",
+                YELLOW,
+            )
+        else:  # abort or unknown
+            integration_result["aborted"] = True
+            log(
+                "  [INTEGRATION] Aborted on warning triage", RED
+            )
+
+        if lint_clean and not integration_result.get("aborted") and not integration_result.get("skipped_by_user"):
+            integration_result = await adopt_result()
+        return {"integration_result": integration_result}
+
+    integration_result = await adopt_result()
+    if not integration_result.get("lint_clean") or integration_result.get("aborted"):
+        return {"integration_result": integration_result}
+    log(f"\n{'='*60}", GREEN)
+    log("  INTEGRATION CHECK PASSED", GREEN)
+    log(f"  Top module: {module_name}", GREEN)
+    log(f"  {integration_result['block_count']} blocks, "
+        f"{agent_result.get('wire_count', 0)} wires", GREEN)
+    if warnings:
+        log(f"  {len(warnings)} warnings (non-blocking)", YELLOW)
+    log(f"{'='*60}\n", GREEN)
+
+    write_graph_event(pr, "Integration Check", "graph_node_exit", {
+        "success": True,
+        "top_module": module_name,
+        "block_count": integration_result["block_count"],
+        "wire_count": agent_result.get("wire_count", 0),
+        "warnings": len(warnings),
+    })
+
+    return {"integration_result": integration_result}
 
 
 def route_after_integration(state: OrchestratorState) -> str:

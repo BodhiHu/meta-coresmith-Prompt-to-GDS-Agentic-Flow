@@ -918,6 +918,7 @@ _CONSTRAINT_CATALOG: list[dict] = [
         ),
         "applies": lambda ctx: bool(
             (ctx.get("interface_contracts") or {}).get("contracts")
+            and ctx.get("uarch_spec_names")
         ),
     },
     {
@@ -1481,7 +1482,14 @@ async def check_constraints(
         # ON; fail-open. The LLM half is the catalog entry of the same id.
         cross_artifact_violations: list[dict] = []  # WP-10a: deterministic half removed
 
+        # The architecture graph precedes uArch generation. Do not pay for a
+        # model call whose only possible answer is "no specs exist yet".
+        uarch_spec_names = {
+            path.stem for path in (Path(project_root) / "arch" / "uarch_specs").glob("*.md")
+            if path.is_file() and path.stat().st_size > 0
+        }
         applicability_ctx = {
+            "uarch_spec_names": uarch_spec_names,
             "block_diagram": block_diagram or {},
             "memory_map": memory_map or {},
             "clock_tree": clock_tree or {},

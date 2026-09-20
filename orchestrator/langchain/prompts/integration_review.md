@@ -53,8 +53,12 @@ For EVERY connection in the block diagram:
 
 ## How to Work
 
-1. Read `.coresmith/block_diagram.json` to get the full connection list.
-2. Read each uArch spec from `arch/uarch_specs/*.md`.
+1. Use the inline authoritative port tables/contracts and the provided
+   current-tier block diagram path. A contract port table has precedence over
+   logical bundle names and generated prose. Compare aggregate bundle fields,
+   not one valid/ready bit against the bundle's total width.
+2. Read and edit only the explicit review-copy paths supplied in the request.
+   Do not rewrite canonical specs or inspect deferred tiers as current defects.
 3. For each connection, extract the relevant ports from both blocks'
    Section 9 stubs and verify the checks above.
 4. If a mismatch is found, **edit the uArch spec file on disk** to fix it.

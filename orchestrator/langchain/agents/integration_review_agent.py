@@ -247,6 +247,26 @@ class IntegrationReviewAgent:
                 parts.append(f"- {sp}")
 
             parts.append("")
+            parts.append("## Authoritative Interface Contracts")
+            from orchestrator.langgraph.contract_conformance import format_contract_port_table
+
+            from .contract_lookup import format_block_contracts_prompt, load_block_contracts
+            from .rtl_generator import _constraint_precedence_line
+            parts.append(_constraint_precedence_line())
+            for name in block_names:
+                table = format_contract_port_table(project_root, name)
+                if table:
+                    parts.append(f"### {name}\n{table}")
+                contract_view = load_block_contracts(project_root, name)
+                if contract_view.get("edges"):
+                    parts.append(format_block_contracts_prompt(name, contract_view))
+            parts.append(
+                "The tables above are the same naming authority used by the RTL author "
+                "and conformance gate. Preserve their exact names. A bundle label is not "
+                "a scalar RTL port: match every decomposed field and sum its widths. "
+                "Do not rename contract-prefixed fields to bare logical field names."
+            )
+            parts.append("")
             parts.append("## Architecture Files")
             parts.append(f"- Current-tier block diagram connections: {review_bd_path}")
             if deferred_connection_count:

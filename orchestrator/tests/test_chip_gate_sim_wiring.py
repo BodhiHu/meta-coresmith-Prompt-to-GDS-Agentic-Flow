@@ -141,18 +141,26 @@ class TestTheVerdictBlocksPnR:
             "flat_netlist_path": str(net), "chip_gate_sim_ok": True,
         }) == "run_pnr"
 
-    def test_not_applicable_does_not_block(self, tmp_path):
-        """``None`` means the gate did not APPLY (disabled, no integration TB,
-        no toolchain). That is not a verdict, and a gate that cannot run must
-        not wall off the flow -- it is already logged with a reason."""
+    @pytest.mark.parametrize("status", [None, "not_run", "unsupported"])
+    def test_absent_evidence_blocks(self, tmp_path, status):
         net = tmp_path / "net.v"
         net.write_text("module chip_top(); endmodule\n")
         assert route_after_flat_synth({
             "flat_netlist_path": str(net), "chip_gate_sim_ok": None,
+            "chip_gate_sim_status": status,
+        }) == "diagnose"
+
+    def test_explicit_disabled_is_reported_opt_out(self, tmp_path):
+        net = tmp_path / "net.v"
+        net.write_text("module chip_top(); endmodule\n")
+        assert route_after_flat_synth({
+            "flat_netlist_path": str(net), "chip_gate_sim_ok": None,
+            "chip_gate_sim_status": "disabled",
         }) == "run_pnr"
         assert route_after_flat_synth({
-            "flat_netlist_path": str(net),
-        }) == "run_pnr"
+            "flat_netlist_path": str(net), "chip_gate_sim_ok": False,
+            "chip_gate_sim_status": "disabled",
+        }) == "diagnose"
 
     def test_missing_netlist_still_diagnoses(self, tmp_path):
         assert route_after_flat_synth({

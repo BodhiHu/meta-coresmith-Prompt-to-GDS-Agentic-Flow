@@ -19,7 +19,8 @@ def test_block_makefile_is_not_fatal_on_verilator_warnings():
 
 
 def test_caravel_assembled_result_is_persisted():
-    src = inspect.getsource(pg.integration_check_node)
+    src = (inspect.getsource(pg._prepare_integration_check)
+           + inspect.getsource(pg._approve_integration_check))
     i = src.find('"caravel_wrapper_assembled": True,')
     assert i > 0
     assert "integration_result=integration_result" in src[i:i + 3000]
