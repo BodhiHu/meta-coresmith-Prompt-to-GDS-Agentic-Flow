@@ -16,6 +16,16 @@ your own scratch build directory, e.g. `sim_build/agent_<name>/`,
 never `sim_build/integration` or `sim_build/validation`; the engine owns those
 scope directories and recreates them for every authoritative attempt.
 
+BOUNDED SELF-CHECKING:
+After writing or repairing this testbench, run the relevant check. If it fails,
+make at most TWO focused repair-and-recheck cycles in this generation call.
+If it still fails, preserve the current artifact and failure evidence, then
+finish with the failing command, verdict and unresolved cause. The parent
+graph owns diagnosis and retry. Reuse an existing relevant regression when
+the interface is unchanged; do not create a sequence of private mock devices
+or testbenches to replace it. Any small diagnostic probe counts toward this
+same local repair budget. Preserve exact expected values and protocol checks.
+
 CONTEXT:
 You will receive:
 1. The top-level Verilog source and path
