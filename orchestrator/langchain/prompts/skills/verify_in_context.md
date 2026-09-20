@@ -30,6 +30,21 @@ Run the matching check and read its verdict (exit 0 = pass, 1 = fail,
 - `"$CS" verify chip-model` / `"$CS" verify chip` — composed-model and
   integrated chip_top checks.
 
+## Keep generation self-checks bounded
+For an RTL or testbench generation call, run the relevant existing check first.
+If it fails, make at most TWO focused repair-and-recheck cycles in this call.
+If it still fails, leave the current artifact and failure evidence intact and
+finish with the failing command, verdict and unresolved cause. The parent graph
+owns the next diagnosis/retry; a local self-check failure does not justify an
+unbounded private debug loop or a claim of success.
+
+Reuse the existing block regression when the interface is unchanged. Do not
+replace it with a sequence of newly authored mock peripherals or private
+testbenches: those probes can have their own protocol bugs. A small probe is
+appropriate only to distinguish concrete hypotheses from an observed failure
+of the relevant check, and counts toward the same local repair budget. Preserve
+exact expected values, stream lengths and protocol assertions throughout.
+
 ## Run EDA tools via the CLI (`"$CS" tool ...`)
 Do NOT invoke `yosys` / `openroad` / `magic` / `netgen` / a linter directly.
 Run every EDA step through the CLI's tool verbs, exactly like `verify`: the
