@@ -1,7 +1,7 @@
 # Authentication
 
 coresmith supports Claude Code (default), Codex CLI, OpenCode (with OpenRouter's
-hosted Kimi K3 or Meta's Muse Spark 1.1), and the Kimi Code CLI. Select OpenCode
+hosted Kimi K3 or Meta's Muse Spark 1.3 Contributor), and the Kimi Code CLI. Select OpenCode
 with `CORESMITH_LLM_PROVIDER=opencode`, or Kimi Code with
 `CORESMITH_LLM_PROVIDER=kimi`.
 
@@ -11,7 +11,7 @@ which backend OpenCode talks to:
 | `CORESMITH_OPENCODE_ENDPOINT` | Route | Credential |
 |---|---|---|
 | unset / `openrouter` (default) | `openrouter/moonshotai/kimi-k3` | `OPENROUTER_API_KEY` |
-| `muse-spark` | `meta-model-api/muse-spark-1.1` | `META_MODEL_API_KEY` |
+| `muse-spark` | `meta-model-api/muse-spark-1.3-contributor` | `META_MODEL_API_KEY` |
 
 ## OpenCode + OpenRouter (Kimi K3)
 
@@ -49,9 +49,9 @@ and usage remain in `.coresmith/llm_calls.jsonl`. The trajectory file can contai
 sensitive prompt, reasoning, and tool content, so protect it like other run
 artifacts. CoreSmith uses `permission: "deny"` when tools are disabled.
 
-## OpenCode + Meta Model API (Muse Spark 1.1)
+## OpenCode + Meta Model API (Muse Spark)
 
-[Muse Spark 1.1](https://ai.meta.com/blog/introducing-muse-spark-meta-model-api/)
+[Muse Spark](https://dev.meta.ai/docs/overview)
 is served from Meta's Model API at `https://api.meta.ai/v1` over an
 OpenAI-*chat-completions*-compatible surface. Get a key from the Meta Model API
 console, then:
@@ -76,7 +76,7 @@ Verify the route:
 
 ```bash
 curl -s https://api.meta.ai/v1/models -H "Authorization: Bearer $META_MODEL_API_KEY"
-# -> {"object":"list","data":[{"id":"muse-spark-1.1",...}]}
+# Confirm that muse-spark-1.3-contributor is available to your key.
 ```
 
 Two behaviours worth knowing:
@@ -88,13 +88,14 @@ Two behaviours worth knowing:
   registers under an id the registry does not claim so the
   `@ai-sdk/openai-compatible` adapter actually takes effect. Do not rename it
   without re-verifying against a live key.
-- **`CORESMITH_OPENCODE_VARIANT` is ignored on this endpoint, so CoreSmith drops
-  it.** Muse Spark returns 200 for *any* `--variant` — `low`, `high`, `max`,
-  `minimal`, even a nonsense value — and the reported reasoning-token count does
-  not move. Rather than put a reasoning cap in the command line and the logs that
-  is not actually in force, CoreSmith omits the flag and warns once. Muse Spark
-  is a reasoning model that spends completion budget on hidden reasoning tokens,
-  so size `max_tokens`/output limits with that in mind.
+- **The default model is `muse-spark-1.3-contributor` for every CoreSmith tier.**
+  Set `CORESMITH_OPENCODE_MODEL=meta-model-api/muse-spark-1.3` (or another
+  available Muse Spark version) to override it. CoreSmith registers the selected
+  model with OpenCode, including an explicit legacy `muse-spark-1.1` override.
+- **CoreSmith omits `CORESMITH_OPENCODE_VARIANT` for Muse Spark.** This provider
+  configuration has no OpenCode variant mappings, so calls use the model's
+  default reasoning settings. This does not imply that newer Meta API models
+  lack reasoning controls.
 
 ## Kimi Code
 
