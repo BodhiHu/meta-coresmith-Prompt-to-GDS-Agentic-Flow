@@ -320,6 +320,9 @@ class OrchestratorState(TypedDict):
 
     # Integration review decision (set by integration_review_node) ────────
     integration_review_action: str | None
+    # Checkpointed result of the model-backed review. The decision node may
+    # replay after interrupt(), so it must not invoke the reviewer itself.
+    integration_review_bundle: Annotated[dict | None, _last]
     # Targeted revise plan from integration_review: {block: reuse_spec}. Only
     # these blocks re-enter the tier on a revise; None = normal entry.
     integration_approved_specs: Annotated[dict | None, _last]
@@ -5560,6 +5563,41 @@ def _plan_targeted_revise(
     return plan
 
 
+async def integration_review_prepare_node(state: OrchestratorState) -> dict:
+    """Run and seal the model-backed part before the approval interrupt."""
+    import hashlib
+
+    pr = state.get("project_root", str(PROJECT_ROOT))
+    block_queue = state.get("block_queue", [])
+    tier_list = state.get("tier_list", [])
+    current_idx = state.get("current_tier_index", 0)
+    tier = tier_list[current_idx] if current_idx < len(tier_list) else 1
+    block_names = [b["name"] for b in block_queue if b.get("tier", 1) == tier]
+    if not block_names or state.get("integration_approved_specs"):
+        return {"integration_review_bundle": None}
+    try:
+        from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL
+        from orchestrator.langchain.agents.integration_review_agent import IntegrationReviewAgent
+        result = await IntegrationReviewAgent(
+            model=DEFAULT_MODEL, temperature=0.1,
+        ).review(block_names=block_names, project_root=pr)
+        reviewed_specs = dict(result.get("reviewed_specs") or {})
+        hashes = {
+            name: hashlib.sha256(Path(path).read_bytes()).hexdigest()
+            for name, path in reviewed_specs.items()
+        }
+        bundle = {**result, "reviewed_specs": reviewed_specs,
+                  "reviewed_spec_hashes": hashes, "review_failed": False}
+    except Exception as exc:
+        bundle = {
+            "summary": f"Integration review failed: {exc}",
+            "issues_found": 1, "issues_fixed": 0, "edited_blocks": [],
+            "reviewed_specs": {}, "reviewed_spec_hashes": {},
+            "review_failed": True,
+        }
+    return {"integration_review_bundle": bundle}
+
+
 async def integration_review_node(state: OrchestratorState) -> dict:
     """Run the Integration Agent to check cross-block interface coherence.
 
@@ -5615,17 +5653,28 @@ async def integration_review_node(state: OrchestratorState) -> dict:
                 "integration_review_failed": True, "integration_approved_specs": pending,
                 "revise_blocks": {name: True for name in pending}}
 
-    # Review once; approved edits re-enter verification using their adopted hashes.
+    # The compiled graph checkpoints this bundle before entering this node.
+    # The fallback keeps direct callers and older embedded graphs compatible.
+    bundle = state.get("integration_review_bundle")
     try:
-        from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL
-        from orchestrator.langchain.agents.integration_review_agent import (
-            IntegrationReviewAgent,
-        )
-        agent = IntegrationReviewAgent(model=DEFAULT_MODEL, temperature=0.1)
-        result = await agent.review(
-            block_names=block_names,
-            project_root=pr,
-        )
+        if bundle is not None:
+            import hashlib
+            reviewed_specs = dict(bundle.get("reviewed_specs") or {})
+            expected = dict(bundle.get("reviewed_spec_hashes") or {})
+            actual = {
+                name: hashlib.sha256(Path(path).read_bytes()).hexdigest()
+                for name, path in reviewed_specs.items()
+            }
+            if actual != expected:
+                raise ValueError("reviewed uArch spec changed after review")
+            result = bundle
+        else:
+            from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL
+            from orchestrator.langchain.agents.integration_review_agent import (
+                IntegrationReviewAgent,
+            )
+            agent = IntegrationReviewAgent(model=DEFAULT_MODEL, temperature=0.1)
+            result = await agent.review(block_names=block_names, project_root=pr)
         review_summary = result.get("summary", "No issues found.")
         issues_found = result.get("issues_found", 0)
         issues_fixed = result.get("issues_fixed", 0)
@@ -5639,7 +5688,7 @@ async def integration_review_node(state: OrchestratorState) -> dict:
         edited_blocks, reviewed_specs = [], {}
         review_failed = True
     else:
-        review_failed = False
+        review_failed = bool(result.get("review_failed", False))
 
     completed_by_name = {
         b.get("name"): b
@@ -10261,6 +10310,7 @@ def build_pipeline_graph(checkpointer=None):
     # Nodes (shared by both topologies)
     orchestrator.add_node("init_tier", init_tier_node)
     orchestrator.add_node("process_block", block_subgraph)
+    orchestrator.add_node("integration_review_prepare", integration_review_prepare_node)
     orchestrator.add_node("integration_review", integration_review_node)
     orchestrator.add_node("advance_tier", advance_tier_node)
     orchestrator.add_node("pipeline_complete", pipeline_complete_node)
@@ -10283,7 +10333,8 @@ def build_pipeline_graph(checkpointer=None):
     # Edges (shared)
     orchestrator.add_edge(START, "init_tier")
     orchestrator.add_conditional_edges("init_tier", fan_out_tier)
-    orchestrator.add_edge("process_block", "integration_review")
+    orchestrator.add_edge("process_block", "integration_review_prepare")
+    orchestrator.add_edge("integration_review_prepare", "integration_review")
     orchestrator.add_conditional_edges("integration_review", route_after_integration_review)
     orchestrator.add_conditional_edges(
         "pipeline_complete",
