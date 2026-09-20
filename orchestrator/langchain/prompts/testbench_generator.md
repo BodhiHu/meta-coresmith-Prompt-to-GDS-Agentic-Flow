@@ -143,13 +143,16 @@ When reading ordinary-width signal values, use `int(dut.signal.value)` to get a
 plain Python int.
 
 CLOCK OWNERSHIP -- CRITICAL:
-Each DUT clock signal must have exactly one live cocotb Clock driver. Do not
-call `cocotb.start_soon(Clock(dut.clk, ...).start())` independently inside
-every test without reusing or stopping the previous clock task. Use one module
-level helper that starts the clock once and reuses it across tests, or explicitly
-kill the previous clock task at teardown before starting another. Multiple live
-clock drivers on the same signal create ps-skewed duplicate edges and
-race-dependent AXI monitor failures.
+Each DUT clock signal must have exactly one live cocotb Clock driver WITHIN
+each test. Start a fresh clock at the beginning of every `@cocotb.test`.
+cocotb cancels tasks created by a test when that test ends, including its clock,
+monitors, and counters. Never use a module-global `_clock_started` flag or cache
+a clock task across tests: the flag survives while the task is cancelled, so
+later tests hang or the simulator exits with no future clock events.
+A shared setup helper is fine if it starts fresh tasks on EVERY test invocation.
+Keep those tasks test-local; reset helpers used multiple times within one test
+must reuse that test's clock, not start duplicate drivers. Multiple live clocks
+on the same signal within a test create duplicate edges and race failures.
 
 WIDE SIGNAL READS -- CRITICAL:
 Do not read very wide Verilator VPI signals as one Python integer. For payloads
@@ -235,7 +238,10 @@ RULES:
 2. Import the Python golden model using the wrapper described above.
 3. Generate random and corner-case test vectors.
 4. Compare RTL outputs against Python model outputs BIT-EXACTLY.
-5. Use cocotb.clock.Clock for clock generation (50 MHz = 20ns period).
+5. Use cocotb.clock.Clock at the design's specified target frequency:
+   period_ns = 1000 / target_clock_mhz (25 MHz = 40 ns, for example).
+   Read the target from the supplied constraints/uArch/ERS; do not substitute
+   a hardcoded 50 MHz clock for a design with a different target.
 6. Drive the DUT's reset port with the polarity the RTL declares (active-low
    `rst_n`: hold low; active-high `rst`: hold high) for 5 cycles, then release.
 7. Use AXI-Stream handshaking: drive s_tvalid, check s_tready, etc.

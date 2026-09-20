@@ -49,9 +49,11 @@ COCOTB RULES:
 - Use `cocotb.clock.Clock` for clock generation.
 - Use active-low reset (`rst_n`) when present; otherwise adapt to the actual
   reset port in the top-level RTL.
-- Each DUT clock signal must have exactly one live cocotb Clock driver. Reuse a
-  module-level clock task across tests or explicitly stop the previous task;
-  never start a new free-running clock in every test without cleanup.
+- Each DUT clock signal must have exactly one live cocotb Clock driver per test. Reuse a
+  test-local clock task within a test; start a fresh clock for every test because
+  cocotb cancels the prior test's background tasks. Do not cache a clock task or
+  a `_clock_started` flag across tests. Reset sequences within a test must not
+  spawn duplicate clock drivers.
 - Always drive ready/valid handshakes legally and add cycle-count watchdogs.
 - Never assign to DUT inputs after `ReadOnly()` without first advancing to a
   writable phase such as `FallingEdge(dut.clk)` or `Timer(1, "step")`. Reset,
