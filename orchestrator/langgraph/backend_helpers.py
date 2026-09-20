@@ -23,6 +23,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import time
 from pathlib import Path
 
 from orchestrator.langgraph.pipeline_helpers import (
@@ -1002,6 +1003,30 @@ def run_openroad(
     Returns dict with: success, stdout, stderr, log_path, and any
     parsed metrics from stdout.
     """
+    # A streamed LLM worker supplies its absolute deadline. Reserve time for
+    # the CLI to serialize the ToolResult and diagnostics before its parent
+    # watchdog reaps the process group.
+    deadline_raw = os.environ.get("CORESMITH_WORKER_DEADLINE_EPOCH", "").strip()
+    if deadline_raw:
+        try:
+            remaining = float(deadline_raw) - time.time() - 30.0
+        except ValueError:
+            remaining = None
+        if remaining is not None:
+            if remaining <= 0:
+                message = "OpenROAD not started: worker deadline has no 30s result margin"
+                log_path = _write_step_log_error(
+                    block_name, step, [OPENROAD_BIN, tcl_script], message, attempt,
+                )
+                return {
+                    "success": False,
+                    "stdout": "",
+                    "stderr": message,
+                    "returncode": 124,
+                    "log_path": log_path,
+                }
+            timeout = min(float(timeout), remaining)
+
     # `-exit` so a Tcl error TERMINATES the process instead of dropping to an
     # interactive `openroad>` prompt that hangs (leaked procs observed on macro
     # LEF-discard errors); `-no_init` skips any user ~/.openroad init file.

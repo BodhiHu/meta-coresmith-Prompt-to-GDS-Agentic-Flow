@@ -2988,6 +2988,13 @@ class ClaudeLLM:
         than the caller's cwd. ``None`` preserves the prior launch behavior.
         Raises ``FileNotFoundError`` if the binary is missing.
         """
+        # Pass a wall-clock deadline to tool grandchildren. This is a private
+        # child environment copy: concurrent workers get independent deadlines
+        # and the daemon's os.environ is never mutated.
+        child_env = dict(process_env) if process_env is not None else os.environ.copy()
+        child_env["CORESMITH_WORKER_DEADLINE_EPOCH"] = str(
+            _time_mod.time() + self.timeout
+        )
         process = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
@@ -2995,7 +3002,7 @@ class ClaudeLLM:
             stderr=subprocess.PIPE,
             text=True,
             cwd=cwd,
-            env=process_env,
+            env=child_env,
             # Own session/group so we can reap the ENTIRE tree (the CLI plus any
             # sim/tool grandchildren it spawns) at the end -- see
             # _reap_process_group. Isolating the group also means killpg can't

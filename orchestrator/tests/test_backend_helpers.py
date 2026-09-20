@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import shutil
 import stat
+import subprocess
 import textwrap
 from pathlib import Path
 
@@ -47,6 +48,45 @@ from orchestrator.langgraph.backend_helpers import (
 
 
 class TestRunOpenroad:
+    def test_worker_deadline_caps_inner_timeout(self, tmp_path, monkeypatch):
+        from orchestrator.langgraph import backend_helpers as bh
+        from orchestrator.langgraph import pipeline_helpers as ph
+
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured.update(kwargs)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(bh.subprocess, "run", fake_run)
+        monkeypatch.setattr(bh.time, "time", lambda: 1000.0)
+        monkeypatch.setenv("CORESMITH_WORKER_DEADLINE_EPOCH", "1100")
+        monkeypatch.setattr(ph, "_LOG_DIR", tmp_path / "logs")
+
+        result = bh.run_openroad("route.tcl", "blk", "pnr", timeout=1800)
+
+        assert result["success"] is True
+        assert captured["timeout"] == 70.0
+
+    def test_expired_worker_deadline_refuses_to_spawn(self, tmp_path,
+                                                       monkeypatch):
+        from orchestrator.langgraph import backend_helpers as bh
+        from orchestrator.langgraph import pipeline_helpers as ph
+
+        monkeypatch.setattr(
+            bh.subprocess, "run",
+            lambda *_args, **_kwargs: pytest.fail("OpenROAD must not start"),
+        )
+        monkeypatch.setattr(bh.time, "time", lambda: 1000.0)
+        monkeypatch.setenv("CORESMITH_WORKER_DEADLINE_EPOCH", "1020")
+        monkeypatch.setattr(ph, "_LOG_DIR", tmp_path / "logs")
+
+        result = bh.run_openroad("route.tcl", "blk", "pnr", timeout=1800)
+
+        assert result["success"] is False
+        assert result["returncode"] == 124
+        assert "no 30s result margin" in result["stderr"]
+
     def test_timeout_preserves_partial_diagnostics(self, tmp_path, monkeypatch):
         from orchestrator.langgraph import backend_helpers as bh
         from orchestrator.langgraph import pipeline_helpers as ph
