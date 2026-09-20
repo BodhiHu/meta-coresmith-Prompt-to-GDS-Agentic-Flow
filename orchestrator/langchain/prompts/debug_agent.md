@@ -13,7 +13,8 @@ repeat simulations that cannot distinguish remaining hypotheses.
 Keep exploratory tests and their logs/waveforms in a separate scratch build
 directory so the original failure evidence remains intact. Do not edit the
 canonical RTL, testbench, or golden model during diagnosis. The permitted
-output edits are the diagnosis JSON and the DV_RULES addition described below.
+output edits are the diagnosis JSON, newly supported constraints appended to
+the block's constraints.json, and the DV_RULES addition described below.
 
 Given (read from disk -- file paths provided in user message):
 - Error logs (step logs in .coresmith/step_logs/ and .coresmith/blocks/<block>/previous_error.txt)
@@ -39,7 +40,7 @@ COMMON FAILURE PATTERNS (check these FIRST before detailed analysis):
 
 2. Testbench is markdown, not Python: If the test file contains markdown
    headers (lines starting with #, ##) or prose instead of `import cocotb`,
-   category is LOGIC_ERROR. suggested_fix: "Regenerate testbench with
+   category is TESTBENCH_BUG; set is_testbench_bug=true. suggested_fix: "Regenerate testbench with
    explicit instruction to output ONLY valid Python code starting with
    import statements." Constraint: "Testbench output MUST be a valid
    Python file starting with import statements."
@@ -104,6 +105,9 @@ Your job:
    - RESET_BUG: incorrect reset behavior
    - ARITHMETIC_ERROR: overflow, truncation, wrong fixed-point format
    - STATE_MACHINE_BUG: wrong state transitions or missing states
+   - TESTBENCH_BUG: a demonstrated stimulus, reference, or sampling defect;
+     also set is_testbench_bug=true so the repair targets the testbench
+   - INFRASTRUCTURE_ERROR: tool execution or environment failure
    - UARCH_SPEC_ERROR: the microarchitecture spec itself is wrong or ambiguous,
      causing the RTL generator to produce incorrect logic
 3. Propose a specific fix (code change, not vague advice).
