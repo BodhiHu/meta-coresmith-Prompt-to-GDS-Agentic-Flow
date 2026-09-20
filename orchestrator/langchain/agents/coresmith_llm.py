@@ -575,6 +575,7 @@ def _parse_opencode_json(stdout: str) -> tuple[str, dict]:
     """
     chunks: list[str] = []
     usage: dict = {}
+    step_open = False
     for raw in stdout.splitlines():
         raw = raw.strip()
         if not raw:
@@ -586,11 +587,13 @@ def _parse_opencode_json(stdout: str) -> tuple[str, dict]:
         ev_type = obj.get("type")
         if ev_type == "step_start":
             chunks = []
+            step_open = True
         elif ev_type == "text":
             part = obj.get("part") or {}
             if part.get("type") == "text":
                 chunks.append(part.get("text", "") or "")
         elif ev_type == "step_finish":
+            step_open = False
             tokens = (obj.get("part") or {}).get("tokens") or {}
             step_usage = {
                 "input_tokens": tokens.get("input", 0),
@@ -603,6 +606,16 @@ def _parse_opencode_json(stdout: str) -> tuple[str, dict]:
             }
             for key, value in step_usage.items():
                 usage[key] = usage.get(key, 0) + (value or 0)
+            reason = (obj.get("part") or {}).get("reason")
+            if reason:
+                usage["finish_reason"] = reason
+        elif ev_type == "error":
+            error = obj.get("error") or obj.get("message") or "Unknown OpenCode error"
+            if isinstance(error, dict):
+                error = (error.get("data") or {}).get("message") or error.get("message") or str(error)
+            usage["provider_error"] = str(error)[:600]
+    if step_open:
+        usage["finish_reason"] = "incomplete"
     return "".join(chunks), usage
 
 
@@ -2695,6 +2708,9 @@ class ClaudeLLM:
         except ValueError:
             _max_retries = 1
         _attempt = 0
+        _total_usage: dict = {}
+        _call_start_ns = _time_mod.time_ns()
+        _total_elapsed = 0.0
         while True:
             t0 = _time_mod.monotonic()
             span_start_ns = _time_mod.time_ns()
@@ -2729,6 +2745,13 @@ class ClaudeLLM:
                 )
                 return output
 
+            _total_elapsed += elapsed
+            for key, value in usage.items():
+                if isinstance(value, (int, float)):
+                    _total_usage[key] = _total_usage.get(key, 0) + value
+                else:
+                    _total_usage[key] = value
+
             if (
                 _attempt < _max_retries
                 and not timed_out
@@ -2747,9 +2770,13 @@ class ClaudeLLM:
                     "attempt": _attempt,
                     "max_retries": _max_retries,
                     "returncode": returncode,
+                    "duration_s": elapsed,
+                    "usage": usage,
                     "detail": (stderr_text or output or "")[:300],
                 })
-                _time_mod.sleep(min(2 ** _attempt, 8))
+                _backoff = min(2 ** _attempt, 8)
+                _time_mod.sleep(_backoff)
+                _total_elapsed += _backoff
                 continue
             break
 
@@ -2765,24 +2792,37 @@ class ClaudeLLM:
                 f"{stderr_text[:500] or output[:500]}"
             )
             output = f"[ClaudeLLM error: {error_msg}]"
+        elif usage.get("provider_error"):
+            error_msg = f"OpenCode provider error: {usage['provider_error']}"
+            output = f"[ClaudeLLM error: {error_msg}]"
+        elif usage.get("finish_reason") not in (None, "stop"):
+            error_msg = f"OpenCode did not finish normally: {usage['finish_reason']}"
+            output = f"[ClaudeLLM error: {error_msg}]"
         elif not output:
             error_msg = f"OpenCode CLI returned empty response: {stderr_text[:500]}"
             output = f"[ClaudeLLM error: {error_msg}]"
         else:
             error_msg = ""
 
+        # Preserve terminal metadata from the last attempt; sum numeric usage
+        # across every attempt, including provider failures before a retry.
+        for key in ("finish_reason", "provider_error"):
+            _total_usage.pop(key, None)
+            if key in usage:
+                _total_usage[key] = usage[key]
+        _total_usage["opencode_attempts"] = _attempt + 1
         _log_llm_call(
             model=resolved_model,
             provider="opencode_cli",
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             response=output,
-            duration_s=elapsed,
+            duration_s=_total_elapsed,
             timeout=self.timeout,
             error=error_msg,
             timed_out=timed_out or stalled,
-            usage=usage,
-            start_ts_ns=span_start_ns,
+            usage=_total_usage,
+            start_ts_ns=_call_start_ns,
         )
         return output
 
