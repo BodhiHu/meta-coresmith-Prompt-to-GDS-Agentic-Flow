@@ -84,7 +84,8 @@ When the DUT has AXI-Stream input (s_tvalid/s_tready) and output
   - For backpressure tests, use ``cocotb.start_soon()`` to run sender
     and receiver concurrently, toggling m_tready on/off in the receiver.
 
-  - PUBLISHED STREAM SAMPLER: if this block owns the chip's published stream ports (the ERS names
+  - PUBLISHED STREAM SAMPLER: ONLY if the published grading contract explicitly
+    requires post-edge acceptance sampling for the chip's published stream ports (the ERS names
     them: in_valid/in_ready/in_data/in_last, out_valid/out_ready/out_data/
     out_last), drive and sample THOSE ports exactly like the published
     grader (post-edge): drive inputs and out_ready for the cycle, `await
@@ -92,8 +93,9 @@ When the DUT has AXI-Stream input (s_tvalid/s_tready) and output
     reads 1 after the edge (re-offer it otherwise), count an output beat
     consumed only if `out_valid` reads 1 after the edge with the `out_ready`
     you drove, then `await NextTimeStep`. Randomize input gaps and ~15%
-    output backpressure over several seeds. The phase-safe helper below is
-    for the block's INTERNAL AXI-Stream ports.
+    output backpressure over several seeds. Port names alone do not establish
+    this exception. Otherwise use the standard edge-handshake rules below
+    for AXI-Stream, srdy/drdy, and other synchronous valid/ready channels.
   - Every AXI-Stream send helper MUST be phase-safe. Drive
     ``tvalid/tdata/tlast`` before the rising edge that may accept the beat,
     sample ``tready`` for that same rising edge, then deassert ``tvalid``
@@ -181,57 +183,47 @@ If the uArch spec lacks Section 6a or `output_timing`, fall back to the
 conservative rules below.
 
 GOLDEN MODEL TIMING -- CRITICAL:
-Register writes in RTL take effect on the NEXT clock edge (non-blocking
-assignment ``<=``).  Your golden model must NOT read back a written value
-on the same cycle.  Insert ``await ClockCycles(dut.clk, 1)`` between a
-write and its read-back verification.
-
-For multi-stage pipelines (e.g., a 2-FF reset synchronizer), the golden
-model must account for the pipeline latency.  A value written on cycle N
-is readable on cycle N + pipeline_depth.
+Model state changes at their specified clock edges. A non-blocking assignment
+updates after evaluation of its triggering edge; it does not inherently add
+another full cycle before a test can observe the new value. Additional
+pipeline latency comes from the actual register boundaries and contract.
 
 VERILATOR NBA TIMING -- CRITICAL:
 Verilator resolves non-blocking assignments (<=) AFTER the RisingEdge
 callback returns. Reading a registered output immediately after
 ``await RisingEdge(dut.clk)`` gives the OLD pre-clock-edge value.
 
-To read the correct post-update value of registered outputs:
+To observe settled post-update registered state:
     await RisingEdge(dut.clk)   # clock edge fires
-    await FallingEdge(dut.clk)  # wait for NBA to settle
+    await ReadOnly()           # wait for this time step's HDL updates
     actual = int(dut.out.value) # NOW read the registered output
 
 NEVER compare golden model output against DUT signals read immediately
 after RisingEdge if those signals use non-blocking assignment (<=).
 
 OUTPUT SAMPLING PROTOCOL -- MANDATORY:
-Every test function MUST use this pattern for reading DUT outputs:
-
-    async def sample_output(dut):
-        """Wait for output to be valid and stable."""
-        await RisingEdge(dut.clk)
-        await FallingEdge(dut.clk)  # NBA settle
-        return int(dut.out.value)
-
-Rules:
-1. NEVER use Timer(0) -- it causes delta-cycle glitches in Verilator.
-2. For REGISTERED outputs (assigned with <=): sample after FallingEdge.
-3. For COMBINATIONAL outputs (assigned with =): sample after
-   RisingEdge + Timer(1, unit="ns").
-4. For FSM-driven outputs: use a polling loop with timeout, not
-   fixed-cycle waits:
-
-    for _ in range(100):
-        await RisingEdge(dut.clk)
-        await FallingEdge(dut.clk)
-        if int(dut.out_valid.value) == 1:
-            break
-    else:
-        raise TimeoutError("out_valid never asserted within 100 cycles")
-
-5. After driving an AXI-Stream transaction (tvalid+tready handshake),
-   wait at least 2 clock cycles before checking downstream outputs.
-6. After reset deassertion, wait pipeline_depth + 2 cycles before
-   checking ANY output.
+Distinguish the values ACCEPTED AT an edge from state PRODUCED BY that edge.
+- For a synchronous valid/ready transfer, save the settled valid, ready, and
+  payload BEFORE the accepting rising edge. For example, drive at FallingEdge,
+  await ReadOnly to settle combinational ready, and snapshot the handshake;
+  await RisingEdge to count that saved transfer. This works even if registered
+  valid/ready changes immediately after acceptance. Do not infer a completed
+  transfer from the following falling edge's valid/ready values.
+- Observe registered status, retirement pulses, and newly produced data after
+  RisingEdge + ReadOnly. A falling-edge sample can observe stable state too,
+  but cannot reconstruct the prior rising edge's handshake.
+- After ReadOnly, advance to a writable phase (normally the next FallingEdge)
+  before driving DUT inputs. Never write in ReadOnly or use Timer(0).
+- Keep protocol monitors and scoreboards running every cycle. Match outputs
+  to accepted inputs and the specified latency; do not blindly skip two
+  cycles after a transaction, which can lose a one-cycle response or pulse.
+- Start monitors/responders BEFORE reset release. If a receiver is not ready
+  to record a transfer yet, hold its ready low until it is. Observe the first
+  post-reset request from the first active edge; do not wait pipeline_depth+2
+  cycles before checking all outputs. Any contractually required startup
+  latency affects expected data validity, not whether handshakes are recorded.
+- Use bounded polling/scoreboards for variable-latency outputs. Never infer
+  cycle timing solely from a signal being assigned with '=' or '<='.
 
 RULES:
 1. Use cocotb with Python 3.11+ syntax.
