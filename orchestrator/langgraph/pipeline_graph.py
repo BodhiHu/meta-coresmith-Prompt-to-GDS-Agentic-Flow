@@ -6323,6 +6323,26 @@ async def _park_caravel_assembly_failure(pr: str, design_name: str, rtl_paths: d
     return result
 
 
+def _integration_handoff_context(pr: str, fallback_name: str,
+                                 summary: str) -> tuple[str, str]:
+    """Apply the task's authoritative top and full boundary requirements."""
+    from orchestrator.harness.top_module import declared_top
+    design_name = declared_top(pr) or fallback_name
+    root = Path(pr)
+    requirements_path = next(
+        (path for path in (root / "inputs" / "requirements.md",
+                           root / "requirements.md") if path.is_file()),
+        None,
+    )
+    if requirements_path is not None:
+        try:
+            summary += ("\n\n--- AUTHORITATIVE FULL REQUIREMENTS ---\n"
+                        + requirements_path.read_text(encoding="utf-8"))
+        except OSError:
+            pass
+    return design_name, summary
+
+
 async def integration_check_node(state: OrchestratorState) -> dict:
     """Run the Integration Lead agent to check compatibility and generate top-level RTL.
 
@@ -6669,9 +6689,16 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                             f"\nBus protocol: {df.get('bus_protocol', '?')}"
                             f", Data width: {df.get('data_width_bits', '?')} bits"
                         )
-                except (OSError, json.JSONDecodeError, KeyError):
-                    pass
-                break
+                    break
+                except (json.JSONDecodeError, OSError, AttributeError):
+                    continue
+
+        # Summaries omit exact boundary pin names and other normative clauses.
+        # Give the integration author the original requirements verbatim; the
+        # declared top above and this document together define the external
+        # interface rather than child-module naming conventions.
+        design_name, prd_summary = _integration_handoff_context(
+            pr, design_name, prd_summary)
 
         rtl_dir = Path(pr) / "rtl" / "integration"
         rtl_dir.mkdir(parents=True, exist_ok=True)
