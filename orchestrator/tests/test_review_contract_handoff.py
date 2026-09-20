@@ -95,16 +95,22 @@ async def test_review_includes_available_cross_tier_edges_without_adopting_neigh
 @pytest.mark.parametrize("relative", [
     "arch/uarch_specs_review/context/spi.md", "arch/uarch_specs/spi.md",
 ])
-async def test_review_rejects_mutated_adjacent_spec(tmp_path, relative):
+@pytest.mark.parametrize("remove", [False, True])
+async def test_review_restores_and_rejects_mutated_adjacent_spec(tmp_path, relative, remove):
     from orchestrator.langchain.agents.integration_review_agent import IntegrationReviewAgent
 
     _seed_cross_tier_review(tmp_path)
     agent = IntegrationReviewAgent()
 
     async def corrupt_context(**kwargs):
-        Path(tmp_path / relative).write_text("unverified replacement")
+        target = Path(tmp_path / relative)
+        if remove:
+            target.unlink()
+        else:
+            target.write_text("unverified replacement")
         return '{"issues_found": 0, "issues_fixed": 0}'
 
     agent.llm.call = AsyncMock(side_effect=corrupt_context)
     with pytest.raises(ValueError, match="read-only adjacent spec"):
         await agent.review(["core"], str(tmp_path))
+    assert (tmp_path / relative).read_text() == "# previously verified SPI spec"

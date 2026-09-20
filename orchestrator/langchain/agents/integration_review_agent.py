@@ -349,9 +349,20 @@ class IntegrationReviewAgent:
                 run_name="Integration Review",
             )
 
+            changed_context = []
             for path, before in context_before.items():
                 if not path.exists() or path.read_bytes() != before:
-                    raise ValueError(f"Integration review changed read-only adjacent spec: {path}")
+                    changed_context.append(path)
+                    # Preserve the previously verified canonical bytes even
+                    # when a worker ignores the read-only instruction. The
+                    # review still fails and none of its edits are adopted.
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(before)
+            if changed_context:
+                raise ValueError(
+                    "Integration review changed read-only adjacent spec; restored: "
+                    + ", ".join(map(str, changed_context))
+                )
 
             summary = content.strip() if content else "No issues found."
 
