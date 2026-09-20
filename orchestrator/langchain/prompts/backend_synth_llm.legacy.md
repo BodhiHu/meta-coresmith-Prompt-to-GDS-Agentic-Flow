@@ -74,7 +74,7 @@ All outputs go in: `{output_dir}/`
 4. Generate the SDC file with:
    ```
    create_clock -name clk -period {period_ns:.2f} [get_ports clk]
-   set_input_delay {input_delay_ns:.1f} -clock clk [remove_from_collection [all_inputs] [get_ports clk]]
+   set_input_delay {input_delay_ns:.1f} -clock clk [all_inputs -no_clocks]
    set_output_delay {output_delay_ns:.1f} -clock clk [all_outputs]
    ```
 

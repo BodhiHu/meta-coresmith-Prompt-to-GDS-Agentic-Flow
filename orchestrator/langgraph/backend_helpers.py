@@ -431,7 +431,7 @@ write_verilog -noattr {out / f"{design_name}_netlist.v"}
     sdc_path.write_text(
         f"create_clock -name clk -period {period_ns} [get_ports clk]\n"
         f"set_input_delay {period_ns * 0.2:.1f} -clock clk "
-        "[remove_from_collection [all_inputs] [get_ports clk]]\n"
+        "[all_inputs -no_clocks]\n"
         f"set_output_delay {period_ns * 0.2:.1f} -clock clk [all_outputs]\n"
     )
 

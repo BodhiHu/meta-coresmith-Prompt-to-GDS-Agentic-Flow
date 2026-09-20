@@ -2319,7 +2319,7 @@ def _build_sdc_content(rtl_source: str, target_clock_mhz: float) -> str:
         sdc_content = (
             f"create_clock -name clk -period {period_ns} [get_ports {clock_port}]\n"
             f"set_input_delay -clock clk {period_ns * 0.2} "
-            f"[remove_from_collection [all_inputs] [get_ports {clock_port}]]\n"
+            f"[all_inputs -no_clocks]\n"
             f"set_output_delay -clock clk {period_ns * 0.2} [all_outputs]\n"
         )
     else:

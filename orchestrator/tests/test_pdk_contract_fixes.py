@@ -32,8 +32,21 @@ def test_prompts_exclude_clock_from_input_delay():
     for name in ("backend_synth_llm.md", "backend_synth_llm.legacy.md",
                  "sdc_generator.md"):
         text = (prompt_dir / name).read_text()
-        assert "remove_from_collection [all_inputs] [get_ports" in text
+        assert "[all_inputs -no_clocks]" in text
         assert "-clock clk [all_inputs]" not in text
+
+
+def test_all_generated_sdc_paths_use_opensta_clock_exclusion():
+    root = Path(__file__).parents[1]
+    for relative in (
+        "langgraph/pipeline_helpers.py",
+        "langgraph/backend_helpers.py",
+        "langgraph/backend_graph.py",
+        "mcp_server.py",
+    ):
+        text = (root / relative).read_text()
+        assert "[all_inputs -no_clocks]" in text
+        assert "remove_from_collection" not in text
 
 
 def test_reference_reports_density_fill_not_run():

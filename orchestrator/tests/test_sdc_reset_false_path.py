@@ -35,14 +35,14 @@ class TestResetFalsePath:
         # clock + blanket I/O delays still present
         assert "create_clock -name clk" in sdc
         assert "set_input_delay -clock clk" in sdc
-        assert "[remove_from_collection [all_inputs] [get_ports clk]]" in sdc
+        assert "[all_inputs -no_clocks]" in sdc
 
     def test_env_off_restores_blanket_sdc(self, monkeypatch):
         monkeypatch.setenv("CORESMITH_SDC_RESET_FALSE_PATH", "0")
         sdc = ph._build_sdc_content(RTL_WITH_RST, 50.0)
         assert "set_false_path" not in sdc           # reset exemption gone
         assert "set_input_delay -clock clk" in sdc    # blanket delays remain
-        assert "[remove_from_collection [all_inputs] [get_ports clk]]" in sdc
+        assert "[all_inputs -no_clocks]" in sdc
 
     def test_reset_name_agnostic(self, monkeypatch):
         monkeypatch.delenv("CORESMITH_SDC_RESET_FALSE_PATH", raising=False)

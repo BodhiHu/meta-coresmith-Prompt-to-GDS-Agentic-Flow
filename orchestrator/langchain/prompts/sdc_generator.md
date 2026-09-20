@@ -12,7 +12,7 @@ TASK:
 SDC TEMPLATE (adapt the port name):
 ```sdc
 create_clock -name clk -period {period_ns} [get_ports <clock_port_name>]
-set_input_delay -clock clk {input_delay_ns} [remove_from_collection [all_inputs] [get_ports <clock_port_name>]]
+set_input_delay -clock clk {input_delay_ns} [all_inputs -no_clocks]
 set_output_delay -clock clk {output_delay_ns} [all_outputs]
 ```
 
