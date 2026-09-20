@@ -509,6 +509,22 @@ def _format_constraints(state: BackendState) -> str:
 # ---------------------------------------------------------------------------
 
 _INTEGRATION_TB_DIRS = ("sim_build/integration", "tb/integration")
+_VALIDATION_TB_DIRS = ("sim_build/validation", "tb/validation")
+
+
+def _tb_uses_internal_force(path: Path) -> bool:
+    """True when a cocotb testbench changes non-port state with Force()."""
+    import ast
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, UnicodeError):
+        return True  # unreadable stimulus is never safe to replay as pins
+    return any(
+        isinstance(node, ast.Call)
+        and ((isinstance(node.func, ast.Name) and node.func.id == "Force")
+             or (isinstance(node.func, ast.Attribute) and node.func.attr == "Force"))
+        for node in ast.walk(tree)
+    )
 
 
 def find_integration_tb(root: Path, design_name: str) -> tuple[str, str]:
@@ -530,21 +546,38 @@ def find_integration_tb(root: Path, design_name: str) -> tuple[str, str]:
     -- picking one of several testbenches by sort order is how a gate ends up
     grading the wrong stimulus and calling it a pass.
     """
+    override = os.environ.get("CORESMITH_GATE_SIM_TB", "").strip()
+    if override:
+        chosen = Path(override)
+        if not chosen.is_absolute():
+            chosen = root / chosen
+        if not chosen.is_file():
+            return "", f"CORESMITH_GATE_SIM_TB does not name a file: {chosen}"
+        if _tb_uses_internal_force(chosen):
+            return "", (f"CORESMITH_GATE_SIM_TB {chosen} uses cocotb Force(); "
+                        "pin-vector replay cannot reproduce internal forcing")
+        return str(chosen), "using explicit pin-only CORESMITH_GATE_SIM_TB"
+
+    forced: Path | None = None
     for rel in _INTEGRATION_TB_DIRS:
         cand = root / rel / f"test_{design_name}.py"
         if cand.is_file():
-            return str(cand), ""
+            if not _tb_uses_internal_force(cand):
+                return str(cand), ""
+            forced = cand
     for rel in _INTEGRATION_TB_DIRS:
         d = root / rel
         if not d.is_dir():
             continue
         found = sorted(p for p in d.glob("test_*.py") if p.is_file())
         if len(found) == 1:
-            return str(found[0]), (
-                f"no test_{design_name}.py; using the only integration "
-                f"testbench present, {found[0].name} (the TB is named after the "
-                "frontend design, the backend top module is "
-                f"'{design_name}')")
+            if not _tb_uses_internal_force(found[0]):
+                return str(found[0]), (
+                    f"no test_{design_name}.py; using the only integration "
+                    f"testbench present, {found[0].name} (the TB is named after the "
+                    "frontend design, the backend top module is "
+                    f"'{design_name}')")
+            forced = found[0]
         if len(found) > 1:
             names = ", ".join(p.name for p in found)
             return "", (
@@ -553,6 +586,25 @@ def find_integration_tb(root: Path, design_name: str) -> tuple[str, str]:
                 "which stimulus is the chip's -- grading the wrong testbench "
                 "would report a pass for a netlist nothing verified. Name the "
                 f"chip's TB test_{design_name}.py, or remove the others.")
+    if forced is not None:
+        validation = []
+        for rel in _VALIDATION_TB_DIRS:
+            d = root / rel
+            if d.is_dir():
+                validation.extend(p for p in d.glob("test_*.py") if p.is_file())
+        validation = list(dict.fromkeys(validation))
+        safe = [p for p in validation if not _tb_uses_internal_force(p)]
+        exact = [p for p in safe if p.name == f"test_{design_name}_validation.py"]
+        chosen = exact[0] if len(exact) == 1 else (safe[0] if len(safe) == 1 else None)
+        if chosen is not None:
+            return str(chosen), (
+                f"integration testbench {forced.name} uses cocotb Force() on "
+                "internal state that pin-vector replay cannot reproduce; using "
+                f"pin-driven validation testbench {chosen.name}")
+        return "", (
+            f"integration testbench {forced} uses cocotb Force() on internal "
+            "state, and no unambiguous pin-driven validation testbench exists; "
+            "refusing to attach a gate-equivalence verdict to unsupported stimulus")
     return "", ("no integration-DV testbench found -- chip_top gate-sim needs "
                 "the integration vectors as its reference stimulus")
 
@@ -2954,6 +3006,12 @@ def route_after_increment(state: BackendState) -> str:
     if exhausted:
         return "ask_human"
 
+    # A synthesis or chip gate-sim failure occurs inside flat_top_synthesis.
+    # Retrying at PnR would bypass the failed gate and consume a netlist that
+    # has not earned a functional-equivalence verdict.
+    if state.get("phase") == "synth" or state.get("chip_gate_sim_ok") is False:
+        return "flat_top_synthesis"
+
     action = (state.get("debug_result") or {}).get("next_action", "retry_pnr")
     target_mapping = {
         "retry_drc": "drc",
@@ -2965,6 +3023,7 @@ def route_after_increment(state: BackendState) -> str:
 
 route_after_increment.__edge_labels__ = {
     "ask_human": "EXHAUSTED -> PARK",
+    "flat_top_synthesis": "RETRY SYNTH / GATE SIM",
     "run_pnr": "RETRY PNR",
     "drc": "RETRY DRC",
     "lvs": "RETRY LVS",

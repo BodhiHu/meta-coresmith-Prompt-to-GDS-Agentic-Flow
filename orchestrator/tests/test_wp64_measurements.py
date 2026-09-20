@@ -37,7 +37,7 @@ def test_maximum_requires_executed_owner_declared_case(tmp_path, monkeypatch):
         assert result['verdict'] == expected
 
 
-@pytest.mark.parametrize('limit,cycles,bits,expected', [(100,1,1,'bounded'),(3,3,27,'bounded'),(100,6,54,'pass')])
+@pytest.mark.parametrize('limit,cycles,bits,expected', [(100,1,1,'bounded'),(3,2,18,'bounded'),(100,5,45,'pass')])
 def test_gate_sim_full_and_partial_comparison_counts(tmp_path,monkeypatch,limit,cycles,bits,expected):
     net,pdk = _stub_env(monkeypatch,tmp_path)
     monkeypatch.setattr(gs,'gate_sim_max_cycles',lambda:limit)

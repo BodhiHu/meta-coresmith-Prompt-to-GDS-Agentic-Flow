@@ -299,6 +299,12 @@ class TestRouteAfterIncrement:
     def test_within_limit(self):
         assert route_after_increment({"attempt": 2, "max_attempts": 3}) == "run_pnr"
 
+    def test_synth_gate_failure_retries_synthesis(self):
+        state = {"attempt": 2, "max_attempts": 3, "phase": "synth",
+                 "chip_gate_sim_ok": False,
+                 "debug_result": {"next_action": "retry_pnr"}}
+        assert route_after_increment(state) == "flat_top_synthesis"
+
     def test_at_limit(self):
         assert route_after_increment({"attempt": 3, "max_attempts": 3}) == "run_pnr"
 

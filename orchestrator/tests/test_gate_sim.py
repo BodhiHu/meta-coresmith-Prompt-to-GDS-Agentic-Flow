@@ -20,6 +20,7 @@ toolchain (which is not present on every host).
 from __future__ import annotations
 
 import json
+import shutil
 
 import pytest
 
@@ -607,6 +608,50 @@ def test_render_driver_cpp_is_design_agnostic():
     assert 'record("clk"' not in cpp
     # the verdict must always carry the two anti-blank counters
     assert "cycles_compared" in cpp and "output_bits_compared" in cpp
+    assert "bool primed = false" in cpp
+
+
+def test_driver_primes_synchronous_reset_before_comparison(tmp_path):
+    """Exercise the generated driver with a real Verilator build.
+
+    The reference may expose a reset value before the first synchronous-reset
+    edge. That unclocked state is not a hardware guarantee; row one is the
+    first aligned state and must still be checked.
+    """
+    if not shutil.which("verilator"):
+        pytest.skip("verilator not installed")
+    net = tmp_path / "sync_reset.v"
+    net.write_text("""
+module sync_reset(input clk, input rst_n, output reg o);
+  always @(posedge clk) begin
+    if (!rst_n) o <= 1'b1;
+    else o <= 1'b0;
+  end
+endmodule
+""")
+    vectors = tmp_path / "vectors.txt"
+    vectors.write_text(
+        "# in rst_n:1\n# out o:1\n"
+        "0 | 1\n"  # pre-first-edge RTL initialization: deliberately differs
+        "0 | 1\n"  # first reset edge established state
+        "1 | 1\n"  # deassertion is sampled by this edge
+        "1 | 0\n"
+    )
+    ports = [gs.Port("clk", "input"), gs.Port("rst_n", "input"),
+             gs.Port("o", "output")]
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "gate_sim_main.cpp").write_text(
+        gs.render_driver_cpp("sync_reset", ports, "clk"))
+
+    result = gs.build_and_run_gate_sim(
+        top="sync_reset", netlist_path=str(net), sources=[],
+        vectors_path=str(vectors), work_dir=work, timeout_s=60)
+
+    assert result["ok"] is True
+    assert result["diverged"] is False
+    assert result["cycles_compared"] == 3
+    assert result["output_bits_compared"] == 3
 
 
 def test_render_driver_cpp_handles_wide_ports():
@@ -717,8 +762,8 @@ def test_power_only_boundary_is_judged_not_vetoed(monkeypatch, tmp_path):
     net, pdk = _stub_env(monkeypatch, tmp_path, netlist=_NETLIST_RAILS)
     monkeypatch.setattr(
         gs, "build_and_run_gate_sim",
-        lambda **_k: {"ok": True, "cycles_compared": 6,
-                      "output_bits_compared": 54, "diverged": False},
+        lambda **_k: {"ok": True, "cycles_compared": 5,
+                      "output_bits_compared": 45, "diverged": False},
     )
     res = gs.check_gate_sim(_BLOCK, str(net), "r.v", "tb.py",
                             sim_runner=_runner_for(_good_ref(tmp_path)),
@@ -880,8 +925,8 @@ def test_top_is_resolved_from_netlist_structure_not_the_block_name(monkeypatch,
     net, pdk = _stub_env(monkeypatch, tmp_path)
     monkeypatch.setattr(
         gs, "build_and_run_gate_sim",
-        lambda **_k: {"ok": True, "cycles_compared": 6,
-                      "output_bits_compared": 54, "diverged": False},
+        lambda **_k: {"ok": True, "cycles_compared": 5,
+                      "output_bits_compared": 45, "diverged": False},
     )
     res = gs.check_gate_sim({"name": "totally_different_name",
                              "is_chip_top": True},
@@ -1108,15 +1153,15 @@ def test_matching_netlist_passes(monkeypatch, tmp_path):
     net, pdk = _stub_env(monkeypatch, tmp_path)
     monkeypatch.setattr(
         gs, "build_and_run_gate_sim",
-        lambda **_k: {"ok": True, "cycles_compared": 6,
-                      "output_bits_compared": 54, "diverged": False},
+        lambda **_k: {"ok": True, "cycles_compared": 5,
+                      "output_bits_compared": 45, "diverged": False},
     )
     res = gs.check_gate_sim(_BLOCK, str(net), "r.v", "tb.py",
                             sim_runner=_runner_for(_good_ref(tmp_path)),
                             pdk_root=pdk, work_root=tmp_path / "work")
     assert res.status == gs.STATUS_PASS
     assert res.ran is True and res.ok is True and res.blocking is False
-    assert res.cycles_compared == 6
+    assert res.cycles_compared == 5
 
 
 def test_reference_run_is_isolated_and_seed_pinned(monkeypatch, tmp_path):
@@ -1135,8 +1180,8 @@ def test_reference_run_is_isolated_and_seed_pinned(monkeypatch, tmp_path):
 
     monkeypatch.setattr(
         gs, "build_and_run_gate_sim",
-        lambda **_k: {"ok": True, "cycles_compared": 6,
-                      "output_bits_compared": 54, "diverged": False},
+        lambda **_k: {"ok": True, "cycles_compared": 5,
+                      "output_bits_compared": 45, "diverged": False},
     )
     monkeypatch.delenv("CORESMITH_DV_SEED_PIN", raising=False)
     gs.check_gate_sim(_BLOCK, str(net), "r.v", "tb.py", sim_runner=runner,

@@ -93,6 +93,34 @@ def test_no_testbench_at_all_is_reported_not_silently_passed(tmp_path):
     assert "no integration-DV testbench found" in note
 
 
+def test_internal_force_selects_pin_driven_validation_tb(tmp_path):
+    d = _tb_dir(tmp_path)
+    (d / "test_chip_top.py").write_text(
+        "from cocotb.handle import Force\ndut.internal.value = Force(0)\n")
+    vd = tmp_path / "tb" / "validation"
+    vd.mkdir(parents=True)
+    expected = vd / "test_chip_top_validation.py"
+    expected.write_text("# pin-only validation stimulus\n")
+
+    tb, note = find_integration_tb(tmp_path, "chip_top")
+
+    assert tb == str(expected)
+    assert "Force()" in note and "pin-driven" in note
+
+
+def test_explicit_gate_sim_tb_is_pin_only_and_fail_closed(tmp_path, monkeypatch):
+    safe = tmp_path / "tb" / "validation" / "safe.py"
+    safe.parent.mkdir(parents=True)
+    safe.write_text("# pin-only\n")
+    monkeypatch.setenv("CORESMITH_GATE_SIM_TB", "tb/validation/safe.py")
+    assert find_integration_tb(tmp_path, "chip_top")[0] == str(safe)
+
+    safe.write_text("import cocotb\ndut.hidden.value = cocotb.handle.Force(0)\n")
+    tb, note = find_integration_tb(tmp_path, "chip_top")
+    assert tb == ""
+    assert "cannot reproduce internal forcing" in note
+
+
 # ---------------------------------------------------------------------------
 # stop_after_gate_sim routing
 # ---------------------------------------------------------------------------

@@ -35,9 +35,10 @@ METHOD: cycle-accurate VECTOR REPLAY (design-agnostic)
    every cycle boundary -- inputs the edge is about to sample, outputs that
    settled from the previous edge.
 3. Verilate the GATE NETLIST + the PDK standard-cell simulation models and
-   drive it from a generated C++ testbench (``--cc --exe``, no cocotb): for each
-   recorded cycle, apply the recorded inputs, ``eval()``, compare EVERY output
-   port against the recorded value, then pulse the clock.
+   drive it from a generated C++ testbench (``--cc --exe``, no cocotb). Replay
+   the first recorded edge to establish sequential state, then compare every
+   output before each following edge. The pre-first-edge state is not a
+   synchronous-reset guarantee and is therefore never scored.
 4. Any divergence, a netlist that will not elaborate, a build/run failure, or a
    blank/absent verdict -> FAIL.
 
@@ -1557,6 +1558,7 @@ int main(int argc, char **argv) {{
   V{top} *dut = new V{top};
   long long cycle = 0, compared = 0;
   long long bits_compared = 0;
+  bool primed = false;  // no sequential equivalence claim before one replayed edge
   std::string line;
   std::vector<std::string> in_tok({n_in}), out_tok({n_out});
 
@@ -1582,13 +1584,19 @@ int main(int argc, char **argv) {{
 {chr(10).join(drive)}
     dut->eval();
 
-    // Compare the pre-edge steady state of every output port.
+    // The first row is the state before the first recorded edge. A synchronous
+    // reset has not executed yet, so RTL initialization and mapped-flop power-up
+    // values may legitimately differ. Replay that edge, then compare aligned
+    // pre-edge states starting with the next row.
+    if (primed) {{
 {chr(10).join(check)}
-    compared++;
+      compared++;
+    }}
 
     // Clock edge.
     dut->{clock} = 1; dut->eval();
     dut->{clock} = 0; dut->eval();
+    primed = true;
     cycle++;
 {dbg_break}
   }}
@@ -2002,7 +2010,9 @@ def check_gate_sim(
         return _fail("gate simulation compared 0 output bits (every recorded "
                      "output was unknown) -- that is not a pass")
 
-    expected_bits = sum(bit in "01" for _, outputs in vec.rows
+    # Row zero primes sequential state; scored comparisons begin at row one.
+    expected_cycles = max(0, vec.cycles - 1)
+    expected_bits = sum(bit in "01" for _, outputs in vec.rows[1:]
                         for value in outputs for bit in value)
     detail = {"work_dir": str(work_dir), "recorded_cycles": vec.cycles,
               "reference_cycles": vec.reference_cycles, "compared_cycles": cycles,
@@ -2024,11 +2034,12 @@ def check_gate_sim(
         res.detail = detail
         return res
 
-    if cycles > vec.cycles or bits > expected_bits:
+    if cycles > expected_cycles or bits > expected_bits:
         res = _fail("gate simulation reported impossible comparison counts")
         res.detail = detail
         return res
-    if cycles < vec.cycles or bits < expected_bits or vec.cycles < vec.reference_cycles:
+    if (cycles < expected_cycles or bits < expected_bits
+            or vec.cycles < vec.reference_cycles):
         return GateSimResult(
             ran=True, ok=False, status=STATUS_BOUNDED,
             reason="Bounded gate comparison; the complete recorded reference was not compared",
