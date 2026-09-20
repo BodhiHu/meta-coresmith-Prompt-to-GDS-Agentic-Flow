@@ -387,9 +387,14 @@ class RunSynthYosys(EdaTool):
                 verb=self.verb, design=req.design,
             )
         clock = float(req.params.get("clock_mhz", 50.0))
+        rtls = [str(p) for p in req.params.get("rtls", [])]
+        if not rtls:
+            rtls = [str(rtl)]
         res = synthesize_block(
             {"name": req.design}, str(rtl), target_clock_mhz=clock,
             attempt=int(req.params.get("attempt", 1)),
+            extra_rtl_paths=rtls[1:], output_dir=req.out_dir,
+            timeout_s=req.timeout_s,
         )
         success = bool(res.get("success"))
         tool_ok = success or not _is_infra_failure(res.get("log", ""))
@@ -435,6 +440,10 @@ class RunSynthYosys(EdaTool):
         """Run a caller-authored yosys script verbatim and parse its stat."""
         out_dir = _synth_out_dir(req)
         out_dir.mkdir(parents=True, exist_ok=True)
+        before = {
+            p: (p.stat().st_mtime_ns, p.stat().st_size)
+            for p in [*out_dir.glob("*netlist*.v"), *out_dir.glob("*.v")]
+        }
         rc, stdout, stderr, infra = _run_cmd(
             [_resolve_yosys(), "-s", str(script)],
             timeout=req.timeout_s or 900, cwd=str(PROJECT_ROOT))
@@ -446,9 +455,12 @@ class RunSynthYosys(EdaTool):
                               details=(stderr or stdout)[-400:])]
         stat_res = SynthStatChecker().check(req, out_dir)
         checks.append(stat_res)
-        nets = sorted(out_dir.glob("*netlist*.v")) or sorted(out_dir.glob("*.v"))
-        if nets:
-            checks.append(_artifact_check("netlist", nets[0]))
+        fresh = [p for p in sorted(out_dir.glob("*.v"))
+                 if before.get(p) != (p.stat().st_mtime_ns, p.stat().st_size)]
+        # Prefer conventional names, but only among artifacts from this run. A
+        # stale *netlist*.v must not hide a newly written fallback such as foo.v.
+        nets = [p for p in fresh if "netlist" in p.name] or fresh
+        checks.append(_artifact_check("netlist", nets[0] if nets else None))
         metrics = {
             "cells": int(stat_res.metrics.get("cells", 0) or 0),
             "gate_count": int(stat_res.metrics.get("cells", 0) or 0),
@@ -494,7 +506,13 @@ class RunLintVerilator(EdaTool):
                 checks=[CheckResult("inputs", "fail", details="run_lint needs --rtl")],
                 verb=self.verb, design=req.design,
             )
-        res = lint_rtl(str(rtl), req.design or Path(rtl).stem)
+        rtls = [str(p) for p in req.params.get("rtls", [])]
+        if not rtls:
+            rtls = [str(rtl)]
+        res = lint_rtl(
+            str(rtl), req.design or Path(rtl).stem,
+            extra_rtl_paths=rtls[1:], timeout_s=req.timeout_s,
+        )
         clean = bool(res.get("clean"))
         msg = res.get("errors", "") or res.get("warnings", "")
         tool_ok = clean or not _is_infra_failure(msg)

@@ -1407,7 +1407,11 @@ def _assert_rtl_materialized(rtl_path: Path, block_name: str) -> str | None:
 # Lint
 # ---------------------------------------------------------------------------
 
-def lint_rtl(rtl_path: str, block_name: str, attempt: int = 1) -> dict:
+def lint_rtl(
+    rtl_path: str, block_name: str, attempt: int = 1,
+    *, extra_rtl_paths: list[str] | None = None,
+    timeout_s: int | None = None,
+) -> dict:
     """Run Verilator lint on a Verilog file (read-only, no file mutation).
 
     Uses -Wno-fatal so style warnings (unused signals, EOF newline, etc.)
@@ -1436,9 +1440,13 @@ def lint_rtl(rtl_path: str, block_name: str, attempt: int = 1) -> dict:
     except Exception:
         pass
     cmd.append(rtl_path)
+    cmd.extend(extra_rtl_paths or [])
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=scaled(60))
+        result = subprocess.run(
+            cmd, capture_output=True, text=True,
+            timeout=timeout_s if timeout_s is not None else scaled(60),
+        )
         log_path = _write_step_log(block_name, "lint", cmd, result, attempt)
         stderr = result.stderr.strip()
         has_errors = "%Error" in stderr
@@ -2350,6 +2358,9 @@ def _resolve_synth_yosys() -> str:
 def synthesize_block(
     block: dict, rtl_path: str, target_clock_mhz: float = 50.0,
     attempt: int = 1,
+    *, extra_rtl_paths: list[str] | None = None,
+    output_dir: str | Path | None = None,
+    timeout_s: int | None = None,
 ) -> dict:
     """Run Yosys synthesis targeting Sky130."""
     block_name = block["name"]
@@ -2358,8 +2369,15 @@ def synthesize_block(
     # rtl_target) -- the same resolution lint, the RTL postcondition and
     # cocotb's TOPLEVEL already use.
     top_module = rtl_module_name(rtl_path, block_name)
-    output_dir = PROJECT_ROOT / "syn" / "output" / block_name
+    output_dir = (Path(output_dir) if output_dir is not None else
+                  PROJECT_ROOT / "syn" / "output" / block_name)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    rtl_paths = [rtl_path, *(extra_rtl_paths or [])]
+    # Preserve order while avoiding duplicate reads when callers include the
+    # primary source in both the legacy argument and the new source list.
+    rtl_paths = list(dict.fromkeys(rtl_paths))
+    read_verilog_sources = " ".join(f'"{p}"' for p in rtl_paths)
 
     yosys_bin = _resolve_synth_yosys()
     liberty = str(LIBERTY_FILE)
@@ -2425,7 +2443,7 @@ def synthesize_block(
         # then a plain stat (cell counts). This TERMINATES iff the design
         # is real, finite, loop-free logic.
         script = f"""# Auto-generated GENERIC synthesis script for {block_name}
-read_verilog -sv {rtl_path}
+read_verilog -sv {read_verilog_sources}
 {_wrapper_read}hierarchy -top {top_module}
 proc
 flatten
@@ -2441,7 +2459,7 @@ write_verilog -noattr {netlist_path}
 """
     else:
         script = f"""# Auto-generated synthesis script for {block_name}
-read_verilog {rtl_path}
+read_verilog {read_verilog_sources}
 {_wrapper_read}hierarchy -top {top_module}
 proc
 flatten
@@ -2469,7 +2487,8 @@ write_verilog -noattr {netlist_path}
     # Wall-clock synth timeout (the KEY synthesizability gate). A
     # non-terminating combinational design (e.g. an unrolled RD-search
     # cloud) blows this -> success=False -> route_after_synth -> diagnose.
-    _synth_timeout = scaled(600, env="CORESMITH_SYNTH_TIMEOUT_S")
+    _synth_timeout = (timeout_s if timeout_s is not None else
+                      scaled(600, env="CORESMITH_SYNTH_TIMEOUT_S"))
     try:
         # cwd=PROJECT_ROOT so a PROJECT-RELATIVE artifact path inside the RTL
         # resolves exactly as it does in simulation. Block RTL legitimately

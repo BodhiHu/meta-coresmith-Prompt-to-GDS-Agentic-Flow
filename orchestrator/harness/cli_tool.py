@@ -117,7 +117,9 @@ def _build_request(verb: str, args):
         verb=verb,
         design=design,
         inputs=inputs,
-        out_dir=Path(out_dir) if out_dir else None,
+        # Tools may change cwd to PROJECT_ROOT. Keep a shell-relative output
+        # path anchored to the invoker just like the file input arguments.
+        out_dir=Path(out_dir).resolve() if out_dir else None,
         params=params,
         timeout_s=getattr(args, "timeout_s", None),
     )

@@ -218,6 +218,33 @@ def test_smoke_run_synth_generic(tmp_path):
     assert out["metrics"]["gate_count"] > 0, out["metrics"]
 
 
+@pytest.mark.skipif(shutil.which("yosys") is None, reason="yosys not on PATH")
+def test_smoke_run_synth_relative_out_dir_uses_invoker_cwd(tmp_path):
+    """A relative --out-dir remains relative to the shell, even though Yosys
+    itself runs from the distinct project root."""
+    import os
+
+    invoker = tmp_path / "invoker"
+    project = tmp_path / "project"
+    invoker.mkdir()
+    project.mkdir()
+    e = os.environ.copy()
+    e.pop("CORESMITH_DEPLOYMENT", None)
+    e["CORESMITH_SYNTH_GENERIC"] = "1"
+    r = subprocess.run(
+        [sys.executable, str(_CLI), "tool", "run_synth", "--design",
+         "tiny_matmul", "--rtl", str(_FIXTURE), "--out-dir", "relative-out",
+         "--project-root", str(project), "--json"],
+        capture_output=True, text=True, env=e, cwd=str(invoker),
+    )
+    assert r.returncode == 0, r.stderr + r.stdout
+    payload = json.loads(r.stdout)
+    expected = invoker / "relative-out" / "tiny_matmul_netlist.v"
+    assert Path(payload["artifacts"]["netlist"]) == expected
+    assert expected.exists()
+    assert not (project / "relative-out").exists()
+
+
 class TestRelativePathAnchoring:
     """Shell-relative --rtl must survive the engine's cwd=PROJECT_ROOT tool
     invocation (main's readmemh fix re-anchors relative paths there)."""
@@ -234,3 +261,13 @@ class TestRelativePathAnchoring:
         req = cli_tool._build_request("run_lint", ns)
         assert req.inputs["rtl"].is_absolute()
         assert req.inputs["rtl"] == rtl.resolve()
+
+    def test_out_dir_resolved_against_invoker_cwd(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+
+        ns = type("NS", (), {"rtl": ["unit.v"], "design": "unit",
+                             "out_dir": "relative-output",
+                             "timeout_s": None})()
+        req = cli_tool._build_request("run_synth", ns)
+
+        assert req.out_dir == (tmp_path / "relative-output").resolve()
