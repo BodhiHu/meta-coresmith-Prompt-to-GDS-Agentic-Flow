@@ -33,14 +33,16 @@ INTEGRATION TEST STRATEGY:
 3. **Throughput test**: Send a burst of inputs and verify the pipeline
    sustains the expected throughput (one output per N clocks, per PRD).
 4. **Backpressure data-integrity test** (MANDATORY for an AXI-Stream or other
-   valid/ready path only when the chip top exposes the relevant source-valid
-   and sink-ready controls to the testbench): Re-run a FULL correctness
-   comparison -- the RTL output must match the reference beat-for-beat -- while
-   RANDOMLY deasserting the externally driveable output `tready` (~30% of
-   cycles) AND inserting externally driveable input `tvalid` gaps (~15% of
-   cycles, holding the current word). Assert NO beat is lost, duplicated, or
-   reordered vs. the reference. This is not optional for such an exposed path
-   and it is not a separate "does it stall" check: a design that clears
+   valid/ready path when the chip top exposes at least one corresponding
+   testbench-driven control): Re-run a FULL correctness comparison -- the RTL
+   output must match the reference beat-for-beat -- under every perturbation
+   the public boundary supports. RANDOMLY deassert an externally driveable
+   output `tready` (~30% of cycles) when it exists. Independently insert gaps
+   on an externally driveable input `tvalid` (~15% of cycles, holding the
+   current word) when it exists. Do not require one control merely because the
+   other is exposed. Assert NO beat is lost, duplicated, or reordered vs. the
+   reference. This is not optional for an exposed control and it is not a
+   separate "does it stall" check: a design that clears
    `tvalid` on its own transfer edge, or skews `tready` per beat, is byte-correct
    with `tready` wired high and only FAILS under backpressure -- so the
    correctness check itself must run under backpressure. Seed the randomness
@@ -261,8 +263,8 @@ COCOTB RULES (same as per-block):
 
   Keep `tvalid` asserted across cycles until a sampled handshake occurs. Do
   not pre-sample `tready` before an edge and later assume that edge accepted
-  data unless `tvalid` was already stable before the edge. This pattern is
-  for INTERNAL AXI-Stream ports only.
+  data unless `tvalid` was already stable before the edge. This pattern is for
+  ordinary pre-edge AXI-Stream sampling at externally exposed ports only.
 
 - PUBLISHED STREAM SAMPLER: Use this exception ONLY when an authoritative
   published grading contract explicitly requires post-edge acceptance sampling.
@@ -328,9 +330,10 @@ IMPORTANT CONSTRAINTS:
 - Include at least 5 tests total: reset, smoke, throughput, and 1-2 performance
   tests (latency + sustained throughput). When an applicable handshake is
   externally driveable, one test MUST be the backpressure data-integrity test
-  (randomized ready + input gaps, exact match). When backpressure is internal
-  and unobservable at the chip boundary, keep five relevant end-to-end tests,
-  log that limitation, and use a boundary-contract, reset-abort, mode, or other
+  with an exact match, independently randomizing each public ready or valid
+  control that the testbench can drive. When backpressure is internal and
+  unobservable at the chip boundary, keep five relevant end-to-end tests, log
+  that limitation, and use a boundary-contract, reset-abort, mode, or other
   requirement-derived case instead of forcing hierarchical access.
 
 OUTPUT FORMAT GUARD:

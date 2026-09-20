@@ -107,12 +107,16 @@ async def test_prompt_preserves_contract_semantics_and_system_invariant(tmp_path
     prompt = captured["prompt"]
     assert "rsp_instr[7:0] is the first ROM byte" in prompt
     assert '"name": "rsp_instr"' in prompt
+    assert '"producer_payload_ports": ["m_rsp_rsp_instr"]' in prompt
+    assert '"consumer_payload_ports": ["s_rsp_rsp_instr"]' in prompt
+    assert "m_rsp_srdy/m_rsp_data" not in prompt
     assert '"min_buffer_depth_beats": 2' in prompt
     assert "exactly one response per accepted request" in prompt
     assert "A redirected response is consumed but never retired" in prompt
     assert "One response for each accepted fetch request" in prompt
     assert '"required_state": "outstanding_count <= 1"' in prompt
     assert "implementation narrative that is not a DV requirement" not in prompt
+    assert "externally controllable backpressure when present" in prompt
 
 
 @pytest.mark.asyncio
@@ -169,7 +173,9 @@ def test_semantic_loader_falls_back_to_block_diagram_file(tmp_path):
 
 
 def test_backpressure_requirement_is_conditioned_on_top_level_observability():
-    assert "only when the chip top exposes" in SYSTEM_PROMPT
+    assert "when the chip top exposes at least one corresponding" in SYSTEM_PROMPT
     assert "Never reach through DUT hierarchy" in SYSTEM_PROMPT
     assert "When backpressure is internal" in SYSTEM_PROMPT
+    assert "Do not require one control merely because the" in SYSTEM_PROMPT
+    assert "ordinary pre-edge AXI-Stream sampling at externally exposed" in SYSTEM_PROMPT
     assert "MANDATORY if AXI-Stream" not in SYSTEM_PROMPT

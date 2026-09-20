@@ -160,8 +160,8 @@ class IntegrationTestbenchGenerator:
                     parts.append(json.dumps({"defaults": defaults}, sort_keys=True))
                 contract_keys = (
                     "edge_id", "producer_block", "consumer_block",
-                    "producer_port", "consumer_port", "data_width_bits",
-                    "fields", "sideband_signals", "handshake_protocol",
+                    "data_width_bits", "fields", "sideband_signals",
+                    "handshake_protocol",
                     "packing_convention", "bootstrap_policy",
                     "flow_control_policy", "representations",
                     "semantic_contract", "rate_description",
@@ -174,6 +174,30 @@ class IntegrationTestbenchGenerator:
                         for key in contract_keys
                         if edge.get(key) not in (None, "", [], {})
                     }
+                    fields = edge.get("fields") or []
+                    if fields:
+                        from orchestrator.langgraph.contract_conformance import (
+                            canonical_port,
+                            channel_base,
+                        )
+
+                        field_names = [
+                            field.get("name") if isinstance(field, dict) else field
+                            for field in fields
+                        ]
+                        endpoint_ports = {}
+                        for role, key in (
+                            ("producer_payload_ports", "producer_port"),
+                            ("consumer_payload_ports", "consumer_port"),
+                        ):
+                            channel = channel_base(edge.get(key) or "")
+                            ports = [
+                                canonical_port(channel, name)[0]
+                                for name in field_names if name
+                            ]
+                            if ports:
+                                endpoint_ports[role] = ports
+                        rendered.update(endpoint_ports)
                     if rendered:
                         parts.append(json.dumps(rendered, sort_keys=True))
 
@@ -216,8 +240,9 @@ class IntegrationTestbenchGenerator:
                 "The pipeline will dump sim_build/integration/dump.vcd and "
                 "audit it with WaveKit. Generate tests that advance time and "
                 "exercise reset, top-level handshakes, block-boundary flow, "
-                "backpressure, sideband metadata, and final outputs so the "
-                "waveform audit contains meaningful evidence."
+                "externally controllable backpressure when present, sideband "
+                "metadata, and final outputs so the waveform audit contains "
+                "meaningful evidence."
             )
 
             if chip_model_path:
