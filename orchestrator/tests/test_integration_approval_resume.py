@@ -8,8 +8,8 @@ from orchestrator.langgraph import pipeline_graph as pg
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("edit_reviewed_file", [False, True])
-async def test_approval_does_not_reauthor(tmp_path, monkeypatch, edit_reviewed_file):
+@pytest.mark.parametrize("mutation", ["none", "top", "new_contract"])
+async def test_approval_does_not_reauthor(tmp_path, monkeypatch, mutation):
     from orchestrator.langchain.agents.integration_lead import IntegrationLeadAgent
 
     monkeypatch.setenv("CORESMITH_DETERMINISTIC_INTEGRATION_CHECK", "0")
@@ -52,12 +52,15 @@ async def test_approval_does_not_reauthor(tmp_path, monkeypatch, edit_reviewed_f
     assert parked["__interrupt__"][0].value["type"] == "integration_warning_review"
     assert len(calls) == 1
     reviewed = (tmp_path / "chip_top.v").read_bytes()
-    if edit_reviewed_file:
+    if mutation == "top":
         (tmp_path / "chip_top.v").write_text("module chip_top(); endmodule\n")
+    elif mutation == "new_contract":
+        (tmp_path / ".coresmith").mkdir(exist_ok=True)
+        (tmp_path / ".coresmith/interface_contracts.json").write_text('{"contracts": []}')
     resumed = await app.ainvoke(Command(resume={"action": "accept"}), config)
     result = resumed["integration_result"]
     assert len(calls) == 1, "approval must not rerun the assembly author"
-    if edit_reviewed_file:
+    if mutation != "none":
         assert result["aborted"] is True
         assert result["error"] == "reviewed_artifacts_changed"
         assert not receipt

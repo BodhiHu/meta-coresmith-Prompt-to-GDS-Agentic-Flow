@@ -7197,16 +7197,18 @@ async def _prepare_integration_check(state: OrchestratorState) -> dict:
             "artifact_hashes": _integration_artifact_hashes(
                 [top_rtl_path, *rtl_paths.values(),
                  Path(pr) / "inputs/task.yaml", Path(pr) / "inputs/requirements.md",
+                 Path(pr) / "requirements.md", Path(pr) / ".coresmith/block_diagram.json",
                  Path(pr) / ".coresmith/interface_contracts.json"]),
         }}
 
 _integration_prepare_task = _durable_task(_prepare_integration_check)
 
 
-def _integration_artifact_hashes(paths) -> dict[str, str]:
-    """Bind approval to the exact files checked before the interrupt."""
-    return {str(path): hashlib.sha256(Path(path).read_bytes()).hexdigest()
-            for path in paths if path and Path(path).is_file()}
+def _integration_artifact_hashes(paths) -> dict[str, str | None]:
+    """Bind approval to file bytes and to the absence of optional inputs."""
+    return {str(path): (hashlib.sha256(Path(path).read_bytes()).hexdigest()
+                        if Path(path).is_file() else None)
+            for path in paths if path}
 
 
 async def integration_check_node(state: OrchestratorState) -> dict:
