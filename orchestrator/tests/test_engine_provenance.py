@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from orchestrator.langgraph import final_report as fr
 from orchestrator.utils import engine_git_sha
 
@@ -16,6 +18,51 @@ def test_engine_git_sha_returns_str():
     assert isinstance(sha, str)
     # In this checkout it is a short hex sha; tolerate "" in a non-git env.
     assert sha == "" or all(c in "0123456789abcdef" for c in sha)
+
+
+@pytest.mark.parametrize("packed", [False, True])
+def test_linked_worktree_uses_common_refs(tmp_path, monkeypatch, packed):
+    from orchestrator import utils
+
+    checkout = tmp_path / "checkout"
+    source = checkout / "orchestrator/utils.py"
+    source.parent.mkdir(parents=True)
+    source.touch()
+    common = tmp_path / "main.git"
+    gitdir = common / "worktrees/evaluation"
+    gitdir.mkdir(parents=True)
+    (checkout / ".git").write_text("gitdir: ../main.git/worktrees/evaluation\n")
+    (gitdir / "commondir").write_text("../..\n")
+    (gitdir / "HEAD").write_text("ref: refs/heads/evaluation\n")
+    sha = "a" * 40
+    if packed:
+        ref = common / "packed-refs"
+        ref.write_text(f"# pack-refs\n{sha} refs/heads/evaluation\n")
+    else:
+        ref = common / "refs/heads/evaluation"
+        ref.parent.mkdir(parents=True)
+        ref.write_text(sha + "\n")
+    monkeypatch.setattr(utils, "__file__", str(source))
+    assert utils.engine_git_sha(False) == sha
+    assert utils.engine_git_sha() == sha[:12]
+    # A later checkout must not keep a cached original/unknown revision.
+    new_sha = "b" * 40
+    ref.write_text(f"{new_sha} refs/heads/evaluation\n" if packed else new_sha + "\n")
+    assert utils.engine_git_sha(False) == new_sha
+
+
+def test_detached_head_provenance(tmp_path, monkeypatch):
+    from orchestrator import utils
+
+    source = tmp_path / "orchestrator/utils.py"
+    source.parent.mkdir()
+    source.touch()
+    gitdir = tmp_path / ".git"
+    gitdir.mkdir()
+    sha = "c" * 40
+    (gitdir / "HEAD").write_text(sha + "\n")
+    monkeypatch.setattr(utils, "__file__", str(source))
+    assert utils.engine_git_sha(False) == sha
 
 
 def test_stamp_engine_sha_writes_and_is_stable(tmp_path):
@@ -91,5 +138,4 @@ def _engine_root():
 
     import orchestrator
     return Path(orchestrator.__file__).resolve().parent.parent
-
 
