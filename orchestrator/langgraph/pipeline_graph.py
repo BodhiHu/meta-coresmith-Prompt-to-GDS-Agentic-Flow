@@ -8393,7 +8393,8 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
                         sf = doc["speed_and_feeds"]
                         prd_summary += (
                             f"\nTarget clock: {sf.get('target_clock_mhz', '?')} MHz"
-                            f", Data width: {sf.get('input_data_rate_mbps', '?')} Mbps"
+                            f", Input data rate: "
+                            f"{sf.get('input_data_rate_mbps', '?')} Mbps"
                         )
                     if doc.get("dataflow"):
                         df = doc["dataflow"]

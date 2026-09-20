@@ -2193,6 +2193,46 @@ def load_architecture_connections(project_root: str) -> tuple[list[dict], str]:
 # Integration testbench generation + simulation
 # ---------------------------------------------------------------------------
 
+def _load_integration_dv_semantics(
+    project_root: str | Path,
+) -> tuple[dict, list[dict | str]]:
+    """Load canonical edge semantics and cross-block invariants for DV.
+
+    The connection list alone is intentionally compact and cannot carry the
+    canonical field layouts, flow-control policy, or architecture-level
+    invariants. Keep those sources separate so the prompt formatter can include
+    only verification-relevant keys instead of duplicating whole design docs.
+    """
+    from orchestrator.langchain.agents.contract_lookup import (
+        load_interface_contracts,
+    )
+
+    root = Path(project_root)
+    contract_doc = load_interface_contracts(str(root))
+    invariants: list[dict | str] = []
+    for relative in (
+        ".coresmith/architecture_state.json",
+        ".coresmith/block_diagram.json",
+    ):
+        path = root / relative
+        if not path.exists():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if relative.endswith("architecture_state.json"):
+            data = data.get("block_diagram", {}) if isinstance(data, dict) else {}
+        found = data.get("system_invariants", []) if isinstance(data, dict) else []
+        if isinstance(found, list):
+            invariants = [
+                item for item in found if isinstance(item, (dict, str))
+            ]
+        if invariants:
+            break
+    return contract_doc, invariants
+
+
 async def generate_integration_testbench(
     design_name: str,
     top_rtl_path: str,
@@ -2238,6 +2278,10 @@ async def generate_integration_testbench(
     tb_dir.mkdir(parents=True, exist_ok=True)
     output_path = str(tb_dir / f"test_{design_name}.py")
 
+    interface_contracts, system_invariants = _load_integration_dv_semantics(
+        project_root or PROJECT_ROOT
+    )
+
     agent = IntegrationTestbenchGenerator(model=DEFAULT_MODEL, temperature=0.1)
     result = await agent.generate(
         design_name=design_name,
@@ -2250,6 +2294,8 @@ async def generate_integration_testbench(
         prior_failure=prior_failure,
         chip_model_path=chip_model_path,
         parameter_table=parameter_table,
+        interface_contracts=interface_contracts,
+        system_invariants=system_invariants,
     )
 
     result["testbench_path"] = result.get("tb_path", output_path)

@@ -32,17 +32,24 @@ INTEGRATION TEST STRATEGY:
    output within a bounded number of cycles).
 3. **Throughput test**: Send a burst of inputs and verify the pipeline
    sustains the expected throughput (one output per N clocks, per PRD).
-4. **Backpressure data-integrity test** (MANDATORY if AXI-Stream): Re-run a
-   FULL correctness comparison -- the RTL output must match the reference
-   beat-for-beat -- while RANDOMLY deasserting the output `tready` (~30% of
-   cycles) AND inserting input `tvalid` gaps (~15% of cycles, holding the
-   current word). Assert NO beat is lost, duplicated, or reordered vs. the
-   reference. This is not optional and it is not a separate "does it stall"
-   check: a design that clears `tvalid` on its own transfer edge, or skews
-   `tready` per beat, is byte-correct with `tready` wired high and only FAILS
-   under backpressure -- so the correctness check itself must run under
-   backpressure. Seed the randomness deterministically (e.g. `random.Random(0)`)
-   so the test is reproducible. Example receiver pattern:
+4. **Backpressure data-integrity test** (MANDATORY for an AXI-Stream or other
+   valid/ready path only when the chip top exposes the relevant source-valid
+   and sink-ready controls to the testbench): Re-run a FULL correctness
+   comparison -- the RTL output must match the reference beat-for-beat -- while
+   RANDOMLY deasserting the externally driveable output `tready` (~30% of
+   cycles) AND inserting externally driveable input `tvalid` gaps (~15% of
+   cycles, holding the current word). Assert NO beat is lost, duplicated, or
+   reordered vs. the reference. This is not optional for such an exposed path
+   and it is not a separate "does it stall" check: a design that clears
+   `tvalid` on its own transfer edge, or skews `tready` per beat, is byte-correct
+   with `tready` wired high and only FAILS under backpressure -- so the
+   correctness check itself must run under backpressure. Seed the randomness
+   deterministically (e.g. `random.Random(0)`) so the test is reproducible.
+   Never reach through DUT hierarchy to drive an internal block-boundary ready
+   signal. If backpressure exists only on internal connected wires, exercise
+   the relevant end-to-end transaction, log that internal backpressure is not
+   directly driveable from the chip boundary, and make the boundary activity
+   visible in the VCD. Example receiver pattern for an exposed top-level path:
 
        rng = random.Random(0)
        while got < expected_n:
@@ -176,8 +183,9 @@ VCD WAVEFORM -- MANDATORY:
 - The integration DV node runs Verilator with tracing enabled, expects
   `sim_build/integration/dump.vcd`, which the debug agent and chip lead read before the
   node can pass.
-- The testbench must drive enough reset, input, backpressure, block-boundary,
-  and output activity so the waveform shows real transitions. A test that
+- The testbench must drive enough reset, input, externally controllable
+  backpressure (when present), block-boundary, and output activity so the
+  waveform shows real transitions. A test that
   passes without meaningful time advancement or datapath movement is invalid.
 - For semantic contracts, ensure VCD-visible activity exists at the relevant
   boundary. Examples: selected mode changes, packet/frame indices, predictor or
@@ -223,10 +231,12 @@ COCOTB RULES (same as per-block):
       async def start_clock(dut):
           cocotb.start_soon(Clock(dut.clk, CLOCK_PERIOD_NS, units="ns").start())
           await RisingEdge(dut.clk)
-- In the smoke/throughput tests, drive `m_tready = 1` BEFORE sending data on
-  any input interface (keep those tests simple). The mandatory backpressure
-  data-integrity test (above) is the ONE place you randomize `m_tready` /
-  input gaps -- do it there, not in the basic tests.
+- In the smoke/throughput tests, drive a top-level `m_tready = 1` BEFORE sending
+  data when that control is actually exposed (keep those tests simple). When
+  applicable, the backpressure data-integrity test (above) is the ONE place
+  you randomize an externally driveable `m_tready` / input gaps -- do it there,
+  not in the basic tests. Do not synthesize a nonexistent top-level control or
+  drive an internal ready wire through hierarchy.
 - Use `cocotb.start_soon()` for concurrent sender/receiver coroutines.
   NEVER use `cocotb.start_fork()` (removed in cocotb 2.0).
 - Add cycle-count watchdog to every handshake wait loop (max 10000 cycles).
@@ -315,9 +325,13 @@ IMPORTANT CONSTRAINTS:
 - Keep tests pragmatic. If the pipeline is complex (5+ blocks), a
   "data-in, data-out" smoke test with a cycle-count watchdog is sufficient.
 - Log which block boundary each check targets for debuggability.
-- Include at least 5 tests total: reset, smoke, throughput, the MANDATORY
-  backpressure data-integrity test (randomized tready + input gaps, exact
-  match), and 1-2 performance tests (latency + sustained throughput).
+- Include at least 5 tests total: reset, smoke, throughput, and 1-2 performance
+  tests (latency + sustained throughput). When an applicable handshake is
+  externally driveable, one test MUST be the backpressure data-integrity test
+  (randomized ready + input gaps, exact match). When backpressure is internal
+  and unobservable at the chip boundary, keep five relevant end-to-end tests,
+  log that limitation, and use a boundary-contract, reset-abort, mode, or other
+  requirement-derived case instead of forcing hierarchical access.
 
 OUTPUT FORMAT GUARD:
 Your response MUST be a single, complete Python file containing valid cocotb
