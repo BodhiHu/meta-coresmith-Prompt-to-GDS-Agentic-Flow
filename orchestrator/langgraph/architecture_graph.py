@@ -1174,13 +1174,16 @@ _ESCALATION_ONLY_SOURCES = frozenset({"prd", "requirements", "ers"})
 
 def _classify_constraint_violations(
     violations: list[dict] | None,
+    *, include_adjudicated_doc_candidates: bool = False,
 ) -> tuple[list[dict], list[dict], list[dict]]:
     """Three-way split of constraint violations for repair routing.
 
     Returns ``(doc_fixable, escalation_only, other)``:
 
     - ``doc_fixable``    -- ``auto_fixable`` + a regenerable-document source
-      (SAD/FRD): the Doc Fix node can clear these by re-generating the doc.
+      (SAD/FRD): the Doc Fix node can clear these by re-generating the doc. On
+      an operator retry, doc-sourced structural ``llm_candidate`` findings are
+      included too: the escalation supplied their required human adjudication.
     - ``escalation_only``-- ``auto_fixable`` + a non-regenerable-ROOT source
       (PRD/requirements/ERS, ``_ESCALATION_ONLY_SOURCES``): neither Doc Fix (it
       re-derives from the PRD) nor the Block Diagram loop can clear these; they
@@ -1193,14 +1196,22 @@ def _classify_constraint_violations(
     escalation_only: list[dict] = []
     other: list[dict] = []
     for v in violations or []:
+        src = str(v.get("source_doc", "")).strip().lower()
         if v.get("category") == "auto_fixable":
-            src = str(v.get("source_doc", "")).strip().lower()
             if src in _DOC_FIX_SOURCES:
                 doc_fixable.append(v)
                 continue
             if src in _ESCALATION_ONLY_SOURCES:
                 escalation_only.append(v)
                 continue
+        if (
+            include_adjudicated_doc_candidates
+            and src in _DOC_FIX_SOURCES
+            and v.get("category") == "structural"
+            and v.get("finding_kind") == "llm_candidate"
+        ):
+            doc_fixable.append(v)
+            continue
         other.append(v)
     return doc_fixable, escalation_only, other
 
@@ -1288,7 +1299,12 @@ async def doc_fix_node(state: ArchGraphState) -> dict:
 
     cr = state.get("constraint_result", {}) or {}
     violations = cr.get("violations", [])
-    doc_sourced, _other = _partition_constraint_violations(violations)
+    # This node can be entered after the operator adjudicates doc-sourced
+    # structural LLM candidates. Feed every such SAD/FRD finding to its
+    # generator alongside the deterministic auto-fixable findings.
+    doc_sourced, _escalation_only, _other = _classify_constraint_violations(
+        violations, include_adjudicated_doc_candidates=True
+    )
 
     attempts = state.get("doc_fix_attempts", 0) + 1
     by_doc: dict[str, list[dict]] = {}
@@ -2726,8 +2742,20 @@ def _escalation_retry_target(state: ArchGraphState) -> str:
         and (cr.get("violations") or [])
     ):
         return "Interface Definition"
+    # Structural LLM candidates have now received the human adjudication they
+    # require. Reclassify SAD/FRD candidates as doc-fixable for this retry only;
+    # the initial constraint route still escalates them to the operator.
+    retry_state = dict(state)
+    retry_cr = dict(cr)
+    doc_fixable, escalation_only, other = _classify_constraint_violations(
+        cr.get("violations", []), include_adjudicated_doc_candidates=True
+    )
+    budget_ok = state.get("doc_fix_attempts", 0) < _DOC_FIX_MAX_ATTEMPTS
+    if doc_fixable and not escalation_only and not other and budget_ok:
+        return "Doc Fix"
+    retry_state["constraint_result"] = retry_cr
     return _constraint_repair_route(
-        state, loop_target="Block Diagram", escalation_target="Block Diagram"
+        retry_state, loop_target="Block Diagram", escalation_target="Block Diagram"
     )
 
 

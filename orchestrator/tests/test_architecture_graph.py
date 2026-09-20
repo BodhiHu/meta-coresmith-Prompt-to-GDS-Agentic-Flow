@@ -472,6 +472,46 @@ class TestRouteAfterConstraintsDocFix:
 
 class TestDocFixNode:
     @pytest.mark.asyncio
+    async def test_doc_fix_passes_adjudicated_candidate_to_generator(
+            self, isolated_project):
+        captured = {}
+
+        async def _fake_generate_sad(*args, **kwargs):
+            captured["feedback"] = kwargs.get("constraint_feedback")
+            return {"sad_text": "# corrected SAD\n", "phase": "sad_complete"}
+
+        state = {
+            "project_root": isolated_project,
+            "requirements": FFT16_REQUIREMENTS,
+            "pdk_summary": "sky130 | 130nm",
+            "prd_spec": FFT16_PRD_DOCUMENT,
+            "round": 1,
+            "constraint_result": {
+                "violations": [
+                    {
+                        "category": "auto_fixable", "source_doc": "sad",
+                        "violation": "derived arithmetic is wrong",
+                    },
+                    {
+                        "category": "structural", "source_doc": "sad",
+                        "finding_kind": "llm_candidate",
+                        "violation": "candidate contradiction in SAD",
+                        "suggested_fix": "use the adjudicated 80 ns value",
+                    },
+                ],
+            },
+        }
+        with patch(
+            "orchestrator.architecture.specialists.sad_spec.generate_sad",
+            new=_fake_generate_sad,
+        ):
+            await doc_fix_node(state)
+
+        assert "derived arithmetic is wrong" in captured["feedback"]
+        assert "candidate contradiction in SAD" in captured["feedback"]
+        assert "adjudicated 80 ns" in captured["feedback"]
+
+    @pytest.mark.asyncio
     async def test_doc_fix_regenerates_sad_and_doc_changes(self, isolated_project):
         """A SAD-sourced auto_fixable violation -> Doc Fix regenerates the SAD
         and the on-disk sad_spec.md actually changes."""

@@ -67,6 +67,17 @@ def _diagram_autofix() -> dict:
     return _v("auto_fixable", "block_diagram", "tier direction backwards")
 
 
+def _doc_candidate(source_doc: str = "sad") -> dict:
+    return {
+        "category": "structural",
+        "source_doc": source_doc,
+        "finding_kind": "llm_candidate",
+        "check": "cross_artifact_consistency",
+        "violation": f"candidate contradiction in {source_doc}",
+        "suggested_fix": "correct the cited arithmetic",
+    }
+
+
 # ---------------------------------------------------------------------------
 # Fix 3 -- three-way classification (doc-fixable / escalation-only / other)
 # ---------------------------------------------------------------------------
@@ -134,6 +145,27 @@ class TestMixedSetRouting:
     # -- escalation-retry path --
     def test_doc_only_retry_goes_to_doc_fix(self):
         assert self._retry([_doc(), _frd()], doc_fix_attempts=0) == "Doc Fix"
+
+    def test_adjudicated_doc_candidates_join_doc_only_retry(self):
+        assert self._retry(
+            [_doc(), _frd(), _doc_candidate("sad"), _doc_candidate("frd")],
+            doc_fix_attempts=0,
+        ) == "Doc Fix"
+
+    def test_adjudicated_doc_candidates_still_escalate_initially(self):
+        state = {
+            "constraint_result": {
+                "all_pass": False, "has_structural": True,
+                "violations": [_doc_candidate()],
+            },
+            "round": 1,
+        }
+        assert ag.route_after_constraints(state) == "Escalate Constraints"
+
+    def test_adjudicated_doc_candidate_plus_diagram_repairs_diagram_first(self):
+        assert self._retry(
+            [_doc(), _doc_candidate(), _diagram_autofix()], doc_fix_attempts=0
+        ) == "Block Diagram"
 
     def test_mixed_doc_plus_structural_retry_goes_to_block_diagram(self):
         # THE defect: a doc-sourced violation coexisting with a structural
