@@ -22,7 +22,7 @@ from typing import Any
 
 from opentelemetry import trace
 
-from .coresmith_llm import DEFAULT_MODEL, ClaudeLLM
+from .coresmith_llm import DEFAULT_MODEL, ClaudeLLM, is_llm_error_response
 
 _tracer = trace.get_tracer(__name__)
 
@@ -280,6 +280,12 @@ class IntegrationTestbenchGenerator:
                 prompt=user_message,
                 run_name=f"Integration Testbench [{design_name}]",
             )
+
+            if is_llm_error_response(content):
+                raise RuntimeError(
+                    "Integration testbench generation failed: LLM call was "
+                    f"unsuccessful: {content}"
+                )
 
             # Don't trust ClaudeLLM.call to raise on CLI failure -- it
             # returns an error string in the output position. Validate

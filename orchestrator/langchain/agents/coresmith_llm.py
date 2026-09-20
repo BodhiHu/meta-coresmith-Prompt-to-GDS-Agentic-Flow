@@ -444,6 +444,21 @@ def _log_llm_call(
 # Stream-JSON output parsing
 # ---------------------------------------------------------------------------
 
+_LLM_ERROR_RESPONSE_PREFIX = "[ClaudeLLM error:"
+
+
+def is_llm_error_response(content: object) -> bool:
+    """Return whether ``ClaudeLLM.call`` encoded an unsuccessful call.
+
+    Provider and transport failures use one reserved response envelope because
+    the historical public API returns text rather than a result object. Match
+    only that leading envelope; ordinary generated code may freely contain
+    words such as "error", "timeout", or "incomplete".
+    """
+    return isinstance(content, str) and content.startswith(
+        _LLM_ERROR_RESPONSE_PREFIX
+    )
+
 def _parse_stream_json(stdout: str) -> tuple[str, dict]:
     """Parse Claude CLI ``--output-format stream-json`` output.
 

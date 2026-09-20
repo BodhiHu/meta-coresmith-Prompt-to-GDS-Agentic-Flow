@@ -13,7 +13,7 @@ from typing import Any
 
 from opentelemetry import trace
 
-from .coresmith_llm import DEFAULT_MODEL, ClaudeLLM
+from .coresmith_llm import DEFAULT_MODEL, ClaudeLLM, is_llm_error_response
 
 _tracer = trace.get_tracer(__name__)
 
@@ -161,6 +161,12 @@ class ValidationDVGenerator:
                 prompt="\n".join(parts),
                 run_name=f"Validation DV [{design_name}]",
             )
+
+            if is_llm_error_response(content):
+                raise RuntimeError(
+                    "Validation DV generation failed: LLM call was "
+                    f"unsuccessful: {content}"
+                )
 
             testbench = self._extract_python(content)
             if output_path:
