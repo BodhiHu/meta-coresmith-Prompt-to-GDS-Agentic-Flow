@@ -43,3 +43,12 @@ def test_exact_field_names_do_not_accumulate_other_fields():
     edge = {**CONN, "from_port": "fetch_request_req_valid",
             "to_port": "fetch_request_req_valid", "data_width": 1}
     assert check_integration_compatibility([edge], bundle()) == []
+
+
+def test_single_field_ready_bundle_does_not_resolve_to_unrelated_address():
+    modules = bundle()
+    modules["core"].ports.append(VerilogPort("fetch_response_ready_rsp_ready", "output"))
+    modules["spi"].ports.append(VerilogPort("fetch_response_ready_rsp_ready", "input"))
+    ready = {**CONN, "from_port": "fetch_response_ready", "to_port": "fetch_response_ready",
+             "interface": "fetch_response_ready", "data_width": 1}
+    assert check_integration_compatibility([CONN, ready], modules) == []

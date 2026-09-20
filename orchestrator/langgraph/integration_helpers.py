@@ -362,7 +362,9 @@ def _check_decomposed_bundle(conn, src, dst, expected_width):
                 if p.name.startswith(prefix) and p.direction == direction}
     sf = fields(src, src_name, "output")
     df = fields(dst, dst_name, "input")
-    if max(len(sf), len(df)) < 2:
+    if max(len(sf), len(df)) < 2 and not (
+        len(sf) == 1 and sf.keys() == df.keys()
+    ):
         return None
     from_block = conn.get("from_block", conn.get("from", ""))
     to_block = conn.get("to_block", conn.get("to", ""))
