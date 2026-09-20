@@ -113,12 +113,6 @@ class TestMarkdownFormatIntegrity:
          ["## Performance Requirements", "## Interface Requirements", "## Resource Budgets"]),
         ("_persist_block_diagram", "block_diagram.md", FFT16_BLOCK_DIAGRAM,
          ["## Blocks", "## Connections"]),
-        ("_persist_memory_map", "memory_map.md", FFT16_MEMORY_MAP,
-         ["fft_butterfly", "0x10000000"]),
-        ("_persist_clock_tree", "clock_tree.md", FFT16_CLOCK_TREE,
-         ["clk_sys"]),
-        ("_persist_register_spec", "register_spec.md", FFT16_REGISTER_SPEC,
-         ["fft_butterfly", "top_csr"]),
     ]
 
     @pytest.mark.parametrize(
@@ -215,28 +209,3 @@ class TestJsonMarkdownConsistency:
                 f"Block '{block['name']}' from JSON not found in Markdown"
             )
 
-    def test_memory_map_peripherals_in_md(self, isolated_project):
-        from orchestrator.langgraph.architecture_graph import _persist_memory_map
-
-        _persist_memory_map(isolated_project, FFT16_MEMORY_MAP)
-
-        coresmith = Path(isolated_project) / ".coresmith"
-        arch = Path(isolated_project) / "arch"
-        data = json.loads((coresmith / "memory_map.json").read_text())
-        md_text = (arch / "memory_map.md").read_text()
-
-        for periph in data["result"]["peripherals"]:
-            assert periph["name"] in md_text
-
-    def test_register_spec_blocks_in_md(self, isolated_project):
-        from orchestrator.langgraph.architecture_graph import _persist_register_spec
-
-        _persist_register_spec(isolated_project, FFT16_REGISTER_SPEC)
-
-        coresmith = Path(isolated_project) / ".coresmith"
-        arch = Path(isolated_project) / "arch"
-        data = json.loads((coresmith / "register_spec.json").read_text())
-        md_text = (arch / "register_spec.md").read_text()
-
-        for block in data["result"]["blocks"]:
-            assert block["name"] in md_text

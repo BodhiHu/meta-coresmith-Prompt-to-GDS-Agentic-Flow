@@ -18,6 +18,8 @@ the gate itself).
   *violations list* whose emptiness means "pass") can.
 - ``fn`` raises            -> ``GateResult(passed=False, skipped=False,
   error=<traceback tail>)``. An ERROR is **not** an honest skip.
+- ``KeyboardInterrupt`` / ``SystemExit`` / ``asyncio.CancelledError`` propagate
+  untouched: those are control flow, not gate outcomes.
 - ``CORESMITH_GATE_FAIL_OPEN=1`` -> the single global rollback knob. Under it a
   raised gate is tolerated (``passed=True, skipped=True``) so a block still
   advances -- for a slow/odd host where fail-closed reddens harness errors.
@@ -31,6 +33,7 @@ so it imports without pulling in the LangGraph stack.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import traceback
@@ -91,6 +94,11 @@ def gate_guard(
     """
     try:
         value = fn(*args, **kwargs)
+    except (KeyboardInterrupt, SystemExit, asyncio.CancelledError):
+        # Control flow, not a gate outcome: an operator Ctrl-C, an interpreter
+        # shutdown or a cancelled task must abort, never become passed=False
+        # (or, under the fail-open knob, a tolerated pass).
+        raise
     except BaseException as exc:  # noqa: BLE001 - catching it is the whole point
         tail = _tb_tail(exc)
         reason = f"{type(exc).__name__}: {exc}"

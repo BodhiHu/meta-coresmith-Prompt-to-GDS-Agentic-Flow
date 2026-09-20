@@ -77,7 +77,7 @@ function _defaultDirection(_name) {
   return 'RIGHT';
 }
 
-export default function GraphCanvas({ graphData, graphName, executionStatus, onNodeCogwheel, traceData, onRequestTraces, detailWidth, onDetailResize }) {
+export default function GraphCanvas({ graphData, graphName, executionStatus, onNodeCogwheel, traceData, onRequestTraces, detailWidth, onDetailResize, onOpenBlock, onOpenCall }) {
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
   const [selectedNode, setSelectedNode] = useState(null);
@@ -322,6 +322,8 @@ export default function GraphCanvas({ graphData, graphName, executionStatus, onN
             onRequestTraces={onRequestTraces}
             onClose={() => setSelectedNode(null)}
             width={detailWidth}
+            onOpenBlock={onOpenBlock}
+            onOpenCall={onOpenCall}
           />
         </>
       )}

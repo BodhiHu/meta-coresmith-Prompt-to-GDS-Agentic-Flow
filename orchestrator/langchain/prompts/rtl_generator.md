@@ -20,8 +20,15 @@ REASONING BUDGET (CRITICAL):
 RULES:
 1. Output ONLY valid {rtl_language} (no constructs from other HDL variants).
 2. Use AXI-Stream (tdata/tvalid/tready/tlast) for data interfaces.
-3. Use synchronous active-low reset (rst_n).
-4. Use a single clock domain (clk).
+3. Use EXACTLY the clock and reset ports the uArch spec's port table declares --
+   name AND polarity (e.g. a synchronous active-HIGH `rst` when the spec says
+   so). Only when the spec
+   declares no reset at all, default to a synchronous active-low `rst_n`.
+4. Use a single clock domain (the spec's clock port; `clk` when unspecified).
+4b. Port names come from the AUTHORITATIVE PORT NAMES table verbatim. A contract
+   signal that already starts with its channel prefix or equals the channel name is
+   NOT prefixed again (channel `irq` + signal `irq` -> port `irq`, never `irq_irq`),
+   even if the uArch spec says otherwise -- the table wins.
 5. All arithmetic must be fixed-point -- no floating point.
 6. Use explicit bit widths on all signals. No implicit widths.
 7. Include a module header comment with: block name, description, I/O ports.
@@ -61,14 +68,14 @@ RULES:
     assign statement. Never split updates to the same signal across multiple
     always blocks or mix combinational assign with sequential always blocks
     for the same signal.
-16. WAVEKIT/VCD AUDITABILITY -- MANDATORY:
-    The downstream DV nodes dump a Verilator VCD and inspect it with WaveKit.
+16. VCD AUDITABILITY -- MANDATORY:
+    The downstream DV nodes dump a Verilator VCD that the debug agent reads.
     Your RTL must be waveform-auditable:
     a. Preserve explicit, named valid/ready, state, counter, coordinate,
        metadata, error, and packet-boundary signals instead of hiding all
        protocol state inside anonymous packed expressions.
     b. Register sideband metadata at pipeline boundaries with stable names
-       ending in `_q` where possible, so WaveKit can correlate data and
+       ending in `_q` where possible, so a waveform reader can correlate data and
        metadata across cycles.
     c. Never drop, repack, or reinterpret tuser/metadata bits without a
        named assignment documenting the bit layout in code comments.
@@ -112,8 +119,7 @@ RULES:
     b. A schedule the spec DECLARED word-parallel / II=1 MUST be built that way.
        Do NOT serialize a parallel schedule through ONE shared resource (a
        single S-box, one multiplier, one memory port) the spec does NOT share:
-       that silently multiplies cyc/op by the serialization factor (the AES key
-       schedule declared 11 cyc word-parallel and was built word-serial at 21).
+       that silently multiplies cyc/op by the serialization factor.
        If the spec says a stage is parallel / II=1, instantiate the parallel
        lanes; only serialize where the spec's `perf` block explicitly shares the
        resource.
@@ -233,11 +239,53 @@ When converting Python to {rtl_language}:
   skill below.
 - Map floating-point math to fixed-point (specify Q format in comments).
 - Handle variable-length data with valid/ready handshaking.
-- A ready/valid transfer is exactly `valid && ready` sampled on the clock edge.
-  Do not qualify the handshake with a registered copy of `ready`, a previous
-  cycle's ready, or a requirement that ready stay high for two cycles. If a
-  registered output token is held valid, a one-cycle `ready` pulse must retire
-  exactly one token and advance state once.
+- INTERNAL block-to-block interfaces: a ready/valid transfer is exactly
+  `valid && ready` sampled on the clock edge. Do not qualify the handshake with
+  a registered copy of `ready`, a previous cycle's ready, or a requirement that
+  ready stay high for two cycles. If a registered output token is held valid, a
+  one-cycle `ready` pulse must retire exactly one token and advance state once.
+  The chip-boundary stream ports are the ONE exception -- see PUBLISHED STREAM
+  SAMPLER CONTRACT below; a block that owns them (the stream controller /
+  chip top) must follow that contract on those ports.
+
+PUBLISHED STREAM SAMPLER CONTRACT (chip-boundary stream ports ONLY):
+The task's shipped sampler/testbench is the contract for these ports; the
+ERS transcribes its acceptance semantics and that transcription wins over
+anything below. When the task's sampler is a post-edge stream driver (the
+common cocotb pattern: it drives the chip's top-level stream ports -- the
+input stream's valid/ready/data/last and the output stream's
+valid/ready/data/last, named as the task declares them -- before each rising
+edge and samples them in the read-only phase AFTER the edge), it counts:
+  input word accepted on edge N  <=> in_valid (driven before N) && in_ready as it
+                                     reads AFTER N (the value in_ready takes at N)
+  output beat consumed on edge N <=> out_valid/out_data as they read after N &&
+                                     out_ready as driven for cycle N
+Rules that follow. Violating either desyncs the grader; the failure is
+seed-dependent under backpressure and is NOT caught by a testbench that samples
+ready before the edge (a common and expensive mistake):
+  - in_ready: the grader re-offers a word whenever in_ready reads 0 after the
+    edge, and counts it accepted on the first edge after which in_ready reads 1.
+    Two self-consistent ways to honour that; pick ONE and keep it everywhere:
+      (a) pre-edge latching (accept = in_valid && in_ready_q): in_ready may only
+          FALL on an edge that accepts a word (the re-offered duplicate is then
+          absorbed by the edge on which in_ready rises, where in_ready_q is
+          still 0 so nothing is latched twice); never fall on a non-accepting
+          edge, or the re-offered word is lost when ready rises.
+      (b) post-edge latching (accept = in_valid && in_ready_next): drop ready
+          only on an edge that does NOT latch (refuse-and-drop), and latch on
+          the edge ready rises if in_valid is high.
+    Mixing the two (e.g. pre-edge latching plus refuse-and-drop) desyncs the
+    grader.
+  - out side: the beat visible after edge N is consumed by the out_ready driven
+    for cycle N. Register it (`out_ready_q <= out_ready`), keep out_valid/out_data
+    on registered state, hold the beat until `out_valid_q && out_ready_q`, and
+    only then advance to the next beat. Retiring on the raw out_ready sampled at
+    the next edge skips a beat on every ready 0->1 transition.
+  - If the task ships a reference sampler/testbench (for example a cocotb
+    `StreamHarness`), its sampling is the contract; the ERS must transcribe it
+    and the DV must drive the DUT exactly as it does.
+Internal block-to-block interfaces keep the standard convention (a transfer is
+`valid && ready` sampled at the edge); this section is about the chip boundary.
 
 If the previous attempt failed, the error will be provided. Fix the specific
 issue while maintaining correctness.
@@ -253,7 +301,7 @@ Only report success when lint is clean.
 Output format:
 1. Write the complete {rtl_language} module to the specified file path.
 2. Run verilator lint and fix any errors.
-3. Ensure the RTL exposes enough named internal signals for a WaveKit VCD
+3. Ensure the RTL exposes enough named internal signals for a VCD
    audit of reset, handshakes, metadata, state transitions, and error flags.
 4. After the module, output a JSON block with port information:
    ```json
@@ -372,8 +420,7 @@ time — do it in the first draft, not after a rejection):
 
 ## Variable-length bit-serialization: lowering discipline (MANDATORY)
 
-The single most common un-synthesizable lowering (proven live: 2 of 6 blocks,
-5 non-convergent regeneration attempts each, 0.97-confidence diagnosis): the
+The single most common un-synthesizable lowering: the
 block model emits variable-length codewords (`append_bits(value, length)`,
 dynamic `value[bit_index]` reads) and the RTL transcribes that as a WIDE FLAT
 REGISTER written/read through a RUNTIME-VARIABLE part-select

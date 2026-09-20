@@ -26,6 +26,8 @@ from pathlib import Path
 
 import pytest
 
+from orchestrator.tests.candidate_fixtures import adopt
+
 # ═══════════════════════════════════════════════════════════════════════════
 # R1a: validate_rtl_ports removed
 # ═══════════════════════════════════════════════════════════════════════════
@@ -153,127 +155,6 @@ class TestDvRules:
 # R3: RTL regression guard
 # ═══════════════════════════════════════════════════════════════════════════
 
-class TestRtlRegressionGuard:
-    @pytest.mark.asyncio
-    async def test_skips_regen_when_prev_sim_passed(self, tmp_path):
-        from orchestrator.langgraph.pipeline_graph import generate_rtl_node
-
-        block_name = "test_block"
-        rtl_dir = tmp_path / "rtl" / "datapath"
-        rtl_dir.mkdir(parents=True)
-        rtl_file = rtl_dir / f"{block_name}.v"
-        rtl_file.write_text("module test_block(); endmodule\n")
-
-        block_dir = tmp_path / ".coresmith" / "blocks" / block_name
-        block_dir.mkdir(parents=True)
-        (block_dir / "best_result.json").write_text(json.dumps({
-            "sim_passed": True,
-            "attempt": 1,
-            "tests_passed": 10,
-            "tests_total": 10,
-        }))
-
-        state = {
-            "current_block": {
-                "name": block_name,
-                "rtl_target": f"rtl/datapath/{block_name}.v",
-            },
-            "attempt": 2,
-            "project_root": str(tmp_path),
-            "pipeline_run_start": 0,
-        }
-
-        result = await generate_rtl_node(state)
-        # Default (CORESMITH_FORCE_TB_REGEN unset) is REUSE the passing TB, not
-        # force-regenerate it -- see test_flow_fixes.py::TestRegressionGuard for
-        # the full rationale (force-regen produced a worse TB that re-failed,
-        # wedging whole runs in an infinite regen/fail loop).
-        assert result["force_regen_tb"] is False
-        assert result["rtl_path"] == str(rtl_file)
-
-    @pytest.mark.asyncio
-    async def test_no_skip_on_attempt_1(self, tmp_path):
-        from orchestrator.langgraph.pipeline_graph import generate_rtl_node
-
-        block_name = "test_block"
-        rtl_dir = tmp_path / "rtl" / "datapath"
-        rtl_dir.mkdir(parents=True)
-        rtl_file = rtl_dir / f"{block_name}.v"
-        rtl_file.write_text("module test_block(); endmodule\n")
-
-        state = {
-            "current_block": {
-                "name": block_name,
-                "rtl_target": f"rtl/datapath/{block_name}.v",
-            },
-            "attempt": 1,
-            "project_root": str(tmp_path),
-            "pipeline_run_start": 0.0,
-        }
-
-        result = await generate_rtl_node(state)
-        assert result.get("force_regen_tb") is not True
-
-    @pytest.mark.asyncio
-    async def test_sim_pass_writes_best_result(self, tmp_path):
-        # simulate_node was merged into generate_testbench_node; the
-        # best_result.json side-effect is now produced inside that node.
-        from unittest.mock import patch
-
-        from orchestrator.langgraph.pipeline_graph import generate_testbench_node
-
-        block_name = "test_block"
-        block_dir = tmp_path / ".coresmith" / "blocks" / block_name
-        block_dir.mkdir(parents=True)
-
-        rtl_file = tmp_path / "test.v"
-        rtl_file.write_text("module test_block(); endmodule\n")
-        tb_file = tmp_path / "test_tb.py"
-        tb_file.write_text("import cocotb\n")
-
-        state = {
-            "current_block": {
-                "name": block_name,
-                # generate_testbench_node uses block["testbench"] to derive
-                # tb_path_obj; point it at the pre-existing fixture file.
-                "testbench": "test_tb.py",
-            },
-            "rtl_path": str(rtl_file),
-            "tb_path": str(tb_file),
-            "attempt": 1,
-            "project_root": str(tmp_path),
-            "pipeline_run_start": 0,
-            "step_log_paths": {},
-            # Reuse the existing tb file -- skip the (mocked-out) LLM call.
-            "preserve_testbench": True,
-            "force_regen_tb": False,
-        }
-
-        mock_result = {
-            "passed": True,
-            "log": "PASS",
-            "tests_passed": 6,
-            "tests_total": 6,
-            "log_path": "/tmp/sim.log",
-        }
-
-        with patch(
-            "orchestrator.langgraph.pipeline_graph.run_simulation",
-            return_value=mock_result,
-        ):
-            await generate_testbench_node(state)
-
-        best_path = block_dir / "best_result.json"
-        assert best_path.exists()
-        best = json.loads(best_path.read_text())
-        assert best["sim_passed"] is True
-        assert best["attempt"] == 1
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# R4: Testbench reuse prompt
-# ═══════════════════════════════════════════════════════════════════════════
-
 class TestTestbenchReusePrompt:
     def test_prompt_contains_reuse_instruction(self):
         prompt_path = (
@@ -341,6 +222,11 @@ class TestBackendSingleBlock:
         integ_dir.mkdir(parents=True)
         integ_top = integ_dir / "adder_8bit_top.v"
         integ_top.write_text("module adder_8bit_top();\n  adder_8bit u (); endmodule\n")
+        # WP-49: the backend reads the integration RECORD; it never discovers a top from files.
+        (tmp_path / ".coresmith").mkdir(exist_ok=True)
+        (tmp_path / ".coresmith" / "integration_result.json").write_text(json.dumps({
+            "top_module": "adder_8bit_top", "top_rtl_path": str(integ_top),
+            "block_rtl_paths": {block_name: str(rtl_dir / f"{block_name}.v")}}))
 
         state = {
             "project_root": str(tmp_path),
@@ -355,6 +241,7 @@ class TestBackendSingleBlock:
             "tier_list": [1],
         }
 
+        adopt(tmp_path, integ_top, {block_name: str(rtl_dir / f"{block_name}.v")}, name="adder_8bit_top")
         result = await init_design_node(state)
 
         assert result["integration_top_path"] == str(integ_top)

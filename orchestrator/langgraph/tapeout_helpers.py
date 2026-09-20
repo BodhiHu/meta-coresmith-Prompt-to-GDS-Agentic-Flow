@@ -71,6 +71,14 @@ KLAYOUT_BIN = _resolve_tool("klayout_binary", "scripts/klayout-nix.sh")
 # Verilog port parser (regex-based, no external dependency)
 # ---------------------------------------------------------------------------
 
+_LINE_COMMENT_RE = re.compile(r'//[^\n]*')
+_BLOCK_COMMENT_RE = re.compile(r'/\*.*?\*/', re.S)
+
+# Words that may follow a comma inside a declaration but are never port names,
+# so "input wire a, output wire b" stops the name list after "a".
+_DECL_KEYWORDS = r'input|output|inout|wire|reg|logic|signed|unsigned'
+
+
 def _parse_verilog_ports(rtl_source: str) -> dict[str, dict]:
     """Extract port declarations from Verilog source.
 
@@ -79,25 +87,52 @@ def _parse_verilog_ports(rtl_source: str) -> dict[str, dict]:
     """
     ports: dict[str, dict] = {}
 
-    # Match: input/output/inout [wire] [signed] [N:0] port_name
+    # Comments are stripped first: a header comment reading "input valid from
+    # the arbiter" is prose, and a phantom port becomes a bogus .valid()
+    # connection in the wrapper (elaboration error on a nonexistent port).
+    src = _LINE_COMMENT_RE.sub("", _BLOCK_COMMENT_RE.sub(" ", rtl_source or ""))
+
+    # Match: input/output/inout [wire] [signed] [N:0] name [, name ...]
     # Uses \b word boundary instead of ^ to handle both ANSI and inline styles
     port_re = re.compile(
         r'\b(input|output|inout)\s+'
         r'(?:wire\s+|reg\s+)?'
         r'(?:signed\s+)?'
         r'(?:\[(\d+):(\d+)\]\s+)?'
-        r'(\w+)',
+        r'(\w+(?:\s*,\s*(?!(?:' + _DECL_KEYWORDS + r')\b)\w+)*)',
     )
 
-    for m in port_re.finditer(rtl_source):
+    for m in port_re.finditer(src):
         direction = m.group(1)
         msb = int(m.group(2)) if m.group(2) else 0
         lsb = int(m.group(3)) if m.group(3) else 0
-        name = m.group(4)
         width = abs(msb - lsb) + 1 if m.group(2) else 1
-        ports[name] = {"width": width, "direction": direction}
+        # One declaration may name several ports: "input [7:0] cfg_a, cfg_b;"
+        for name in m.group(4).split(","):
+            name = name.strip()
+            if name:
+                ports[name] = {"width": width, "direction": direction}
 
     return ports
+
+
+def _pick_special_port(parsed: dict[str, dict], exact_names: set[str], token: str) -> str:
+    """Choose a block's clk/rst port: exact name wins, substring is a fallback.
+
+    First match wins (inputs preferred) so an output like ``pclk_out`` cannot
+    steal the slot from a real ``clk`` port.
+    """
+    for pname in parsed:
+        if pname.lower() in exact_names:
+            return pname
+    for only_inputs in (True, False):
+        for pname, pinfo in parsed.items():
+            if token not in pname.lower():
+                continue
+            if only_inputs and pinfo.get("direction") != "input":
+                continue
+            return pname
+    return ""
 
 
 def _discover_block_ports(blocks: list[dict]) -> list[dict]:
@@ -162,15 +197,18 @@ def _discover_block_ports(blocks: list[dict]) -> list[dict]:
                 ib_ports = inter_block_ports.get(name, set())
 
                 # Detect actual clock/reset port names for wrapper wiring
-                for pname in parsed:
-                    if pname.lower() in clk_names or "clk" in pname.lower():
-                        block["_clk_port"] = pname
-                    if pname.lower() in rst_names or "rst" in pname.lower():
-                        block["_rst_port"] = pname
+                clk_port = _pick_special_port(parsed, clk_names, "clk")
+                rst_port = _pick_special_port(parsed, rst_names, "rst")
+                if clk_port:
+                    block["_clk_port"] = clk_port
+                if rst_port:
+                    block["_rst_port"] = rst_port
 
                 filtered = {}
                 for pname, pinfo in parsed.items():
-                    if pname.lower() in skip:
+                    # whatever was picked as clk/rst is wired from io_in[0]/[1];
+                    # leaving it here too would emit a duplicate connection
+                    if pname.lower() in skip or pname in (clk_port, rst_port):
                         continue
                     is_inter_block = any(
                         ib in pname.lower() for ib in ib_ports
@@ -344,6 +382,7 @@ def _generate_wrapper_verilog(
 
     # OEB (output enable active low) assignments
     oeb_assignments = []
+    driven_pads: set[int] = set()   # pads a block output drives (io_out sourced)
     for block in blocks:
         name = block["name"]
         block_gpio = gpio_mapping.get(name, {})
@@ -352,12 +391,26 @@ def _generate_wrapper_verilog(
                 start = pad_info["start"]
                 width = pad_info["width"]
                 for i in range(width):
+                    driven_pads.add(start + i)
                     oeb_assignments.append(
                         f"    assign io_oeb[{start + i}] = 1'b0;  "
                         f"// {name}.{port_name}[{i}] output enable")
 
     oeb_text = "\n".join(oeb_assignments) if oeb_assignments else (
         "    // No explicit OEB assignments -- all pads default to input")
+
+    # Every pad the design does not drive still needs io_out and io_oeb driven
+    # (OpenFrame requires it, and an undriven io_oeb leaves the pad direction
+    # indeterminate). Covers pad 0/1 (clk/rst), input/inout-mapped pads and
+    # every pad no port was mapped to.
+    tie_assignments = []
+    for i in range(OPENFRAME_IO_PADS):
+        if i in driven_pads:
+            continue
+        tie_assignments.append(
+            f"    assign io_out[{i}] = 1'b0;\n"
+            f"    assign io_oeb[{i}] = 1'b1;  // input pad")
+    tie_text = "\n".join(tie_assignments)
 
     wrapper_v = f"""`default_nettype none
 // openframe_project_wrapper.v
@@ -379,10 +432,8 @@ module openframe_project_wrapper (
     output wire [`OPENFRAME_IO_PADS-1:0] io_oeb
 );
 
-    // ---- GPIO pad 0 = clk, pad 1 = rst ----
+    // ---- GPIO pad 0 = clk, pad 1 = rst (driven as inputs below) ----
     // Active-low output enable (0 = output, 1 = input)
-    assign io_oeb[0] = 1'b1;  // clk is input
-    assign io_oeb[1] = 1'b1;  // rst is input
 
     // ---- Output enable for block outputs ----
 {oeb_text}
@@ -390,14 +441,9 @@ module openframe_project_wrapper (
     // ---- Block instantiations ----
 {instantiation_text}
 
-    // ---- Tie unused io_out to 0 ----
+    // ---- Tie off every pad no block output drives ----
     // (OpenFrame requires all outputs driven)
-    genvar _unused_i;
-    generate
-        for (_unused_i = 0; _unused_i < `OPENFRAME_IO_PADS; _unused_i = _unused_i + 1) begin : tie_unused
-            // Default: unused outputs tied low, unused OEB set to input
-        end
-    endgenerate
+{tie_text}
 
 endmodule
 `default_nettype wire
@@ -415,11 +461,16 @@ def _generate_power_connection(output_dir: Path, supply: str, net: str) -> Path:
 // Auto-generated by coresmith tapeout_helpers
 
 module {supply}_connection (
-    inout {supply}
+`ifdef USE_POWER_PINS
+    inout wire {supply},
+    inout wire {net}
+`endif
 );
 
 `ifdef USE_POWER_PINS
-    // Connect {supply} to internal {net} rail
+    // Connect {supply} to the internal {net} rail. Both are ports: an
+    // undeclared {net} is illegal under `default_nettype none, and a local
+    // net would connect nothing.
     assign {net} = {supply};
 `endif
 
@@ -582,6 +633,9 @@ def synthesize_wrapper(
     script = f"""# Wrapper synthesis for OpenFrame (Sky130 HD)
 # Generated by coresmith tapeout_helpers.synthesize_wrapper
 
+# -lib makes every sky130 cell in the block netlists a blackbox, so
+# hierarchy -check can resolve them without mapping them again.
+read_liberty -lib {LIBERTY}
 {reads}
 read_verilog {abs_wrapper}
 

@@ -270,9 +270,14 @@ async def start_architecture(
         "block_specs_path": "",
     }
 
-    _architecture.task = asyncio.create_task(
-        _architecture.run_task(initial_state, graph_config)
-    )
+    try:
+        await _architecture.safe_start(initial_state, graph_config)
+    except RuntimeError as exc:
+        return json.dumps({
+            "error": str(exc),
+            "thread_id": _architecture.thread_id,
+            "status": _architecture.status,
+        })
     await asyncio.sleep(0.1)
 
     result = {
@@ -1120,13 +1125,17 @@ async def resume_architecture(
             resume_input = Command(resume=resume_value)
         else:
             resume_input = None
-        _architecture.task = asyncio.create_task(
-            _architecture.run_task(resume_input, config)
-        )
     else:
-        _architecture.task = asyncio.create_task(
-            _architecture.run_task(Command(resume=resume_value), config)
-        )
+        resume_input = Command(resume=resume_value)
+
+    try:
+        await _architecture.safe_resume(resume_input, config)
+    except RuntimeError as exc:
+        return json.dumps({
+            "error": str(exc),
+            "thread_id": _architecture.thread_id,
+            "status": _architecture.status,
+        })
 
     result = {
         "status": "running",
@@ -1244,9 +1253,10 @@ async def restart_architecture_node(node_name: str) -> str:
         },
     }
 
-    _architecture.task = asyncio.create_task(
-        _architecture.run_task(None, fork_config)
-    )
+    try:
+        await _architecture.safe_start(None, fork_config)
+    except RuntimeError as exc:
+        return json.dumps({"error": str(exc), "status": _architecture.status})
 
     return json.dumps({
         "status": "running",
@@ -1660,14 +1670,15 @@ async def start_pipeline(
 
     # Auto-pause architecture if it's still running (mirrors pause_architecture)
     if _architecture.status == "running":
+        # Kill any stuck CLI subprocesses first so the task can actually cancel
         from orchestrator.langchain.agents.coresmith_llm import kill_active_cli_processes
+        kill_active_cli_processes()
         if _architecture.task and not _architecture.task.done():
             _architecture.task.cancel()
             try:
                 await _architecture.task
             except (asyncio.CancelledError, Exception):
                 pass
-        kill_active_cli_processes()
         _architecture.status = "paused"
 
     await _pipeline.ensure_graph()
@@ -1757,9 +1768,16 @@ async def start_pipeline(
             "\n".join(kept_lines) + "\n" if kept_lines else ""
         )
 
-    _pipeline.task = asyncio.create_task(
-        _pipeline.run_task(initial_state, graph_config)
-    )
+    try:
+        from orchestrator.state_store.trust import capture_run_baseline
+        capture_run_baseline(_project_root())
+        await _pipeline.safe_start(initial_state, graph_config)
+    except RuntimeError as exc:
+        return json.dumps({
+            "error": str(exc),
+            "thread_id": _pipeline.thread_id,
+            "status": _pipeline.status,
+        })
     await asyncio.sleep(0.1)
 
     result = {
@@ -2016,6 +2034,74 @@ async def get_pipeline_state() -> str:
     return json.dumps(result, indent=2, default=str)
 
 
+class UnsupportedResumeAction(Exception):
+    """A resume action is not in a parked interrupt's supported_actions.
+
+    Raised instead of silently remapping the action: ``supported_actions[0]``
+    is arbitrary and can invert the operator's intent (e.g. an ``abort`` that
+    lands on ``approve``).  Mirrors the daemon's ``_resume_action_error``,
+    which rejects with a 400 + the allowed list.
+    """
+
+    def __init__(self, block_name: str, action: str, supported: list,
+                 interrupt_type: str = ""):
+        self.block_name = block_name
+        self.action = action
+        self.supported = list(supported)
+        self.interrupt_type = interrupt_type
+        super().__init__(
+            f"Action '{action}' is not valid for interrupt type "
+            f"'{interrupt_type or 'unknown'}' on block "
+            f"'{block_name or 'unknown'}'. Supported actions: {self.supported}"
+        )
+
+
+def _pending_interrupt_info(state_snapshot) -> list[tuple[str, str, list, str]]:
+    """Enumerate live interrupts as (id, block_name, supported_actions, type).
+
+    Collect completed block names (any success status) to filter stale
+    interrupts.  Once a block lands in completed_blocks the pipeline has
+    moved past it, so any lingering interrupt from the parallel Send()
+    checkpoint is stale -- including failed-block interrupts, which the
+    pipeline already routed around.
+    """
+    completed_names: set[str] = set()
+    if state_snapshot and hasattr(state_snapshot, "values"):
+        for b in (state_snapshot.values or {}).get("completed_blocks", []):
+            name = b.get("name", "")
+            if name:
+                completed_names.add(name)
+
+    interrupt_info: list[tuple[str, str, list, str]] = []
+    if state_snapshot and state_snapshot.tasks:
+        for task in state_snapshot.tasks:
+            for intr in task.interrupts:
+                payload = intr.value if hasattr(intr, "value") else {}
+                block_name = ""
+                supported = []
+                itype = ""
+                if isinstance(payload, dict):
+                    block_name = payload.get("block", payload.get("block_name", ""))
+                    supported = payload.get("supported_actions", [])
+                    itype = payload.get("type", "")
+                # Skip stale interrupts from completed blocks
+                if block_name and block_name in completed_names:
+                    continue
+                interrupt_info.append((intr.id, block_name, supported, itype))
+    return interrupt_info
+
+
+def _parse_block_actions(block_actions) -> dict:
+    """Parse the block_name -> action JSON map; {} when absent/malformed."""
+    if not block_actions:
+        return {}
+    try:
+        parsed = json.loads(block_actions)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def _build_resume_command(state_snapshot, resume_value, action, constraint,
                           rtl_fix_description, block_actions):
     """Build a Command(resume=...) that handles multiple pending interrupts.
@@ -2026,74 +2112,34 @@ def _build_resume_command(state_snapshot, resume_value, action, constraint,
     a properly-keyed Command.  Used by both the 'paused' and
     'interrupted' resume paths.
 
-    Type-aware validation (Fix #11): when ``block_actions`` specifies a
-    per-block action, the action is validated against the interrupt's
-    ``supported_actions``.  If the action is not supported (e.g.
-    ``approve`` sent to an ``ask_human`` interrupt), it is remapped to
-    the type-appropriate default to prevent silent re-execution.
+    Type-aware validation (Fix #11): the effective action of EVERY parked
+    interrupt (per-block from ``block_actions``, else the global *action*)
+    is validated against that interrupt's ``supported_actions``.  An
+    unsupported action (e.g. ``approve`` sent to an ``ask_human``
+    interrupt) raises UnsupportedResumeAction rather than being remapped --
+    remapping to the type default could invert the caller's intent.
     """
     from langgraph.types import Command
 
-    # Collect completed block names (any success status) to filter stale
-    # interrupts.  Once a block lands in completed_blocks the pipeline has
-    # moved past it, so any lingering interrupt from the parallel Send()
-    # checkpoint is stale -- including failed-block interrupts, which the
-    # pipeline already routed around.
-    completed_names: set[str] = set()
-    if state_snapshot and hasattr(state_snapshot, "values"):
-        for b in (state_snapshot.values or {}).get("completed_blocks", []):
-            name = b.get("name", "")
-            if name:
-                completed_names.add(name)
-
-    # (interrupt_id, block_name, supported_actions)
-    interrupt_info: list[tuple[str, str, list[str]]] = []
-    if state_snapshot and state_snapshot.tasks:
-        for task in state_snapshot.tasks:
-            for intr in task.interrupts:
-                payload = intr.value if hasattr(intr, "value") else {}
-                block_name = ""
-                supported = []
-                if isinstance(payload, dict):
-                    block_name = payload.get("block", payload.get("block_name", ""))
-                    supported = payload.get("supported_actions", [])
-                # Skip stale interrupts from completed blocks
-                if block_name and block_name in completed_names:
-                    continue
-                interrupt_info.append((intr.id, block_name, supported))
+    interrupt_info = _pending_interrupt_info(state_snapshot)
 
     if not interrupt_info:
         return None  # No pending interrupts, resume with None
 
-    [iid for iid, _, _ in interrupt_info]
-
-    per_block: dict[str, str] = {}
-    if block_actions:
-        try:
-            per_block = json.loads(block_actions)
-        except (json.JSONDecodeError, TypeError):
-            pass
+    per_block = _parse_block_actions(block_actions)
 
     # Always build an interrupt-ID-keyed resume map, even for a single
     # interrupt.  LangGraph's _pending_interrupts() counts checkpoint
     # writes which may disagree with our stale-block filtering.  Using
     # the keyed format avoids the "multiple pending interrupts" error.
     resume_map = {}
-    for iid, bname, supported in interrupt_info:
+    for iid, bname, supported, itype in interrupt_info:
         block_action = action
         if per_block and bname in per_block:
             block_action = per_block[bname]
         # Validate action against supported_actions for the interrupt
         if supported and block_action not in supported:
-            # Remap to type-appropriate default
-            block_action = supported[0] if supported else action
-            import logging
-            logging.getLogger(__name__).warning(
-                "Action '%s' not in supported_actions %s for block '%s'; "
-                "remapped to '%s'",
-                per_block.get(bname, action) if per_block else action,
-                supported, bname, block_action,
-            )
+            raise UnsupportedResumeAction(bname, block_action, supported, itype)
         resume_map[iid] = {
             "action": block_action,
             "constraint": constraint,
@@ -2167,30 +2213,35 @@ async def resume_pipeline(
 
     config = {"configurable": {"thread_id": _pipeline.thread_id}}
 
-    # Validate action against the interrupt's supported_actions to prevent
+    # Validate action against the interrupts' supported_actions to prevent
     # sending e.g. "retry" to a uarch_spec_review interrupt or "approve"
-    # to a human_intervention interrupt.
+    # to a human_intervention interrupt.  EVERY live interrupt is checked
+    # (parallel blocks can park on heterogeneous interrupt types), against
+    # its effective action from block_actions.
     if _pipeline.status == "interrupted":
+        _bad = None
         try:
             _check_snap = await _pipeline.graph.aget_state(config)
-            if _check_snap and _check_snap.tasks:
-                for _t in _check_snap.tasks:
-                    for _intr in _t.interrupts:
-                        _payload = _intr.value
-                        if isinstance(_payload, dict):
-                            _supported = _payload.get("supported_actions", [])
-                            if _supported and action not in _supported:
-                                return json.dumps({
-                                    "error": (
-                                        f"Action '{action}' is not valid for interrupt "
-                                        f"type '{_payload.get('type', 'unknown')}'. "
-                                        f"Supported actions: {_supported}"
-                                    ),
-                                })
-                        break  # only check first interrupt
+            _per_block = _parse_block_actions(block_actions)
+            for _iid, _bname, _supported, _itype in _pending_interrupt_info(_check_snap):
+                _effective = _per_block.get(_bname, action) if _bname else action
+                if _supported and _effective not in _supported:
+                    _bad = (_bname, _effective, list(_supported), _itype)
                     break
         except Exception:
             pass  # Non-fatal -- proceed without validation
+        if _bad is not None:
+            _bname, _effective, _supported, _itype = _bad
+            return json.dumps({
+                "error": (
+                    f"Action '{_effective}' is not valid for interrupt "
+                    f"type '{_itype or 'unknown'}'"
+                    + (f" on block '{_bname}'" if _bname else "")
+                    + f". Supported actions: {_supported}"
+                ),
+                "block": _bname,
+                "supported_actions": _supported,
+            })
 
     resume_value = {
         "action": action,
@@ -2208,6 +2259,14 @@ async def resume_pipeline(
             _snap, resume_value, action, constraint,
             rtl_fix_description, block_actions,
         )
+    except UnsupportedResumeAction as bad:
+        # Never remap onto an unsupported action -- reject with the allowed
+        # list so the caller re-issues the resume it actually meant.
+        return json.dumps({
+            "error": str(bad),
+            "block": bad.block_name,
+            "supported_actions": bad.supported,
+        })
     except Exception as exc:
         import logging
         logging.getLogger(__name__).warning(
@@ -2232,9 +2291,14 @@ async def resume_pipeline(
         except Exception:
             resume_input = Command(resume=resume_value)
 
-    _pipeline.task = asyncio.create_task(
-        _pipeline.run_task(resume_input, config)
-    )
+    try:
+        await _pipeline.safe_resume(resume_input, config)
+    except RuntimeError as exc:
+        return json.dumps({
+            "error": str(exc),
+            "thread_id": _pipeline.thread_id,
+            "status": _pipeline.status,
+        })
 
     result = {
         "status": "running",
@@ -2358,9 +2422,10 @@ async def restart_node(node_name: str) -> str:
         },
     }
 
-    _pipeline.task = asyncio.create_task(
-        _pipeline.run_task(None, fork_config)
-    )
+    try:
+        await _pipeline.safe_start(None, fork_config)
+    except RuntimeError as exc:
+        return json.dumps({"error": str(exc), "status": _pipeline.status})
 
     return json.dumps({
         "status": "running",
@@ -2666,6 +2731,39 @@ async def _merge_block_into_pipeline_checkpoint(block_result: dict) -> bool:
         return False
 
 
+async def _merge_step_result_into_pipeline_checkpoint(
+    block_name: str, facts: dict,
+) -> bool:
+    """Merge ONE step's facts into a block's pipeline-checkpoint entry.
+
+    ``run_step`` verifies a single step, so it must not assert whole-block
+    success: a clean lint says nothing about simulation, and a synthesis run
+    proves nothing about the testbench. The step's facts are layered on top of
+    the block's last recorded entry and ``success`` is recomputed the way
+    ``block_done_node`` does it (sim_passed AND synth_success), never dropping
+    an already-recorded pass. Deliberate whole-block overrides belong in
+    ``mark_block_passed``.
+    """
+    prior: dict = {}
+    if _pipeline.graph and _pipeline.thread_id:
+        try:
+            config = {"configurable": {"thread_id": _pipeline.thread_id}}
+            snap = await _pipeline.graph.aget_state(config)
+            for b in ((snap.values if snap else None) or {}).get(
+                "completed_blocks", []
+            ):
+                if b.get("name") == block_name:
+                    prior = b
+        except Exception:
+            prior = {}
+
+    entry = {**prior, "name": block_name, **facts}
+    entry["success"] = bool(prior.get("success")) or (
+        bool(entry.get("sim_passed")) and bool(entry.get("synth_success"))
+    )
+    return await _merge_block_into_pipeline_checkpoint(entry)
+
+
 async def _merge_block_into_backend_checkpoint(block_result: dict) -> bool:
     """Merge a block result into the backend checkpoint's completed_blocks.
 
@@ -2681,23 +2779,18 @@ async def _merge_block_into_backend_checkpoint(block_result: dict) -> bool:
         if not snap or not snap.values:
             return False
 
-        completed = list(snap.values.get("completed_blocks", []))
         block_name = block_result.get("name", "")
         if not block_name:
             return False
 
-        replaced = False
-        for i, b in enumerate(completed):
-            if b.get("name") == block_name:
-                completed[i] = block_result
-                replaced = True
-                break
-        if not replaced:
-            completed.append(block_result)
-
+        # Same reducer as the pipeline graph: backend ``completed_blocks`` is
+        # ``operator.add`` (append), so append only the authoritative result --
+        # writing the whole list back would duplicate every entry and leave the
+        # new result at a non-last slot where a stale one still wins last-wins
+        # dedup.
         await _backend.graph.aupdate_state(
             config,
-            {"completed_blocks": completed},
+            {"completed_blocks": [block_result]},
             as_node="advance_block",
         )
         return True
@@ -2827,11 +2920,9 @@ async def run_step(
             })
             merged = False
             if result.get("clean", False):
-                merged = await _merge_block_into_pipeline_checkpoint({
-                    "name": block_name,
-                    "success": True,
-                    "lint_clean": True,
-                })
+                merged = await _merge_step_result_into_pipeline_checkpoint(
+                    block_name, {"lint_clean": True},
+                )
             return json.dumps({
                 "step": "lint",
                 "block_name": block_name,
@@ -2875,11 +2966,9 @@ async def run_step(
             })
             merged = False
             if result.get("passed", False):
-                merged = await _merge_block_into_pipeline_checkpoint({
-                    "name": block_name,
-                    "success": True,
-                    "sim_passed": True,
-                })
+                merged = await _merge_step_result_into_pipeline_checkpoint(
+                    block_name, {"sim_passed": True},
+                )
             return json.dumps({
                 "step": "simulate",
                 "block_name": block_name,
@@ -2911,14 +3000,13 @@ async def run_step(
             # Best-effort: merge successful synthesis into pipeline checkpoint
             merged = False
             if result.get("success"):
-                merged = await _merge_block_into_pipeline_checkpoint({
-                    "name": block_name,
-                    "success": True,
-                    "gate_count": result.get("gate_count", 0),
-                    "chip_area_um2": result.get("chip_area_um2", 0.0),
-                    "synth_success": True,
-                    "sim_passed": True,
-                })
+                merged = await _merge_step_result_into_pipeline_checkpoint(
+                    block_name, {
+                        "gate_count": result.get("gate_count", 0),
+                        "chip_area_um2": result.get("chip_area_um2", 0.0),
+                        "synth_success": True,
+                    },
+                )
             return json.dumps({
                 "step": "synthesize",
                 "block_name": block_name,
@@ -3132,9 +3220,15 @@ async def launch_backend(
         "step_log_paths": {},
     }
 
-    _backend.task = asyncio.create_task(
-        _backend.run_task(initial_state, graph_config)
-    )
+    try:
+        await _backend.safe_start(initial_state, graph_config)
+    except RuntimeError as exc:
+        return {
+            "started": False,
+            "error": str(exc),
+            "thread_id": _backend.thread_id,
+            "status": _backend.status,
+        }
     await asyncio.sleep(0.1)
 
     result = {
@@ -3278,7 +3372,7 @@ async def resume_backend(
         action: One of 'retry', 'skip', 'abort'.
         constraint: Optional constraint text.
     """
-    valid_actions = {"retry", "skip", "abort"}
+    valid_actions = {"retry", "skip", "abort", "accept"}
     if action not in valid_actions:
         return json.dumps({
             "error": f"Invalid action: {action}. Must be one of: {sorted(valid_actions)}",
@@ -3336,13 +3430,17 @@ async def resume_backend(
             resume_input = Command(resume=resume_value)
         else:
             resume_input = None
-        _backend.task = asyncio.create_task(
-            _backend.run_task(resume_input, config)
-        )
     else:
-        _backend.task = asyncio.create_task(
-            _backend.run_task(Command(resume=resume_value), config)
-        )
+        resume_input = Command(resume=resume_value)
+
+    try:
+        await _backend.safe_resume(resume_input, config)
+    except RuntimeError as exc:
+        return json.dumps({
+            "error": str(exc),
+            "thread_id": _backend.thread_id,
+            "status": _backend.status,
+        })
 
     result = {
         "status": "running",
@@ -3737,9 +3835,14 @@ async def start_tapeout(
         "tapeout_done": False,
     }
 
-    _tapeout.task = asyncio.create_task(
-        _tapeout.run_task(initial_state, graph_config)
-    )
+    try:
+        await _tapeout.safe_start(initial_state, graph_config)
+    except RuntimeError as exc:
+        return json.dumps({
+            "error": str(exc),
+            "thread_id": _tapeout.thread_id,
+            "status": _tapeout.status,
+        })
     await asyncio.sleep(0.1)
 
     result = {
@@ -3874,9 +3977,14 @@ async def resume_tapeout(action: str) -> str:
     resume_value = {"action": action}
     config = {"configurable": {"thread_id": _tapeout.thread_id}}
 
-    _tapeout.task = asyncio.create_task(
-        _tapeout.run_task(Command(resume=resume_value), config)
-    )
+    try:
+        await _tapeout.safe_resume(Command(resume=resume_value), config)
+    except RuntimeError as exc:
+        return json.dumps({
+            "error": str(exc),
+            "thread_id": _tapeout.thread_id,
+            "status": _tapeout.status,
+        })
 
     return json.dumps({
         "status": "running",
@@ -4989,10 +5097,13 @@ async def mark_block_passed(
             "marked_at": _time.time(),
         }
 
+        # as_node must name a node of the PARENT orchestrator graph --
+        # "block_done" only exists in the block subgraph, so LangGraph rejected
+        # it with InvalidUpdateError and the override never landed.
         await _pipeline.graph.aupdate_state(
             config,
             {"completed_blocks": [entry]},
-            as_node="block_done",
+            as_node="process_block",
         )
 
         return json.dumps({

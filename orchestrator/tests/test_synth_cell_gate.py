@@ -18,6 +18,7 @@ import shutil
 import pytest
 
 from orchestrator.langgraph import ppa_check as pc
+from orchestrator.tests.candidate_fixtures import adopt
 
 
 def test_count_cells_uses_last_stat_block():
@@ -75,10 +76,10 @@ def test_probe_multi_counts_cells(tmp_path):
     assert r["cell_count"] is not None
 
 
-def test_chip_top_synth_ok_no_top_never_blocks():
+def test_chip_top_synth_ok_no_manifest_fails_closed():
     from orchestrator.langgraph.pipeline_graph import _chip_top_synth_ok
     ok, reason = _chip_top_synth_ok("", "top", "/no/such/top.v", {})
-    assert ok is True and reason == ""
+    assert ok is False and reason
 
 
 @pytest.mark.skipif(not shutil.which("yosys"), reason="yosys not available")
@@ -91,15 +92,16 @@ def test_chip_top_synth_ok_pass_ceiling_and_disabled(tmp_path, monkeypatch):
     )
     monkeypatch.delenv("CORESMITH_MAX_CELLS", raising=False)
     monkeypatch.delenv("CORESMITH_SYNTH_CELL_GATE", raising=False)
-    ok, reason = _chip_top_synth_ok("", "top", str(top), {})
+    adopt(tmp_path, top, name="top")
+    ok, reason = _chip_top_synth_ok(str(tmp_path), "top", str(top), {})
     assert ok is True and reason == ""
     # an absurdly tight ceiling -> the integrated top fails the cell gate
     monkeypatch.setenv("CORESMITH_MAX_CELLS", "1")
-    ok2, reason2 = _chip_top_synth_ok("", "top", str(top), {})
+    ok2, reason2 = _chip_top_synth_ok(str(tmp_path), "top", str(top), {})
     assert ok2 is False and "ceiling" in reason2
     # gate disabled -> never blocks
     monkeypatch.setenv("CORESMITH_SYNTH_CELL_GATE", "0")
-    ok3, _ = _chip_top_synth_ok("", "top", str(top), {})
+    ok3, _ = _chip_top_synth_ok(str(tmp_path), "top", str(top), {})
     assert ok3 is True
 
 
@@ -177,75 +179,19 @@ def test_probe_readmemh_resolves_from_project_root_cwd(tmp_path):
     assert multi is not None and multi["elaborated"] is True
 
 
-@pytest.mark.skipif(not shutil.which("yosys"), reason="yosys not available")
-def test_delivered_abi_top_probed_and_drift_recorded(tmp_path, monkeypatch):
-    """F3: a delivered rtl/chip_top.v outside the manifest is co-elaborated,
-    published in the canonical filelist, probed as a second top, and a
-    canonical_top_drift defect is recorded. A drifted (broken) delivered top
-    fails the gate even when the assembled manifest top is fine."""
-    from orchestrator.langgraph.pipeline_graph import (
-        _chip_top_synth_ok,
-        read_carried_forward_defects,
-    )
-    monkeypatch.delenv("CORESMITH_SYNTH_CELL_GATE", raising=False)
+def test_unrecorded_delivered_top_is_never_used(tmp_path, monkeypatch):
+    from orchestrator.langgraph.pipeline_graph import _chip_top_synth_ok
+    top = tmp_path / "assembled.v"
+    top.write_text("module assembled_top(); endmodule")
+    adopt(tmp_path, top, name="assembled_top")
+    (tmp_path / "rtl").mkdir()
+    (tmp_path / "rtl/chip_top.v").write_text("module unrecorded(); missing u(); endmodule")
+    seen = []
+    monkeypatch.setenv("CORESMITH_SYNTH_CELL_GATE", "1")
     monkeypatch.setenv("CORESMITH_CHIP_TOP_MIN_CELLS", "0")
-    proj = tmp_path / "proj"
-    (proj / "rtl").mkdir(parents=True)
-    blk = proj / "rtl" / "blk.v"
-    blk.write_text(
-        "module blk(input clk, input [7:0] a, output reg [7:0] y);\n"
-        "  always @(posedge clk) y <= a ^ 8'h5a;\nendmodule\n")
-    top = proj / "rtl" / "assembled_top.v"
-    top.write_text(
-        "module assembled_top(input clk, input [7:0] a, output [7:0] y);\n"
-        "  blk u_b(.clk(clk), .a(a), .y(y));\nendmodule\n")
-    # delivered ABI top: a NOVEL wrapper module, not in the manifest
-    (proj / "rtl" / "chip_top.v").write_text(
-        "module ppab_dut(input clk, input [7:0] a, output [7:0] y);\n"
-        "  blk u_b(.clk(clk), .a(a), .y(y));\nendmodule\n")
-
-    ok, reason = _chip_top_synth_ok(
-        str(proj), "assembled_top", str(top), {"blk": str(blk)})
-    assert ok is True, reason
-    flist = (proj / ".coresmith" / "chip_top_sources.f").read_text()
-    assert "chip_top.v" in flist
-    defects = read_carried_forward_defects(str(proj))
-    assert any(d.get("kind") == "canonical_top_drift" for d in defects)
-
-    # now DRIFT the delivered top (references a module that no longer exists)
-    (proj / "rtl" / "chip_top.v").write_text(
-        "module ppab_dut(input clk, input [7:0] a, output [7:0] y);\n"
-        "  blk_renamed u_b(.clk(clk), .a(a), .y(y));\nendmodule\n")
-    ok2, reason2 = _chip_top_synth_ok(
-        str(proj), "assembled_top", str(top), {"blk": str(blk)})
-    assert ok2 is False
-    assert "delivered ABI top" in reason2
-
-
-def test_delivered_top_with_module_collision_records_unchecked(tmp_path, monkeypatch):
-    """F3: a delivered top that REDEFINES manifest modules cannot be
-    co-elaborated -- the gate stays judgeable on the manifest and records the
-    drift as UNCHECKED instead of MODDUP-failing."""
-    from orchestrator.langgraph.pipeline_graph import (
-        _chip_top_synth_ok,
-        read_carried_forward_defects,
-    )
-    if not shutil.which("yosys"):
-        pytest.skip("yosys not available")
-    monkeypatch.delenv("CORESMITH_SYNTH_CELL_GATE", raising=False)
-    monkeypatch.setenv("CORESMITH_CHIP_TOP_MIN_CELLS", "0")
-    proj = tmp_path / "proj"
-    (proj / "rtl").mkdir(parents=True)
-    top = proj / "rtl" / "assembled_top.v"
-    top.write_text(
-        "module assembled_top(input clk, input [7:0] a, output reg [7:0] y);\n"
-        "  always @(posedge clk) y <= a + 1;\nendmodule\n")
-    # delivered file redefines assembled_top itself -> collision
-    (proj / "rtl" / "chip_top.v").write_text(
-        "module assembled_top(input clk, input [7:0] a, output reg [7:0] y);\n"
-        "  always @(posedge clk) y <= a + 2;\nendmodule\n")
-    ok, reason = _chip_top_synth_ok(str(proj), "assembled_top", str(top), {})
-    assert ok is True, reason
-    defects = read_carried_forward_defects(str(proj))
-    drift = [d for d in defects if d.get("kind") == "canonical_top_drift"]
-    assert drift and "UNCHECKED" in drift[0].get("detail", "")
+    def probe(sources, name, **kwargs):
+        seen.append((sources, name))
+        return {"elaborated": True, "cell_count": 100}
+    monkeypatch.setattr(pc, "probe_synth_cellcount_multi", probe)
+    assert _chip_top_synth_ok(str(tmp_path), "assembled_top", str(top), {})[0]
+    assert seen == [([str(top)], "assembled_top")]

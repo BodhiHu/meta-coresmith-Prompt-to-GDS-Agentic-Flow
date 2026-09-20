@@ -73,17 +73,19 @@ def _load_jsonl(path: Path) -> list[dict]:
 def resolve_paths(source: str) -> tuple[Path, Path, Path]:
     """Return (run_dir, llm_calls_path, events_path) from a run dir or .coresmith dir."""
     p = Path(source).resolve()
-    if p.name == ".coresmith" or (p / "llm_calls.jsonl").exists():
-        cor = p if p.name == ".coresmith" else p
-        if (p / "llm_calls.jsonl").exists() and p.name != ".coresmith":
-            cor = p
-        else:
-            cor = p if (p / "llm_calls.jsonl").exists() else (p / ".coresmith")
+    if p.name == ".coresmith":
+        cor, run_dir = p, p.parent
+    elif (p / ".coresmith").is_dir():
+        cor, run_dir = p / ".coresmith", p
+    elif (p / "llm_calls.jsonl").exists():
+        # A flat dir holding the telemetry directly IS the run dir -- taking its
+        # parent here made --auto-writes rglob the whole enclosing workspace and
+        # record every attributed write under a sibling-run relpath.
+        cor, run_dir = p, p
     else:
-        cor = p / ".coresmith"
+        cor, run_dir = p / ".coresmith", p
     llm = cor / "llm_calls.jsonl"
     ev = cor / "pipeline_events.jsonl"
-    run_dir = cor.parent
     return run_dir, llm, ev
 
 

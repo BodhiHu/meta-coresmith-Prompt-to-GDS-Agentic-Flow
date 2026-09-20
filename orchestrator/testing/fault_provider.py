@@ -170,11 +170,20 @@ class FaultBackend:
         from pathlib import Path
 
         out = []
+        root_path = Path(root)
         for m in re.finditer(r"[A-Za-z0-9_./-]+\.v\b", prompt or ""):
             rel = m.group(0)
-            p = Path(rel) if rel.startswith("/") else Path(root) / rel
-            if "rtl" in p.parts or "/rtl/" in str(p):
-                out.append(p)
+            p = Path(rel) if rel.startswith("/") else root_path / rel
+            if "rtl" not in p.parts and "/rtl/" not in str(p):
+                continue
+            # Only ever touch paths inside the run dir -- a prompt citing an
+            # absolute reference path must never be truncated by a fault
+            # (same containment guard as CannedDesignScript.write_artifacts).
+            try:
+                p.resolve().relative_to(root_path.resolve())
+            except (ValueError, OSError):
+                continue
+            out.append(p)
         return out
 
     def _write_to_scratch(self, prompt: str, root: str) -> None:

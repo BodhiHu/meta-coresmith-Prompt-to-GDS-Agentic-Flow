@@ -240,7 +240,6 @@ Same shape as integration DV, but:
 | `CORESMITH_PROJECT_ROOT` | Run directory; defaults to the repo root (don't!). |
 | `CORESMITH_CONFIG_PATH` | `orchestrator/config.yaml` location. |
 | `CORESMITH_BLOCKS_FILE` | Override path to `blocks.yaml`. |
-| `CORESMITH_SKIP_SYNTH` | `1` skips Yosys + PDK preflight. |
 | `CORESMITH_STRICT_INTEGRATION_REVIEW` | `1` auto-revises on `issues_fixed > 0` (old behavior). |
 | `CORESMITH_ALLOW_SKIP_INTEGRATION_DV` | `1` adds `skip` to the integration DV failure interrupt. |
 | `CORESMITH_ALLOW_SKIP_VALIDATION_DV` | `1` adds `skip` to the validation DV failure interrupt. |

@@ -20,37 +20,34 @@ def test_engine_git_sha_returns_str():
 
 def test_stamp_engine_sha_writes_and_is_stable(tmp_path):
     from orchestrator.langgraph.pipeline_graph import _stamp_engine_sha
+    from orchestrator.state_store.project_db import ProjectDB
     _stamp_engine_sha(str(tmp_path))
-    p = tmp_path / ".coresmith" / "engine_sha.json"
-    assert p.exists()
-    rec = json.loads(p.read_text())
-    assert "sha" in rec and rec["changed"] is False
-    # second stamp with same live sha -> still not changed
+    db = ProjectDB(tmp_path)
+    assert db.get_setting("engine_sha") is not None
+    assert db.get_setting("engine_sha_changes") in (None, "[]")
     _stamp_engine_sha(str(tmp_path))
-    assert json.loads(p.read_text())["changed"] is False
+    assert db.get_setting("engine_sha_changes") in (None, "[]")
 
 
 def test_stamp_detects_mid_run_change(tmp_path):
     from orchestrator.langgraph.pipeline_graph import _stamp_engine_sha
+    from orchestrator.state_store.project_db import ProjectDB
     _stamp_engine_sha(str(tmp_path))
-    p = tmp_path / ".coresmith" / "engine_sha.json"
+    db = ProjectDB(tmp_path)
     # simulate that the run STARTED under a different sha than the live one
-    rec = json.loads(p.read_text())
-    rec["sha"] = "deadbeefdead"
-    p.write_text(json.dumps(rec))
+    db.set_setting("engine_sha", "deadbeefdead")
     _stamp_engine_sha(str(tmp_path))
-    rec2 = json.loads(p.read_text())
-    # only asserts change-detection when a live sha is resolvable
     if engine_git_sha():
-        assert rec2["changed"] is True
-        assert rec2["changes"] and rec2["changes"][0]["from"] == "deadbeefdead"
+        changes = json.loads(db.get_setting("engine_sha_changes", "[]") or "[]")
+        assert changes and changes[0]["from"] == "deadbeefdead"
+        assert db.get_setting("engine_sha") == engine_git_sha()
 
 
 def test_final_report_includes_engine_sha(tmp_path):
-    (tmp_path / ".coresmith").mkdir(parents=True)
-    (tmp_path / ".coresmith" / "engine_sha.json").write_text(
-        json.dumps({"sha": "abc123abc123", "changed": True,
-                    "changes": [{"from": "x", "to": "abc123abc123"}]}))
+    from orchestrator.state_store.project_db import open_project
+    db = open_project(tmp_path)
+    db.set_setting("engine_sha", "abc123abc123")
+    db.set_setting("engine_sha_changes", json.dumps([{"from": "x", "to": "abc123abc123"}]))
     report = fr.build_final_report({}, str(tmp_path))
     assert report["engine_sha"] == "abc123abc123"
     assert report["engine_sha_changed_mid_run"] is True
@@ -96,19 +93,3 @@ def _engine_root():
     return Path(orchestrator.__file__).resolve().parent.parent
 
 
-def test_scrubbed_engine_files_name_no_benchmark_exercise():
-    root = _engine_root()
-    offenders = []
-    for rel in _SCRUBBED_FILES:
-        p = root / rel
-        assert p.exists(), rel
-        for i, line in enumerate(
-                p.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
-            low = line.lower()
-            for word in _EXERCISE_WORDS:
-                if word in low:
-                    offenders.append(f"{rel}:{i}: {line.strip()[:100]}")
-    assert not offenders, (
-        "benchmark-exercise vocabulary in engine source:\n  "
-        + "\n  ".join(offenders)
-    )

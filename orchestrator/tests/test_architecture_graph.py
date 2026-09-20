@@ -45,6 +45,7 @@ from orchestrator.langgraph.architecture_graph import (
     route_after_prd,
     route_after_prd_escalation,
 )
+from orchestrator.tests.conftest import enter_arch_llm_node_patches
 from orchestrator.tests.fft16_fixtures import (
     FFT16_BLOCK_DIAGRAM,
     FFT16_CLOCK_TREE,
@@ -132,21 +133,6 @@ def _patch_all_specialists(
         return_value=block_diagram_result,
     ))
     stack.enter_context(patch(
-        "orchestrator.architecture.specialists.memory_map.analyze_memory_map",
-        new_callable=AsyncMock,
-        return_value=memory_map_result,
-    ))
-    stack.enter_context(patch(
-        "orchestrator.architecture.specialists.clock_tree.analyze_clock_tree",
-        new_callable=AsyncMock,
-        return_value=clock_tree_result,
-    ))
-    stack.enter_context(patch(
-        "orchestrator.architecture.specialists.register_spec.analyze_register_spec",
-        new_callable=AsyncMock,
-        return_value=register_spec_result,
-    ))
-    stack.enter_context(patch(
         "orchestrator.architecture.constraints.check_constraints",
         new_callable=AsyncMock,
         return_value=constraint_result,
@@ -158,6 +144,10 @@ def _patch_all_specialists(
         new_callable=AsyncMock,
         return_value={"ers": {"title": "FFT16 ERS", "summary": "test"}, "phase": "ers_complete"},
     ))
+    # Interface Definition and Output Contract Review are graph nodes rather
+    # than specialists, so they were missing from the list above and reached a
+    # live LLM on every whole-graph test. See enter_arch_llm_node_patches.
+    enter_arch_llm_node_patches(stack)
 
     return stack
 
@@ -202,11 +192,7 @@ class TestGraphConstruction:
             "System Architecture",
             "Functional Requirements",
             "Block Diagram",
-            "Complexity Review",
             "Escalate Diagram",
-            "Memory Map",
-            "Clock Tree",
-            "Register Spec",
             "Constraint Check",
             "Escalate Constraints",
             "Constraint Iteration",
@@ -258,6 +244,16 @@ class TestRouteAfterPRD:
         state = {}
         assert route_after_prd(state) == "Escalate PRD"
 
+    def test_questions_phase_wins_over_stale_prd_spec(self):
+        # REVISE_PRD re-entry: the PRD from the earlier pass is still in state,
+        # but this pass returned questions -- they MUST still be escalated.
+        state = {
+            "prd_phase": "questions",
+            "prd_spec": {"title": "stale PRD"},
+            "prd_questions": [{"id": "q1"}],
+        }
+        assert route_after_prd(state) == "Escalate PRD"
+
 
 class TestRouteAfterPRDEscalation:
     def test_continue_goes_to_gather_requirements(self):
@@ -289,13 +285,6 @@ class TestReviewDiagram:
         state = {"block_diagram": {"blocks": [{"name": "a"}], "questions": []}}
         assert review_diagram(state) == "Interface Definition"
 
-    def test_clean_default_goes_to_complexity_review(self, monkeypatch):
-        # Default (both gates ON): the complexity gate runs first on a clean
-        # diagram (A-Fix 3b).
-        monkeypatch.delenv("CORESMITH_COMPLEXITY_GATE", raising=False)
-        state = {"block_diagram": {"blocks": [{"name": "a"}], "questions": []}}
-        assert review_diagram(state) == "Complexity Review"
-
     def test_no_blocks_goes_to_escalate(self):
         state = {"block_diagram": {"blocks": [], "questions": []}}
         assert review_diagram(state) == "Escalate Diagram"
@@ -306,17 +295,6 @@ class TestReviewDiagram:
 
 
 class TestRouteAfterDiagramEscalation:
-    def test_continue_goes_to_complexity_review_by_default(self, monkeypatch):
-        # C17: 'continue' (diagram accepted after a clarifying question) must
-        # run the SAME post-diagram gates as the clean-first-try path
-        # (review_diagram) -- default (both gates ON) means the complexity
-        # gate runs first. Hard-wiring 'Interface Definition' here used to let
-        # any design whose diagram asked a question skip the
-        # complexity/decomposition gate entirely.
-        monkeypatch.delenv("CORESMITH_COMPLEXITY_GATE", raising=False)
-        state = {"human_response": {"action": "continue"}}
-        assert route_after_diagram_escalation(state) == "Complexity Review"
-
     def test_continue_goes_to_interface_definition_when_gates_disabled(self, monkeypatch):
         # With BOTH the complexity gate and the output-contract gate disabled,
         # 'continue' routes straight to Interface Definition (the PR #45
@@ -1555,64 +1533,6 @@ class TestPerDocPersistence:
         assert (coresmith / "block_diagram.json").exists()
         arch = Path(isolated_project) / "arch"
         assert (arch / "block_diagram.md").exists()
-
-    @pytest.mark.asyncio
-    async def test_memory_map_node_writes_per_doc_files(self, isolated_project):
-        """memory_map_node should write memory_map.json and memory_map.md."""
-        from orchestrator.langgraph.architecture_graph import memory_map_node
-
-        state = {
-            "project_root": isolated_project,
-            "requirements": FFT16_REQUIREMENTS,
-            "block_diagram": FFT16_BLOCK_DIAGRAM,
-            "target_clock_mhz": 50.0,
-            "prd_spec": FFT16_PRD_DOCUMENT,
-            "round": 1,
-        }
-
-        with patch(
-            "orchestrator.architecture.specialists.memory_map.analyze_memory_map",
-            new_callable=AsyncMock,
-            return_value=FFT16_MEMORY_MAP,
-        ):
-            await memory_map_node(state)
-
-        from pathlib import Path
-        coresmith = Path(isolated_project) / ".coresmith"
-        assert (coresmith / "memory_map.json").exists()
-        arch = Path(isolated_project) / "arch"
-        assert (arch / "memory_map.md").exists()
-
-    @pytest.mark.asyncio
-    async def test_no_architecture_state_json_written(self, isolated_project):
-        """After per-doc refactor, architecture_state.json should NOT be written."""
-        from orchestrator.langgraph.architecture_graph import memory_map_node
-
-        state = {
-            "project_root": isolated_project,
-            "requirements": FFT16_REQUIREMENTS,
-            "block_diagram": FFT16_BLOCK_DIAGRAM,
-            "target_clock_mhz": 50.0,
-            "prd_spec": FFT16_PRD_DOCUMENT,
-            "round": 1,
-        }
-
-        with patch(
-            "orchestrator.architecture.specialists.memory_map.analyze_memory_map",
-            new_callable=AsyncMock,
-            return_value=FFT16_MEMORY_MAP,
-        ):
-            await memory_map_node(state)
-
-        from pathlib import Path
-        arch_state = Path(isolated_project) / ".coresmith" / "architecture_state.json"
-        # This assertion will pass only after the refactor removes
-        # _persist_intermediate_state and replaces it with per-doc helpers
-        if arch_state.exists():
-            pytest.xfail(
-                "architecture_state.json still written "
-                "(expected until per-doc migration is complete)"
-            )
 
 
 class TestFinalizeBlockSpecs:

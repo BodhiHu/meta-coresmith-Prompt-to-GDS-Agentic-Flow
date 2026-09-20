@@ -21,7 +21,7 @@ each to exactly **one** owning block:
 
 1. **Output format / framing / container** — headers, length-prefixes, trailers,
    the exact byte/packet/record layout the golden emits around the payload.
-   *(Codec: the entropy coding/unit container `ue(nframes), ue(W), ue(H), ue(qp), ue(len), payload`.)*
+   *(Example: a container header followed by a length-prefixed payload.)*
 2. **Global ordering / re-sequencing** — the golden emits results in a specific
    order; parallel or pipelined blocks finish out of order. Who re-sorts/merges
    into the one canonical stream? *(Graph engine: results in vertex-ID order.)*

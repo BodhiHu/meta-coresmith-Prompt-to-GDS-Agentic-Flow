@@ -17,7 +17,7 @@ the bit widths are wrong":
 
 - A 4×4 forward DCT on 8-bit residuals saturates a 12-bit signed coefficient
   register, so the quantizer always outputs ±2047 and the decoder reconstructs
-  flat-grey blocks. PSNR drops 25 dB.
+  flat-grey blocks. Output quality collapses.
 - A 16-bit accumulator overflows after 256 8-bit samples; an FIR filter's
   output becomes random.
 - A Q1.15 multiplied by a Q1.15 stored back into a Q1.15 register loses the

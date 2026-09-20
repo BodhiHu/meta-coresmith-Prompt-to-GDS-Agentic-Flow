@@ -109,7 +109,10 @@ async def analyze_interface_definition(
             )
             return {"result": result, "questions": []}
 
-        target_path = Path(project_root) / ".coresmith" / "interface_contracts.json"
+        # The LLM writes a DRAFT; this specialist imports the validated result
+        # into the project database, which regenerates the read-only
+        # .coresmith/interface_contracts.json view.
+        target_path = Path(project_root) / ".coresmith" / "drafts" / "interface_contracts.json"
         target_path.parent.mkdir(parents=True, exist_ok=True)
 
         parts = [
@@ -218,6 +221,12 @@ async def analyze_interface_definition(
         span.set_attribute(
             "open_question_count", len(result.get("open_questions", []) or [])
         )
+        try:
+            from orchestrator.state_store.project_db import open_project
+            open_project(project_root).import_contracts(result)
+        except Exception as exc:  # noqa: BLE001
+            span.set_attribute("contracts_import_error", str(exc))
+            raise
         return {
             "result": result,
             "questions": result.get("open_questions", []) or [],
@@ -734,6 +743,20 @@ def _validate_contracts(
             f"{len(expected_edges)} inter-block edge(s); "
             "downstream integration_check will validate cross-block wiring."
         )
+
+    # WP-44: a channel or signal whose derived port name is not a legal
+    # Verilog identifier cannot be declared or wired. The conformance layer
+    # used to DROP such rows from what the RTL generator and the gate see
+    # (ax25_9600 attempt 2: 38 drops, three revise rounds before a hand fix);
+    # it is a structural defect of the contract itself and is fixed here.
+    try:
+        from orchestrator.langgraph.contract_conformance import illegal_contract_names
+    except ImportError:  # pragma: no cover - layering guard
+        illegal_contract_names = None
+    if illegal_contract_names is not None:
+        for bad in illegal_contract_names(contracts):
+            _violation(str(bad.get("edge_id") or "?"), "illegal_identifier",
+                       bad["message"])
 
     return ({"contract_violations": violations}, notes)
 

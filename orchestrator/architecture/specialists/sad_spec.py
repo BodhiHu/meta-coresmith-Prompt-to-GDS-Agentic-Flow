@@ -146,8 +146,7 @@ async def generate_sad(
             return {"sad_text": sad_text, "phase": "sad_complete"}
 
         except Exception as e:
+            # WP-73: a failed generation is a run-stopping error, never a stub
+            # document that a later review can accept as the architecture.
             span.set_attribute("error", str(e))
-            return {
-                "sad_text": f"# System Architecture Document (generation failed)\n\nSAD generation failed: {e}\n",
-                "phase": "sad_complete",
-            }
+            raise RuntimeError(f"SAD generation failed: {e}") from e

@@ -20,7 +20,7 @@ IMPORTANT SOFT-IP VS SHUTTLE BOUNDARY:
   MPW pad limits. Keep AXI-Stream/data interfaces at the functional widths
   required by the user/golden model.
 - Only propose pin-muxing, GPIO serialization, pad-limited physical links, or
-  OpenFrame/Caravel wrapper ports when the user explicitly requests a hardened
+  shuttle wrapper ports when the user explicitly requests a hardened
   MPW wrapper/top-level chip integration.
 - For soft-IP runs, shuttle notes are advisory physical context, not a reason
   to narrow streams or weaken throughput/KPI contracts.
@@ -108,7 +108,7 @@ Include:
 
 ## Shuttle Integration
 Physical design planning for the target MPW shuttle.  Include:
-- **Target shuttle**: which shuttle harness (OpenFrame / Caravel) and why
+- **Target shuttle**: which shuttle harness the task names and why
 - **Die area budget**: how the design fits within the shuttle user area;
   estimated block areas vs available user area, target utilization
 - **GPIO pad plan**: map every top-level signal to a specific GPIO pad

@@ -20,15 +20,6 @@ Public surface:
 - :func:`parse_func_vectors` -- tolerant markdown/regex parse of the FRD
   ``## Functional Vectors`` section into structured dicts.
 - :func:`resolve_reference_implementation` -- locate the input software golden.
-- :func:`load_block_goldens` -- import each ``arch/block_goldens/<block>.py``
-  via importlib and instantiate its ``BlockGolden``.
-- :func:`compose_and_run` -- topologically wire block goldens per the block
-  diagram and run a stream of chip-level input transactions through them.
-- :func:`run_composition_gate` -- the end-to-end gate; returns a list of
-  violation dicts (empty == pass / no-op).
-
-The feature is gated by ``CORESMITH_BLOCK_GOLDENS``: when off (the default),
-:func:`run_composition_gate` is a no-op that returns ``[]``.
 """
 
 from __future__ import annotations
@@ -41,7 +32,6 @@ import json
 import logging
 import os
 import re
-from collections import defaultdict, deque
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -49,34 +39,11 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 BLOCK_GOLDENS_DIRNAME = "block_goldens"  # v1, retired (under <project_root>/arch/)
-BLOCK_MODELS_DIRNAME = "block_models"  # Amaranth block models (under arch/)
 
 
 # ---------------------------------------------------------------------------
 # Feature flag
 # ---------------------------------------------------------------------------
-
-def block_goldens_enabled() -> bool:
-    """True when ``CORESMITH_BLOCK_GOLDENS`` is set truthy (strict profile seeds it)."""
-    from orchestrator.profile import ensure_applied, flag_enabled
-    ensure_applied()
-    return flag_enabled("CORESMITH_BLOCK_GOLDENS", default=False)
-
-
-def bit_exact_enabled() -> bool:
-    """True when ``CORESMITH_BIT_EXACT`` is set truthy.
-
-    Default OFF: the model-integration gate accepts a *functional + throughput*
-    match (decode + KPI, result-match, objective value). When ON the gate
-    reverts to the strict bytewise ``==`` against the reference implementation.
-    Mirrors :func:`block_goldens_enabled`.
-    """
-    return os.environ.get("CORESMITH_BIT_EXACT", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
 
 
 def functional_blocks() -> set[str]:
@@ -109,52 +76,6 @@ def functional_blocks() -> set[str]:
 def is_functional_block(block_name: str) -> bool:
     """True when ``block_name`` is in :func:`functional_blocks`."""
     return bool(block_name) and block_name in functional_blocks()
-
-
-def gate_allow_nondegenerate_enabled() -> bool:
-    """True when ``CORESMITH_GATE_ALLOW_NONDEGENERATE`` is set truthy.
-
-    Default OFF. The model-integration gate's functional default (no declared
-    acceptance predicate, ``CORESMITH_BIT_EXACT`` off) requires the composed
-    chip model's output to MATCH THE REFERENCE (the FRD behaviour). Setting this
-    flag reverts to the old, too-weak check that accepted any *non-degenerate*
-    output without comparing it to the reference -- which let a composition
-    streaming a handful of garbage bytes pass. Use only when there is genuinely
-    no usable oracle comparison; intentionally non-bit-exact (lossy) designs
-    should declare an acceptance_fn (see :func:`resolve_functional_acceptance`)
-    instead. Mirrors :func:`bit_exact_enabled`.
-
-    A-Fix 5(b): under the STRICT profile the escape hatch is DEPRECATED. If the
-    flag is set while strict, log an ERROR and return ``False`` (the functional
-    gate keeps its reference-equivalence requirement) -- a deliberate
-    env>profile exception, because honoring a "pass any non-degenerate output"
-    knob defeats the whole anti-gaming fix. The LEGACY profile still honors it.
-    """
-    flag_set = os.environ.get(
-        "CORESMITH_GATE_ALLOW_NONDEGENERATE", ""
-    ).strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-    if not flag_set:
-        return False
-    try:
-        from orchestrator.profile import resolve_profile
-        profile = resolve_profile()
-    except Exception:  # noqa: BLE001 - a profile hiccup must not weaken the gate
-        profile = "strict"
-    if profile != "legacy":
-        logger.error(
-            "CORESMITH_GATE_ALLOW_NONDEGENERATE is set but the STRICT profile "
-            "DEPRECATES this escape hatch (it let a wrong composed model pass on "
-            "mere non-degeneracy). IGNORING it -- the model-integration gate "
-            "keeps its reference-equivalence requirement. Set "
-            "CORESMITH_PROFILE=legacy to honor the flag."
-        )
-        return False
-    return True
 
 
 # ---------------------------------------------------------------------------
@@ -624,8 +545,17 @@ _REF_ENTRY_DECL_RE = re.compile(
 )
 
 # Public callable names we prefer when discovering an entry point.
+#
+# ``main`` is deliberately ABSENT. Discovery is a heuristic over whatever the
+# reference module happens to export, and ``main`` is the one name every
+# UNRELATED utility script also uses: a live run auto-selected a ROM-image
+# generator's zero-argument ``main()`` as the WHOLE-CHIP oracle and every
+# vector died on "main() takes 0 positional arguments but 1 was given" -- a
+# category error that consumed 11 chip-lead decisions. What is removed is the
+# GUESS: an explicit CORESMITH_REFERENCE_ENTRY or a declared
+# reference_entry_point may still name ``main`` (it is then ABI-preflighted).
 _ENTRY_NAME_RE = re.compile(
-    r"^(encode|decode|run|process|main|top|encode_image\w*|chip_top)\b",
+    r"^(encode|decode|run|process|top|encode_image\w*|chip_top)\b",
     re.IGNORECASE,
 )
 
@@ -637,8 +567,16 @@ _ENTRY_NAME_RE = re.compile(
 # available via CORESMITH_REFERENCE_ENTRY or a declared reference_entry_point.)
 _ENTRY_PRIORITY = (
     "encode_image", "encode", "decode", "chip_top", "top", "run", "process",
-    "main",
 )
+
+# Names DISCOVERY must never guess -- not as a conventional name, and not as
+# the module's sole public callable either. ``main`` is a script convention, so
+# the fact that a module exposes one says nothing about whether it models the
+# CHIP: the live regression selected a ROM generator's ``main`` as the
+# whole-chip oracle. Naming it explicitly (CORESMITH_REFERENCE_ENTRY /
+# reference_entry_point) still works -- that is an operator asserting intent,
+# not the engine inferring it.
+_ENTRY_NAME_DENY = frozenset({"main"})
 
 
 def _entry_priority(name: str) -> tuple[int, str]:
@@ -679,10 +617,89 @@ def _public_callables(module) -> list[tuple[str, Callable]]:
     return out
 
 
+class ReferenceEntryPointError(RuntimeError):
+    """An EXPLICITLY configured reference entry cannot be the design's oracle.
+
+    Raised by :func:`resolve_reference_entrypoint` when
+    ``CORESMITH_REFERENCE_ENTRY`` / a declared ``reference_entry_point`` names a
+    callable that takes no positional argument, and by the model-integration
+    gate's stimulus derivation for the same callable. Explicit config is an
+    OPERATOR DECISION: quietly falling back to a heuristic guess hides the typo
+    (and hands the gate a different oracle than the operator asked for), so the
+    run fails fast with the callable's real signature instead.
+    """
+
+
+# Resolution tiers, reported as PROVENANCE so a log shows which one won.
+ENTRY_SOURCE_ENV = "env"
+ENTRY_SOURCE_DECLARED = "declared"
+ENTRY_SOURCE_DISCOVERED = "discovered"
+ENTRY_SOURCE_NONE = "none"
+
+
+def _entry_signature(entry_callable) -> str:
+    """``name(signature)`` for error messages; degrades, never raises."""
+    name = (
+        getattr(entry_callable, "__qualname__", None)
+        or getattr(entry_callable, "__name__", None)
+        or repr(entry_callable)
+    )
+    try:
+        return f"{name}{inspect.signature(entry_callable)}"
+    except (TypeError, ValueError):
+        return f"{name}(<signature unavailable>)"
+
+
+def _entry_accepts_stimulus(entry_callable) -> bool:
+    """ABI preflight: can this callable be CALLED WITH A STIMULUS?
+
+    True iff it accepts at least one positional argument -- a POSITIONAL_ONLY /
+    POSITIONAL_OR_KEYWORD parameter, or ``*args``. Every oracle invocation goes
+    through :func:`_run_reference`, which calls ``entry(stimulus)`` (or
+    ``entry(**stimulus)``, which still needs those parameters), so a
+    zero-positional callable is not an oracle -- it is a script entry point
+    that merely happens to be public.
+
+    Callables whose signature cannot be introspected (C builtins, exotic
+    ``__call__``) are ACCEPTED: "unknown" is not proof of impossibility, and a
+    real invocation failure is still reported as ``reference_uninvokable``.
+    """
+    if entry_callable is None or not callable(entry_callable):
+        return False
+    try:
+        sig = inspect.signature(entry_callable)
+    except (TypeError, ValueError):
+        return True
+    return any(
+        p.kind
+        in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.VAR_POSITIONAL,
+        )
+        for p in sig.parameters.values()
+    )
+
+
+def _entry_abi_message(entry_callable, spec: str = "", source: str = "") -> str:
+    """The actionable message for an entry that cannot accept a stimulus."""
+    origin = f" (from {source})" if source else ""
+    named = f"{spec!r}{origin} -> " if spec else ""
+    return (
+        f"reference entry {named}{_entry_signature(entry_callable)} takes NO "
+        "positional argument, so it cannot be the design's oracle -- the gate "
+        "invokes it as entry(stimulus). Point CORESMITH_REFERENCE_ENTRY (or the "
+        "PRD/FRD 'reference_entry_point:') at the callable that CONSUMES the "
+        "stimulus, e.g. 'encode' or 'my_module:run'."
+    )
+
+
 def resolve_reference_entrypoint(
     project_root: str,
     ref_module,
-) -> tuple[Callable | None, str]:
+    *,
+    with_provenance: bool = False,
+) -> tuple[Callable | None, str] | tuple[Callable | None, str, str]:
     """Resolve the callable that IS the design's executable oracle.
 
     Resolution order (first hit wins):
@@ -695,25 +712,64 @@ def resolve_reference_entrypoint(
        ``reference_entry_point: <name>`` (the name may be dotted/attr-pathed and
        is resolved against ``ref_module``).
     3. Discovery on ``ref_module``: among its public top-level functions, prefer
-       a name matching ``^(encode|decode|run|process|main|top|encode_image*|
+       a name matching ``^(encode|decode|run|process|top|encode_image*|
        chip_top)``; else, if there is exactly one public top-level function,
-       use it.
+       use it. ``main`` is never GUESSED at either step (``_ENTRY_NAME_DENY``)
+       -- tiers 1 and 2 can still name it.
 
-    Returns ``(callable_or_None, dotted_name_str)``. ``dotted_name_str`` is a
-    best-effort human-readable name for logging even when the callable is None.
+    ABI PREFLIGHT (every tier, :func:`_entry_accepts_stimulus`): the oracle is
+    invoked as ``entry(stimulus)``, so a callable with no positional parameter
+    cannot be one. DISCOVERY never selects such a callable -- a live run picked
+    a ROM utility's zero-argument ``main()`` as the whole-chip reference and
+    burned 11 chip-lead decisions on "main() takes 0 positional arguments but 1
+    was given". An EXPLICIT entry (env var / declared) that fails the preflight
+    raises :class:`ReferenceEntryPointError` naming the callable and its
+    signature, rather than silently degrading to the heuristics.
+
+    Returns ``(callable_or_None, dotted_name_str)`` -- or, with
+    ``with_provenance=True``, ``(callable_or_None, dotted_name_str, source)``
+    where ``source`` is ``"env"`` / ``"declared"`` / ``"discovered"`` /
+    ``"none"``, so the daemon log shows WHICH tier chose the oracle.
+    ``dotted_name_str`` is a best-effort human-readable name for logging even
+    when the callable is None.
     """
-    # 1. env override
+    fn, name, source = _resolve_reference_entrypoint_tiered(
+        project_root, ref_module
+    )
+    if with_provenance:
+        return fn, name, source
+    return fn, name
+
+
+def _resolve_reference_entrypoint_tiered(
+    project_root: str,
+    ref_module,
+) -> tuple[Callable | None, str, str]:
+    """The tiered resolution behind :func:`resolve_reference_entrypoint`.
+
+    Returns ``(callable_or_None, name, source)``; see the public wrapper for
+    the tier order and the ABI preflight contract.
+    """
+    # 1. env override -- EXPLICIT: honour it or fail loudly, never guess past it.
     env_entry = os.environ.get("CORESMITH_REFERENCE_ENTRY", "").strip()
     if env_entry:
         fn = _resolve_dotted_entry(env_entry, ref_module)
         if fn is not None:
-            return fn, env_entry
+            if not _entry_accepts_stimulus(fn):
+                raise ReferenceEntryPointError(
+                    _entry_abi_message(fn, env_entry, "CORESMITH_REFERENCE_ENTRY")
+                )
+            logger.info(
+                "composition gate: reference entry %r resolved via %s",
+                env_entry, ENTRY_SOURCE_ENV,
+            )
+            return fn, env_entry, ENTRY_SOURCE_ENV
         logger.warning(
             "composition gate: CORESMITH_REFERENCE_ENTRY=%r did not resolve",
             env_entry,
         )
 
-    # 2. declared in PRD / FRD prose
+    # 2. declared in PRD / FRD prose -- also EXPLICIT.
     root = Path(project_root)
     for doc in (root / "arch" / "prd_spec.md", root / "arch" / "frd_spec.md"):
         if not doc.exists():
@@ -727,7 +783,17 @@ def resolve_reference_entrypoint(
             decl = m.group(1)
             fn = _resolve_dotted_entry(decl, ref_module)
             if fn is not None:
-                return fn, decl
+                if not _entry_accepts_stimulus(fn):
+                    raise ReferenceEntryPointError(
+                        _entry_abi_message(
+                            fn, decl, f"{doc.name} reference_entry_point"
+                        )
+                    )
+                logger.info(
+                    "composition gate: reference entry %r resolved via %s (%s)",
+                    decl, ENTRY_SOURCE_DECLARED, doc.name,
+                )
+                return fn, decl, ENTRY_SOURCE_DECLARED
             logger.warning(
                 "composition gate: declared reference_entry_point %r "
                 "did not resolve",
@@ -737,11 +803,39 @@ def resolve_reference_entrypoint(
     # 3. discovery on the ref module
     if ref_module is not None:
         publics = _public_callables(ref_module)
+        # ABI preflight as a HARD FILTER: a zero-positional callable is never
+        # DISCOVERED as the oracle (that is the ROM-utility `main()` bug).
+        usable: list[tuple[str, Callable]] = []
+        rejected: list[str] = []
+        for name, fn in publics:
+            if _entry_accepts_stimulus(fn):
+                usable.append((name, fn))
+            else:
+                rejected.append(name)
+        if rejected:
+            logger.info(
+                "composition gate: discovery skipped %s -- no positional "
+                "parameter, so they cannot be called with a stimulus",
+                rejected,
+            )
+        denied = [name for name, _ in usable if name.lower() in _ENTRY_NAME_DENY]
+        if denied:
+            usable = [
+                (name, fn)
+                for name, fn in usable
+                if name.lower() not in _ENTRY_NAME_DENY
+            ]
+            logger.warning(
+                "composition gate: discovery will not GUESS %s as the chip "
+                "oracle -- set CORESMITH_REFERENCE_ENTRY=%s (or a declared "
+                "reference_entry_point) if that really is the reference entry",
+                denied, denied[0],
+            )
         # Prefer a conventionally-named entry, RANKED BY INTENT -- not by the
         # alphabetical dir() order, which made an encoder golden exposing both
         # `encode` and `decode` resolve to `decode` ('d' < 'e').
         conventional = [
-            (name, fn) for name, fn in publics if _ENTRY_NAME_RE.match(name)
+            (name, fn) for name, fn in usable if _ENTRY_NAME_RE.match(name)
         ]
         if conventional:
             conventional.sort(key=lambda item: _entry_priority(item[0]))
@@ -755,13 +849,22 @@ def resolve_reference_entrypoint(
                     conventional[0][0],
                 )
             name, fn = conventional[0]
-            return fn, name
+            logger.info(
+                "composition gate: reference entry %r resolved via %s",
+                name, ENTRY_SOURCE_DISCOVERED,
+            )
+            return fn, name, ENTRY_SOURCE_DISCOVERED
         # Else the single public top-level function, if unambiguous.
-        if len(publics) == 1:
-            name, fn = publics[0]
-            return fn, name
+        if len(usable) == 1:
+            name, fn = usable[0]
+            logger.info(
+                "composition gate: reference entry %r resolved via %s "
+                "(sole public function)",
+                name, ENTRY_SOURCE_DISCOVERED,
+            )
+            return fn, name, ENTRY_SOURCE_DISCOVERED
 
-    return None, env_entry or ""
+    return None, env_entry or "", ENTRY_SOURCE_NONE
 
 
 def _resolve_dotted_entry(spec: str, ref_module) -> Callable | None:
@@ -827,328 +930,9 @@ def _import_module_from_path(path: Path, mod_name: str):
     return module
 
 
-def load_block_goldens(
-    goldens_dir: str,
-    block_names: list[str],
-) -> dict[str, Any]:
-    """Import + instantiate each block's golden model.
-
-    Args:
-        goldens_dir: directory containing ``<block>.py`` block goldens.
-        block_names: the blocks to load (typically the block diagram's block
-            names). A block with no ``<block>.py`` is silently skipped (the
-            caller decides whether a missing golden is fatal).
-
-    Returns:
-        ``{block_name: BlockGolden instance}`` for every block that loaded.
-
-    Raises:
-        RuntimeError: if a present ``<block>.py`` fails to import, lacks PORTS,
-            or lacks an instantiable ``BlockGolden``.
-    """
-    out: dict[str, Any] = {}
-    d = Path(goldens_dir)
-    for name in block_names:
-        path = d / f"{name}.py"
-        if not path.exists():
-            continue
-        try:
-            module = _import_module_from_path(
-                path, f"_coresmith_blkgolden_{name}"
-            )
-        except Exception as exc:
-            raise RuntimeError(
-                f"block golden {path} failed to import: "
-                f"{type(exc).__name__}: {exc}"
-            ) from exc
-
-        ports = getattr(module, "PORTS", None)
-        if not isinstance(ports, dict) or "inputs" not in ports or "outputs" not in ports:
-            raise RuntimeError(
-                f"block golden {path} has no valid PORTS "
-                "(need dict with 'inputs' and 'outputs')"
-            )
-        block_cls = getattr(module, "BlockGolden", None)
-        if block_cls is None or not callable(block_cls):
-            raise RuntimeError(f"block golden {path} has no BlockGolden class")
-        try:
-            instance = block_cls()
-        except Exception as exc:
-            raise RuntimeError(
-                f"block golden {path} BlockGolden() failed to instantiate: "
-                f"{type(exc).__name__}: {exc}"
-            ) from exc
-        # Attach the declared ports so compose_and_run can map edges.
-        instance._coresmith_ports = ports
-        out[name] = instance
-    return out
-
-
 # ---------------------------------------------------------------------------
 # Composition (topological wiring + execution)
 # ---------------------------------------------------------------------------
-
-def _block_ports(instance: Any) -> dict:
-    ports = getattr(instance, "_coresmith_ports", None)
-    if isinstance(ports, dict):
-        return ports
-    return {"inputs": [], "outputs": []}
-
-
-def _topo_order(
-    block_names: list[str],
-    connections: list[dict],
-) -> tuple[list[str], set[tuple[str, str]]]:
-    """Kahn topological sort of blocks; returns (order, feedback_edges).
-
-    Edges that would form a cycle (feedback paths) are detected and excluded
-    from the ordering constraint, then returned separately so the caller can
-    deliver them with a one-transaction delay. The remaining DAG defines the
-    forward evaluation order within a transaction.
-    """
-    present = set(block_names)
-    # Build adjacency from connections, ignoring chip-boundary endpoints
-    # (a `from`/`to` that is not a known block name is a chip I/O endpoint).
-    # A self-loop (src == dst) is always a feedback edge.
-    edges: list[tuple[str, str]] = []
-    self_loops: set[tuple[str, str]] = set()
-    for c in connections:
-        src = c.get("from", c.get("from_block", ""))
-        dst = c.get("to", c.get("to_block", ""))
-        if src in present and dst in present:
-            if src == dst:
-                self_loops.add((src, dst))
-            else:
-                edges.append((src, dst))
-
-    # Detect feedback edges: an edge (u, v) is feedback if v can reach u via
-    # other edges (i.e. it closes a cycle). We compute a tentative order via
-    # DFS and mark back-edges.
-    feedback: set[tuple[str, str]] = set()
-    adj: dict[str, list[str]] = defaultdict(list)
-    for u, v in edges:
-        adj[u].append(v)
-
-    color: dict[str, int] = {n: 0 for n in block_names}  # 0=white,1=gray,2=black
-
-    def dfs(u: str) -> None:
-        color[u] = 1
-        for v in adj.get(u, []):
-            if color.get(v, 0) == 1:
-                feedback.add((u, v))  # back-edge -> feedback
-            elif color.get(v, 0) == 0:
-                dfs(v)
-        color[u] = 2
-
-    for n in block_names:
-        if color.get(n, 0) == 0:
-            dfs(n)
-
-    feedback |= self_loops
-
-    # Kahn's algorithm on the DAG (forward edges only).
-    forward = [(u, v) for (u, v) in edges if (u, v) not in feedback]
-    indeg: dict[str, int] = {n: 0 for n in block_names}
-    fadj: dict[str, list[str]] = defaultdict(list)
-    for u, v in forward:
-        indeg[v] += 1
-        fadj[u].append(v)
-    q = deque(sorted(n for n in block_names if indeg[n] == 0))
-    order: list[str] = []
-    while q:
-        n = q.popleft()
-        order.append(n)
-        for v in sorted(fadj.get(n, [])):
-            indeg[v] -= 1
-            if indeg[v] == 0:
-                q.append(v)
-    # Any block not ordered (shouldn't happen once feedback removed) appended
-    # deterministically so it still runs.
-    for n in block_names:
-        if n not in order:
-            order.append(n)
-    return order, feedback
-
-
-def compose_and_run(
-    block_diagram: dict,
-    block_goldens: dict[str, Any],
-    chip_inputs: dict,
-) -> dict:
-    """Wire block goldens per the block diagram and run a transaction stream.
-
-    Args:
-        block_diagram: ``{"blocks": [...], "connections": [...]}``. Each
-            connection is ``{"from","to","from_port","to_port", ...}`` (the
-            ``interface`` field is used as a fallback port name).
-        block_goldens: ``{block_name: BlockGolden instance}``.
-        chip_inputs: ``{chip_input_port: [v0, v1, ...]}`` -- one list per
-            chip-level input port, giving the value at each of N transactions.
-            Scalars are accepted and treated as a single-transaction stream.
-
-    Returns:
-        ``{chip_output_port: [v0, v1, ...]}`` -- the chip-level outputs
-        collected per transaction (only transactions that produced a value).
-
-    Semantics:
-        - Within a transaction, blocks are evaluated in topological order; a
-          block's ``step()`` outputs are piped along forward edges to the
-          consumers evaluated later in the same transaction.
-        - Feedback edges (cycles) deliver a producer's *previous*-transaction
-          output to the consumer on the *next* transaction (one-transaction
-          delay), using the persistent block instance state.
-        - A block that returns ``{}`` (latency / accumulation) simply provides
-          no value on its outgoing edges that transaction.
-        - chip-level outputs are edges whose ``to`` endpoint is not a block
-          (a chip-boundary egress port) OR a block output port named in the
-          block diagram's chip-output interface. We also expose any block
-          output that has no forward consumer as a chip output under
-          ``<block>.<port>`` when no explicit chip egress edge exists.
-    """
-    blocks_meta = block_diagram.get("blocks", []) or []
-    connections = block_diagram.get("connections", []) or []
-    block_names = [b.get("name", "") for b in blocks_meta if b.get("name")]
-    # Only consider blocks we actually have goldens for.
-    block_names = [n for n in block_names if n in block_goldens]
-    present = set(block_names)
-
-    order, feedback = _topo_order(block_names, connections)
-
-    # Reset all blocks before a run so streams are deterministic.
-    for inst in block_goldens.values():
-        if hasattr(inst, "reset"):
-            try:
-                inst.reset()
-            except Exception:  # noqa: BLE001 - reset is best-effort
-                pass
-
-    # Normalise chip inputs to per-port lists and find the stream length.
-    norm_inputs: dict[str, list] = {}
-    n_txn = 1
-    for port, vals in chip_inputs.items():
-        if isinstance(vals, list):
-            norm_inputs[port] = vals
-            n_txn = max(n_txn, len(vals))
-        else:
-            norm_inputs[port] = [vals]
-    # Pad shorter input streams with None (no drive that transaction).
-    for port in norm_inputs:
-        if len(norm_inputs[port]) < n_txn:
-            norm_inputs[port] = norm_inputs[port] + [None] * (
-                n_txn - len(norm_inputs[port])
-            )
-
-    # Index connections for fast per-block lookup.
-    # forward_in[block] = list of (src, from_port, to_port)
-    forward_in: dict[str, list[tuple[str, str, str]]] = defaultdict(list)
-    feedback_in: dict[str, list[tuple[str, str, str]]] = defaultdict(list)
-    # chip_in_edges[block] = list of (chip_port, to_port)
-    chip_in_edges: dict[str, list[tuple[str, str]]] = defaultdict(list)
-    # chip_out_edges = list of (src_block, from_port, chip_out_port)
-    chip_out_edges: list[tuple[str, str, str]] = []
-    # consumed outputs: (block, port) that feed some block forward edge
-    consumed: set[tuple[str, str]] = set()
-
-    for c in connections:
-        src = c.get("from", c.get("from_block", ""))
-        dst = c.get("to", c.get("to_block", ""))
-        fport = c.get("from_port") or c.get("interface") or ""
-        tport = c.get("to_port") or c.get("interface") or ""
-        if src in present and dst in present:
-            if (src, dst) in feedback:
-                feedback_in[dst].append((src, fport, tport))
-            else:
-                forward_in[dst].append((src, fport, tport))
-            consumed.add((src, fport))
-        elif src in present and dst not in present:
-            # chip egress edge
-            chip_out_edges.append((src, fport, dst or f"{src}.{fport}"))
-            consumed.add((src, fport))
-        elif src not in present and dst in present:
-            # chip ingress edge
-            chip_in_edges[dst].append((src, tport))
-
-    # Per-block previous-transaction output cache for feedback delivery.
-    prev_out: dict[str, dict] = {n: {} for n in block_names}
-
-    chip_outputs: dict[str, list] = defaultdict(list)
-
-    for t in range(n_txn):
-        cur_out: dict[str, dict] = {}
-        for name in order:
-            inst = block_goldens[name]
-            ports = _block_ports(inst)
-            in_ports = ports.get("inputs", [])
-            step_in: dict = {}
-
-            # chip ingress
-            for chip_port, to_port in chip_in_edges.get(name, []):
-                key = to_port or chip_port
-                # Prefer the chip stream keyed by the chip-side port; fall back
-                # to the to_port name.
-                val = None
-                if chip_port in norm_inputs:
-                    val = norm_inputs[chip_port][t]
-                elif to_port in norm_inputs:
-                    val = norm_inputs[to_port][t]
-                elif key in norm_inputs:
-                    val = norm_inputs[key][t]
-                if val is not None:
-                    step_in[key] = val
-
-            # If the block declares input ports that match chip input stream
-            # names directly (single-block designs, or unconnected ingress),
-            # drive them too.
-            for p in in_ports:
-                if p in norm_inputs and p not in step_in:
-                    if norm_inputs[p][t] is not None:
-                        step_in[p] = norm_inputs[p][t]
-
-            # forward edges (same transaction, upstream already ran)
-            for src, fport, tport in forward_in.get(name, []):
-                produced = cur_out.get(src, {})
-                if fport in produced:
-                    step_in[tport or fport] = produced[fport]
-
-            # feedback edges (previous transaction's output, one-cycle delay)
-            for src, fport, tport in feedback_in.get(name, []):
-                produced = prev_out.get(src, {})
-                if fport in produced:
-                    step_in[tport or fport] = produced[fport]
-
-            # Every declared input port must be present for block goldens that
-            # strictly validate their input keys. Default any port not driven
-            # this transaction -- feedback/sideband ports on the first
-            # transaction (no producer output yet), or unwired ingress -- to 0
-            # (the idle/no-activity value) so composition never raises mid-run.
-            for p in in_ports:
-                if p not in step_in:
-                    step_in[p] = 0
-
-            result = inst.step(step_in)
-            cur_out[name] = result if isinstance(result, dict) else {}
-
-        # collect chip-level outputs for this transaction
-        for src, fport, chip_port in chip_out_edges:
-            produced = cur_out.get(src, {})
-            if fport in produced:
-                chip_outputs[chip_port].append(produced[fport])
-            elif not produced and fport == "":
-                pass
-
-        # If there are NO explicit chip egress edges, expose every unconsumed
-        # block output port as a chip output (covers single-block + terminal
-        # blocks the diagram didn't wire to a boundary egress).
-        if not chip_out_edges:
-            for name in order:
-                produced = cur_out.get(name, {})
-                for port, val in produced.items():
-                    if (name, port) not in consumed:
-                        chip_outputs[f"{name}.{port}"].append(val)
-
-        prev_out = cur_out
-
-    return dict(chip_outputs)
 
 
 # ---------------------------------------------------------------------------
@@ -1158,410 +942,6 @@ def compose_and_run(
 def _load_reference_module(path: str):
     """Import the reference implementation module from a file path."""
     return _import_module_from_path(Path(path), "_coresmith_reference_impl")
-
-
-def _vector_block(vec: dict) -> str:
-    """Extract the bare block name from a FUNC vector's 'block' field."""
-    raw = str(vec.get("block", "")).strip()
-    # The block field is often "<block> / in -> out"; take the leading token.
-    token = re.split(r"[\s/(]", raw, maxsplit=1)[0].strip()
-    # Strip markdown/code-span backticks and trailing punctuation cruft
-    # (FUNC "Block / I-O" fields look like "`frame_ctrl`;  drives ...").
-    token = token.strip(" `;:,.\t\n")
-    return token
-
-
-def run_composition_gate(
-    project_root: str, result_info: dict | None = None
-) -> list[dict]:
-    """DEPRECATED v1 entry point -- delegates to the v2 model-integration gate.
-
-    v1 wired ad-hoc ``BlockGolden.step()`` Python goldens through an untimed
-    ``compose_and_run`` harness and drove FRD FUNC vectors. v2 replaces that
-    with Amaranth block models, an LLM model-integration agent that builds a
-    top-level Amaranth chip model, and a deterministic pysim gate that
-    compares the integrated model bit-exact to the reference implementation.
-
-    This shim preserves the old callable so existing imports/tests don't break;
-    it forwards to :func:`run_model_integration_gate`. Returns ``[]`` (no-op)
-    when the feature flag is off.
-    """
-    if not block_goldens_enabled():
-        logger.info("composition gate: CORESMITH_BLOCK_GOLDENS off -- no-op")
-        if result_info is not None:
-            result_info.update(skipped=True,
-                               reason="CORESMITH_BLOCK_GOLDENS off",
-                               checked_vectors=0)
-        return []
-    try:
-        from orchestrator.architecture.model_integration import (
-            run_model_integration_gate,
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("composition gate: model_integration import failed: %s", exc)
-        if result_info is not None:
-            result_info.update(skipped=True,
-                               reason=f"model_integration import failed: {exc}",
-                               checked_vectors=0)
-        return []
-    return run_model_integration_gate(project_root, result_info=result_info)
-
-
-def _run_composition_gate_v1(project_root: str) -> list[dict]:
-    """RETIRED v1 implementation (kept for reference / not wired).
-
-    Returns a list of violation dicts (empty == pass). No-op when the feature
-    flag is off, no reference implementation is found, or there is no
-    block_goldens dir / no block goldens.
-    """
-    if not block_goldens_enabled():
-        logger.info("composition gate: CORESMITH_BLOCK_GOLDENS off -- no-op")
-        return []
-
-    root = Path(project_root)
-
-    goldens_dir = root / "arch" / BLOCK_GOLDENS_DIRNAME
-    if not goldens_dir.is_dir() or not any(goldens_dir.glob("*.py")):
-        logger.info(
-            "composition gate: no block goldens at %s -- no-op", goldens_dir
-        )
-        return []
-
-    # A reference implementation is the PREFERRED oracle but is OPTIONAL:
-    # objective-math designs (adder/CRC/MCU) have no executable reference, and
-    # the gate then falls back to the FRD vector's hand-computed expected. So a
-    # missing reference is NOT a no-op anymore -- we still drive vectors that
-    # carry an explicit expected.
-    ref_path = resolve_reference_implementation(project_root)
-    if not ref_path:
-        logger.info(
-            "composition gate: no reference implementation -- will fall back "
-            "to FRD expected (objective-math path)"
-        )
-
-    bd_path = root / ".coresmith" / "block_diagram.json"
-    if not bd_path.exists():
-        logger.info("composition gate: no block_diagram.json -- no-op")
-        return []
-    try:
-        block_diagram = json.loads(bd_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        return [
-            {
-                "type": "composition_gate_error",
-                "first_divergence_block": "",
-                "expected": "",
-                "observed": "",
-                "suggested_fix": f"block_diagram.json unreadable: {exc}",
-            }
-        ]
-
-    block_names = [
-        b.get("name", "")
-        for b in block_diagram.get("blocks", [])
-        if b.get("name")
-    ]
-    try:
-        block_goldens = load_block_goldens(str(goldens_dir), block_names)
-    except RuntimeError as exc:
-        return [
-            {
-                "type": "composition_gate_error",
-                "first_divergence_block": "",
-                "expected": "",
-                "observed": "",
-                "suggested_fix": str(exc),
-            }
-        ]
-    if not block_goldens:
-        logger.info("composition gate: no loadable block goldens -- no-op")
-        return []
-
-    # Load FRD FUNC vectors.
-    frd_text = ""
-    frd_path = root / "arch" / "frd_spec.md"
-    if frd_path.exists():
-        try:
-            frd_text = frd_path.read_text(encoding="utf-8")
-        except OSError:
-            frd_text = ""
-    vectors = parse_func_vectors(frd_text)
-
-    # Try to obtain the reference module + a single callable entry point. The
-    # entry point (when present) is the AUTHORITATIVE oracle: expected output is
-    # computed by running it on each vector's stimulus.
-    ref_module = None
-    if ref_path:
-        try:
-            ref_module = _load_reference_module(ref_path)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("composition gate: reference import failed: %s", exc)
-
-    entry_callable, entry_name = resolve_reference_entrypoint(
-        project_root, ref_module
-    )
-    if entry_callable is not None:
-        logger.info(
-            "composition gate: reference oracle entry = %s", entry_name
-        )
-    else:
-        logger.info(
-            "composition gate: no callable reference entry -- using FRD "
-            "expected as oracle (objective-math fallback)"
-        )
-
-    violations: list[dict] = []
-
-    for vec in vectors:
-        # 1. Determine the stimulus. Prefer the structured machine-readable
-        #    stimulus; fall back to numeric coercion of the prose stimulus.
-        stim_struct = vec.get("stimulus_struct")
-        if isinstance(stim_struct, dict) and stim_struct:
-            chip_inputs = _stimulus_to_chip_inputs(stim_struct, block_diagram)
-            ref_stim: Any = stim_struct
-        else:
-            prose_stim = vec.get("stimulus", "")
-            if prose_stim in ("", None):
-                continue  # nothing to drive -- covered by per-block DV
-            chip_inputs = _stimulus_to_chip_inputs(prose_stim, block_diagram)
-            ref_stim = chip_inputs if chip_inputs is not None else prose_stim
-
-        if chip_inputs is None:
-            # Not machine-drivable -- SKIP (per-block DV still covers it).
-            logger.info(
-                "composition gate: vector %s stimulus not machine-drivable "
-                "-- skipping", vec.get("id", ""),
-            )
-            continue
-
-        # 2. Compute the observed composed output.
-        try:
-            composed = compose_and_run(block_diagram, block_goldens, chip_inputs)
-        except Exception as exc:  # noqa: BLE001
-            violations.append(
-                {
-                    "type": "composition_gate_failure",
-                    "vector_id": vec.get("id", ""),
-                    "first_divergence_block": _vector_block(vec),
-                    "expected": "",
-                    "observed": f"composition raised {type(exc).__name__}: {exc}",
-                    "suggested_fix": (
-                        "A block golden raised during composition; inspect "
-                        f"block '{_vector_block(vec)}' golden math/representation."
-                    ),
-                }
-            )
-            continue
-
-        composed_flat = _flatten_single(composed)
-
-        # 3. Determine the EXPECTED via the oracle policy.
-        if entry_callable is not None:
-            # Reference implementation IS the oracle.
-            expected = _run_reference(entry_callable, ref_stim)
-            if expected is None:
-                # Reference could not be run on this stimulus -- skip (logged).
-                logger.info(
-                    "composition gate: reference returned None for vector %s "
-                    "-- skipping", vec.get("id", ""),
-                )
-                continue
-            suggested_fix = (
-                "composed block-goldens diverge from the reference "
-                "implementation -- fix the named block's golden"
-            )
-        else:
-            # No reference -> fall back to the structured expected, else the
-            # prose-computed expected (objective-math designs).
-            exp_struct = vec.get("expected_struct")
-            if exp_struct is not None:
-                expected = exp_struct
-            else:
-                expected = vec.get("expected_output", "")
-            if expected in ("", None):
-                # No oracle available at all -- skip.
-                continue
-            suggested_fix = (
-                "Composed block-golden output diverges from the FUNC vector's "
-                "expected output. Re-derive the named block's golden math "
-                "(close any placeholder)."
-            )
-
-        # 4. Compare bit-exact; localize first divergence on mismatch.
-        if not _outputs_match(composed_flat, expected):
-            violations.append(
-                {
-                    "type": "composition_gate_failure",
-                    "vector_id": vec.get("id", ""),
-                    "first_divergence_block": _localize_divergence(
-                        block_diagram, block_goldens, chip_inputs, vec
-                    ),
-                    "expected": expected,
-                    "observed": composed_flat,
-                    "suggested_fix": suggested_fix,
-                }
-            )
-
-    return violations
-
-
-def _stimulus_to_chip_inputs(stim: Any, block_diagram: dict) -> dict | None:
-    """Coerce a FUNC vector stimulus into a ``compose_and_run`` chip_inputs map.
-
-    Accepts:
-      - dict: used as-is ({chip_port: value-or-list}).
-      - list/scalar: bound to the first chip-ingress port name if one can be
-        determined, else returns None (cannot drive deterministically).
-    """
-    def _numeric(v: Any) -> bool:
-        if isinstance(v, bool):
-            return False
-        if isinstance(v, int):
-            return True
-        if isinstance(v, list):
-            return all(_numeric(x) for x in v)
-        return False
-
-    if isinstance(stim, dict):
-        # Only a fully-numeric {chip_port: value-or-list} mapping can be driven
-        # deterministically; anything else is prose -> skip.
-        if stim and all(_numeric(v) for v in stim.values()):
-            return stim
-        return None
-
-    # A prose / non-numeric stimulus (the common case for FRD vectors written
-    # in English) cannot be driven by the composition harness -- return None so
-    # run_composition_gate SKIPS it (it stays covered by per-block DV) instead
-    # of crashing. Only a bare int or list-of-ints binds to an ingress port.
-    if not _numeric(stim):
-        return None
-
-    # Determine the chip's primary ingress port. A chip ingress edge is a
-    # connection whose `from` is not a block. If none, use the first block's
-    # first input port.
-    block_names = {b.get("name") for b in block_diagram.get("blocks", [])}
-    for c in block_diagram.get("connections", []):
-        src = c.get("from", c.get("from_block", ""))
-        if src and src not in block_names:
-            port = c.get("from") or "in"
-            return {port: stim}
-    # Fall back to the first block's first input port.
-    blocks = block_diagram.get("blocks", [])
-    if blocks:
-        ifaces = blocks[0].get("interfaces", {}) or {}
-        in_ports = [
-            p
-            for p, info in ifaces.items()
-            if (isinstance(info, dict) and info.get("direction") == "input")
-        ] or list(ifaces.keys())
-        if in_ports:
-            return {in_ports[0]: stim}
-    return None
-
-
-def _flatten_single(composed: dict) -> Any:
-    """If the composed output has exactly one port with one value, unwrap it.
-
-    Keeps comparison robust to single-output designs where the FUNC vector's
-    expected output is a bare value rather than ``{port: [value]}``.
-    """
-    if isinstance(composed, dict) and len(composed) == 1:
-        (vals,) = composed.values()
-        if isinstance(vals, list) and len(vals) == 1:
-            return vals[0]
-        if isinstance(vals, list):
-            return vals
-    return composed
-
-
-def _deep_equal(a, b) -> bool:
-    """Structural deep equality that handles dict / numpy ndarray / bytes / list
-    leaves (the model-integration gate output is e.g. {bitstream: bytes, recon:
-    [ndarray], stats: {...}}). Byte-EXACT: arrays via np.array_equal, bytes and
-    lists elementwise. Bytes are normalised to list[int] so bytes==list[int] of
-    the same values compares equal."""
-    try:
-        import numpy as _np
-    except ImportError:
-        _np = None
-    if isinstance(a, (bytes, bytearray)):
-        a = list(a)
-    if isinstance(b, (bytes, bytearray)):
-        b = list(b)
-    if _np is not None and (isinstance(a, _np.ndarray) or isinstance(b, _np.ndarray)):
-        try:
-            aa = _np.asarray(a)
-            bb = _np.asarray(b)
-            return aa.shape == bb.shape and bool(_np.array_equal(aa, bb))
-        except Exception:
-            return False
-    if isinstance(a, dict) or isinstance(b, dict):
-        return (isinstance(a, dict) and isinstance(b, dict)
-                and set(a.keys()) == set(b.keys())
-                and all(_deep_equal(a[k], b[k]) for k in a))
-    if isinstance(a, (list, tuple)) or isinstance(b, (list, tuple)):
-        if not (isinstance(a, (list, tuple)) and isinstance(b, (list, tuple))):
-            return False
-        return len(a) == len(b) and all(_deep_equal(x, y) for x, y in zip(a, b))
-    try:
-        return bool(a == b)
-    except Exception:
-        return False
-
-
-def _outputs_match(observed: Any, expected: Any) -> bool:
-    """Structural equality with light coercion for ints/lists/strings."""
-    if _deep_equal(observed, expected):
-        return True
-    # Coerce single-element list vs scalar.
-    if isinstance(observed, list) and len(observed) == 1 and _deep_equal(observed[0], expected):
-        return True
-    if isinstance(expected, list) and len(expected) == 1 and _deep_equal(expected[0], observed):
-        return True
-    # Coerce stringified ints.
-    try:
-        if int(observed) == int(expected):
-            return True
-    except (TypeError, ValueError):
-        pass
-    return False
-
-
-def gate_epsilon() -> float:
-    """Tolerance for the FLOAT-output gate path (CORESMITH_GATE_EPSILON, default
-    1e-6). Used only when the reference output is float-valued -- bit-exact float
-    reproduction across an integer RTL datapath is unrealistic, so the user
-    policy is: bias to fixed-point (deterministic, bit-exact) by default, and
-    when the golden genuinely outputs floats, accept within epsilon."""
-    try:
-        return float(os.environ.get("CORESMITH_GATE_EPSILON", "1e-6") or 1e-6)
-    except (TypeError, ValueError):
-        return 1e-6
-
-
-def output_has_float(obj: Any) -> bool:
-    """True if the reference output contains any floating-point value (Python
-    float or numpy floating), recursively. bools/ints are NOT floats. Used to
-    decide whether the gate must allow an epsilon tolerance vs require bit-exact.
-    """
-    if isinstance(obj, bool):
-        return False
-    if isinstance(obj, float):
-        return True
-    dtype = getattr(obj, "dtype", None)
-    if dtype is not None:
-        try:
-            import numpy as _np
-            return bool(_np.issubdtype(dtype, _np.floating)) or (
-                bool(_np.issubdtype(dtype, _np.complexfloating))
-            )
-        except Exception:  # noqa: BLE001
-            return False
-    if isinstance(obj, (list, tuple)):
-        return any(output_has_float(x) for x in obj)
-    if isinstance(obj, dict):
-        return any(output_has_float(v) for v in obj.values())
-    return False
 
 
 def _flatten_numbers(obj: Any) -> list:
@@ -1587,23 +967,6 @@ def _flatten_numbers(obj: Any) -> list:
 
     _rec(obj)
     return out
-
-
-def outputs_close(observed: Any, expected: Any, eps: float) -> bool:
-    """Structure-aware numeric closeness: same flattened length, numeric leaves
-    within ``abs(a-b) <= eps + eps*abs(b)`` (combined abs+rel), non-numeric
-    leaves bytewise-equal. The epsilon comparison for float-output designs."""
-    a = _flatten_numbers(observed)
-    b = _flatten_numbers(expected)
-    if len(a) != len(b):
-        return False
-    for x, y in zip(a, b):
-        if isinstance(x, (int, float)) and isinstance(y, (int, float)):
-            if abs(x - y) > eps + eps * abs(y):
-                return False
-        elif x != y:
-            return False
-    return True
 
 
 def _normalize_ref_output(value: Any) -> Any:
@@ -1710,21 +1073,3 @@ def _run_reference(
         return None
 
 
-def _localize_divergence(
-    block_diagram: dict,
-    block_goldens: dict[str, Any],
-    chip_inputs: dict,
-    vec: dict,
-) -> str:
-    """Best-effort first-divergence block naming.
-
-    If the FUNC vector names a block, trust that (it is the authored owner of
-    the vector). Otherwise return the empty string (caller reports the
-    composed-output mismatch without a specific block). A finer-grained
-    per-block-vs-reference-intermediate comparison would require the reference
-    implementation to expose intermediates, which is not part of the contract.
-    """
-    named = _vector_block(vec)
-    if named and named in block_goldens:
-        return named
-    return named or ""

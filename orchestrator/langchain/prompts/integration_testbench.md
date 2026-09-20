@@ -6,6 +6,11 @@ YOU HAVE TOOLS: Read, Write, Edit, Grep, Glob are available. Read the
 top-level RTL and block RTL files from disk. Write the integration
 testbench to the path specified in the user message.
 
+In-context verification (including manual make/Verilator commands) must use
+your own scratch build directory, e.g. `sim_build/agent_<name>/`,
+never `sim_build/integration` or `sim_build/validation`; the engine owns those
+scope directories and recreates them for every authoritative attempt.
+
 CONTEXT:
 You will receive:
 1. The top-level Verilog source (`<design>_top.v`) that wires all blocks
@@ -167,12 +172,12 @@ NOT at the maximum itself.
 - If the design declares NO dimensional maxima, no max-geometry case or marker
   is needed.
 
-VCD/WAVEKIT AUDIT -- MANDATORY:
+VCD WAVEFORM -- MANDATORY:
 - The integration DV node runs Verilator with tracing enabled, expects
-  `sim_build/integration/dump.vcd`, and audits it with WaveKit before the
+  `sim_build/integration/dump.vcd`, which the debug agent and chip lead read before the
   node can pass.
 - The testbench must drive enough reset, input, backpressure, block-boundary,
-  and output activity for WaveKit to inspect real transitions. A test that
+  and output activity so the waveform shows real transitions. A test that
   passes without meaningful time advancement or datapath movement is invalid.
 - For semantic contracts, ensure VCD-visible activity exists at the relevant
   boundary. Examples: selected mode changes, packet/frame indices, predictor or
@@ -233,7 +238,28 @@ COCOTB RULES (same as per-block):
 
   Keep `tvalid` asserted across cycles until a sampled handshake occurs. Do
   not pre-sample `tready` before an edge and later assume that edge accepted
-  data unless `tvalid` was already stable before the edge.
+  data unless `tvalid` was already stable before the edge. This pattern is
+  for INTERNAL AXI-Stream ports only.
+
+- PUBLISHED STREAM SAMPLER (the chip's top-level stream ports in_*/out_* ONLY):
+  drive and sample these ports exactly as the published grader does, never with
+  the internal AXI-Stream helper above:
+
+      # drive in_valid/in_data/in_last and out_ready for this cycle (writable phase)
+      await RisingEdge(dut.clk)
+      await ReadOnly()
+      accepted = int(dut.in_valid.value) and int(dut.in_ready.value)     # post-edge ready
+      consumed = int(dut.out_valid.value) and int(dut.out_ready.value)   # post-edge valid
+      if consumed:
+          out.append(int(dut.out_data.value) & 0xFFFFFFFF)               # post-edge data
+      await NextTimeStep()                                               # before driving again
+
+  A word is accepted only if `in_ready` reads 1 AFTER the edge (re-offer it
+  otherwise); an output beat is consumed only if `out_valid` reads 1 after the
+  edge with the `out_ready` you drove for that cycle. Randomize input gaps and
+  output backpressure (about 15% of cycles) over several seeds: a DUT that drops
+  `in_ready` on an accepting edge or retires an output beat on next-edge
+  `out_ready` passes a pre-edge testbench and fails this one.
 - Do not read very wide Verilator VPI signals as one Python integer. For
   payloads wider than about 2048 bits, `int(dut.<wide_bus>.value)` can be
   truncated by Verilator's VPI string buffer and produce false mismatches.
@@ -276,3 +302,15 @@ test code. NEVER output markdown, explanations, summaries, or prose. The
 response is written directly to a .py file -- if it contains anything other
 than valid Python, the simulation will fail at import time. The file MUST
 start with import statements (e.g., `import cocotb`), not markdown or text.
+
+## No live oracle inside cocotb (BINDING)
+
+NEVER run the full-chip golden/reference model synchronously inside a cocotb
+test. A chip-scale Python model takes longer than the sim timeout by itself;
+five of twelve integration attempts on a prior stress run were burned on
+exactly this hang. Precompute the expected output OUTSIDE the testbench
+(a standalone script invoked at generation time), hash-pin the result into
+the TB (or load it from a data file you write next to the TB), and have the
+cocotb tests compare streams against that pinned data only. If the expected
+data cannot be precomputed, bound the in-test reference to a few
+milliseconds of simulated time -- never the full mission.

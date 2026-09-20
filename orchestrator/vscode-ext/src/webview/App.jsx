@@ -8,12 +8,18 @@ import CollateralViewer from './components/CollateralViewer';
 import NodePromptModal from './components/NodePromptModal';
 import SummaryPanel from './components/SummaryPanel';
 import StatusBar from './components/StatusBar';
+import RunOverview from './components/review/RunOverview';
+import BlocksView from './components/review/BlocksView';
+import LLMCallViewer from './components/review/LLMCallViewer';
+import CodeView from './components/review/CodeView';
+import { Drawer } from './components/review/common';
 import 'reactflow/dist/style.css';
 import './styles/theme.css';
 import './styles/nodes.css';
 import './styles/edges.css';
 import './styles/execution.css';
 import './styles/timeline.css';
+import './styles/review.css';
 
 
 class ErrorBoundary extends Component {
@@ -150,9 +156,10 @@ async function fetchLiveCallsHttp(nodeId) {
   }
 }
 
-async function fetchNodeTrajectoryHttp(nodeId) {
+async function fetchNodeTrajectoryHttp(nodeId, block) {
   try {
-    const res = await fetch(`/api/node_trajectory/${encodeURIComponent(nodeId)}`);
+    const qs = block ? `?block=${encodeURIComponent(block)}` : '';
+    const res = await fetch(`/api/node_trajectory/${encodeURIComponent(nodeId)}${qs}`);
     if (!res.ok) return [];
     return res.json();
   } catch {
@@ -207,14 +214,25 @@ async function fetchBlockDiagramViz() {
 function getSummaryStage(viewMode, graphName) {
   if (graphName === 'timeline') return 'frontend';
   if (graphName === 'block_diagram') return 'architecture';
+  if (graphName === 'overview' || graphName === 'blocks' || graphName === 'collateral') return 'frontend';
   return graphName || 'frontend';
 }
+
+// Views that own the whole content area (no observer summary sidebar).
+const FULL_WIDTH_VIEWS = new Set(['collateral', 'overview', 'blocks']);
 
 function App() {
   const [theme, toggleTheme] = useTheme();
   const [graphData, setGraphData] = useState(null);
-  const [graphName, setGraphName] = useState('frontend');
-  const [viewMode, setViewMode] = useState('graph'); // 'graph' | 'timeline' | 'block_diagram'
+  // Standalone (serve.py) opens on the run overview; the VS Code extension
+  // keeps the graph as its landing view.
+  const [graphName, setGraphName] = useState(isStandalone ? 'overview' : 'frontend');
+  const [viewMode, setViewMode] = useState(isStandalone ? 'overview' : 'graph'); // 'graph' | 'timeline' | 'block_diagram' | 'collateral' | 'overview' | 'blocks'
+  // Block-scoped review state (Blocks view) + global drawers.
+  const [selectedBlock, setSelectedBlock] = useState(null);
+  const [blocksSubTab, setBlocksSubTab] = useState('trajectory');
+  const [pendingCallId, setPendingCallId] = useState(null);
+  const [drawer, setDrawer] = useState(null); // { kind: 'file'|'call', ... }
   const [selectedNode, setSelectedNode] = useState(null);
   const [blockDiagramData, setBlockDiagramData] = useState(null);
   const [modalOpen, setModalOpen] = useState(false);
@@ -289,10 +307,12 @@ function App() {
 
   useEffect(() => {
     if (isStandalone) {
-      loadGraph('frontend');
+      // Preload the frontend graph for the graph tabs without changing the
+      // active view (the standalone dashboard lands on the Overview).
+      fetchGraph('frontend').then(setGraphData).catch((err) => console.error('Graph load error:', err));
       const interval = setInterval(() => {
         // Always poll status so the status indicator stays current
-        const statusGraph = graphNameRef.current === 'timeline' ? 'frontend' : graphNameRef.current;
+        const statusGraph = ['timeline', 'overview', 'blocks', 'collateral', 'block_diagram'].includes(graphNameRef.current) ? 'frontend' : graphNameRef.current;
         fetchStatus(statusGraph).then(setExecutionStatus);
 
         // Always fetch timeline for StatusBar waiting/active counts
@@ -406,7 +426,7 @@ function App() {
 
   const traceNodeIdRef = useRef(null);
 
-  const handleRequestTraces = useCallback((nodeId) => {
+  const handleRequestTraces = useCallback((nodeId, block) => {
     // Only show loading state when switching to a different node.
     // Refreshing the same node keeps existing data so the DetailPanel
     // doesn't unmount its content and lose scroll position.
@@ -422,7 +442,7 @@ function App() {
       // OTel traces / live_calls if that endpoint returns nothing (older
       // runs, or nodes with no LLM activity).
       Promise.all([
-        fetchNodeTrajectoryHttp(nodeId),
+        fetchNodeTrajectoryHttp(nodeId, block),
         fetchTracesHttp(nodeId),
         fetchLiveCallsHttp(nodeId),
       ]).then(([trajectory, traces, live]) => {
@@ -465,7 +485,10 @@ function App() {
     // Close the per-node modal on tab switch; otherwise it lingers showing
     // a node from the previous graph, on top of unrelated content.
     setModalOpen(false);
-    if (tab === 'timeline') {
+    if (tab === 'overview' || tab === 'blocks') {
+      setViewMode(tab);
+      setGraphName(tab);
+    } else if (tab === 'timeline') {
       setViewMode('timeline');
       setGraphName('timeline');
       if (isStandalone) {
@@ -489,12 +512,51 @@ function App() {
     }
   }, [loadGraph]);
 
+  // ── Cross-view navigation: open a block (Blocks view), an LLM call, a file ──
+  const handleOpenBlock = useCallback((block, subTab, callId) => {
+    setSelectedBlock(block);
+    if (subTab) setBlocksSubTab(subTab);
+    setPendingCallId(callId || null);
+    setDrawer(null);
+    setModalOpen(false);
+    setViewMode('blocks');
+    setGraphName('blocks');
+  }, []);
+  const handleOpenCall = useCallback((callId) => {
+    setDrawer({ kind: 'call', callId });
+  }, []);
+  const handleOpenFile = useCallback((relPath, opts = {}) => {
+    setDrawer({ kind: 'file', relPath, ...opts });
+  }, []);
+  const closeDrawer = useCallback(() => setDrawer(null), []);
+
+  const isLiveRun = !!(timelineData && !timelineData.is_historical);
+
   return (
     <div className="app-shell">
       {/* ── Header bar with view selector tabs + inline status ── */}
       <div className="app-header">
         <span className="app-title">Coresmith</span>
         <div className="graph-selector">
+          {isStandalone && (
+            <>
+              <button
+                className={graphName === 'overview' ? 'active' : ''}
+                onClick={() => handleTabSwitch('overview')}
+                title="Run-level dashboard"
+              >
+                Overview
+              </button>
+              <button
+                className={graphName === 'blocks' ? 'active' : ''}
+                onClick={() => handleTabSwitch('blocks')}
+                title="Per-block trajectory and design review"
+              >
+                Blocks
+              </button>
+              <span className="selector-divider" />
+            </>
+          )}
           <button
             className={graphName === 'architecture' ? 'active' : ''}
             onClick={() => handleTabSwitch('architecture')}
@@ -552,7 +614,7 @@ function App() {
 
       {/* ── Main content area with optional summary sidebar ── */}
       <div className="app-body">
-        {showSummary && viewMode !== 'collateral' && (
+        {showSummary && !FULL_WIDTH_VIEWS.has(viewMode) && (
           <>
             <SummaryPanel
               stage={summaryStage}
@@ -569,7 +631,24 @@ function App() {
           </>
         )}
 
-        {viewMode === 'timeline' ? (
+        {viewMode === 'overview' ? (
+          <div className="canvas-container">
+            <RunOverview onOpenBlock={handleOpenBlock} onOpenCall={handleOpenCall} onOpenFile={handleOpenFile} />
+          </div>
+        ) : viewMode === 'blocks' ? (
+          <div className="canvas-container">
+            <BlocksView
+              selectedBlock={selectedBlock}
+              onSelectBlock={setSelectedBlock}
+              subTab={blocksSubTab}
+              onSubTab={setBlocksSubTab}
+              onOpenFile={handleOpenFile}
+              onOpenCall={handleOpenCall}
+              initialCallId={pendingCallId}
+              isLive={isLiveRun}
+            />
+          </div>
+        ) : viewMode === 'timeline' ? (
           <div className="canvas-container">
             <GanttTimeline
               timelineData={timelineData}
@@ -579,6 +658,8 @@ function App() {
               detailWidth={detailWidth}
               onDetailResize={handleDragStart('detail')}
               nodeDescriptions={nodeDescriptions}
+              onOpenBlock={isStandalone ? handleOpenBlock : undefined}
+              onOpenCall={isStandalone ? handleOpenCall : undefined}
             />
           </div>
         ) : viewMode === 'block_diagram' ? (
@@ -604,6 +685,8 @@ function App() {
                   onRequestTraces={handleRequestTraces}
                   detailWidth={detailWidth}
                   onDetailResize={handleDragStart('detail')}
+                  onOpenBlock={isStandalone ? handleOpenBlock : undefined}
+                  onOpenCall={isStandalone ? handleOpenCall : undefined}
                 />
               ) : (
                 <div className="loading">Loading graph...</div>
@@ -618,6 +701,17 @@ function App() {
           node={selectedNode}
           onClose={() => setModalOpen(false)}
         />
+      )}
+
+      {drawer && drawer.kind === 'call' && (
+        <Drawer title={`LLM call #${drawer.callId}`} onClose={closeDrawer} width="min(1100px, 80vw)">
+          <LLMCallViewer callId={drawer.callId} onOpenFile={handleOpenFile} onOpenBlock={handleOpenBlock} />
+        </Drawer>
+      )}
+      {drawer && drawer.kind === 'file' && (
+        <Drawer title={drawer.title || drawer.relPath} onClose={closeDrawer}>
+          <CodeView relPath={drawer.relPath} lang={drawer.lang} tail={!!drawer.tail} title={drawer.title} />
+        </Drawer>
       )}
     </div>
   );

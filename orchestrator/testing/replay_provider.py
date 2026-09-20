@@ -146,6 +146,7 @@ class ReplayBackend:
         self._consumed: set[int] = set()
         self.strict = _strict_default() if strict is None else strict
         self.fixture: ReplayFixture | None = None
+        self._by_run: dict[str, list[dict]] = {}
         if fixture is None:
             env = os.environ.get("CORESMITH_REPLAY_FIXTURE", "").strip()
             if env:
@@ -159,7 +160,7 @@ class ReplayBackend:
             if not isinstance(fixture, ReplayFixture):
                 fixture = ReplayFixture(fixture)
             self.fixture = fixture
-            self._by_run: dict[str, list[dict]] = {}
+            self._by_run = {}
             for i, c in enumerate(fixture.calls):
                 c.setdefault("_idx", i)
                 self._by_run.setdefault(c.get("run_name", ""), []).append(c)
@@ -284,6 +285,12 @@ class ReplayBackend:
 
     # -- diagnostics -----------------------------------------------------
     def _miss_diagnostics(self, run_name: str, system: str, prompt: str) -> str:
+        if not self.fixture:
+            return (
+                "ReplayMiss: no replay fixture is configured -- set "
+                "CORESMITH_REPLAY_FIXTURE=<fixture dir> (or call "
+                f"set_fixture()) before replaying. Live call: {run_name!r}."
+            )
         roots = self._roots()
         dg = prompt_digest(prompt, roots)
         k = self._served.get(run_name, 0)

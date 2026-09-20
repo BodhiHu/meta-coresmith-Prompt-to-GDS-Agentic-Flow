@@ -293,21 +293,21 @@ class TestDeclaredDimensionsFromSchema:
 # 5. maxgeo deterministic path fires END-TO-END on a schema fixture ERS
 # ===========================================================================
 class TestMaxgeoEndToEndFromSchema:
-    def test_video_schema_missing_marker_rejected(self, tmp_path):
+    def test_video_schema_missing_marker_is_uncertified(self, tmp_path):
         _write_ers(tmp_path, _VIDEO_PARAMS)
         tb = _write_tb(tmp_path / "tb" / "t.py", "import cocotb\n# no marker\n")
         v = pipeline_graph._maxgeo_gate_verdict(str(tmp_path), tb)
         assert v is not None
         assert 640 in v["declared_dims"].values()
 
-    def test_video_schema_marker_covers_all_passes(self, tmp_path):
+    def test_video_schema_marker_covers_all_is_unexecuted(self, tmp_path):
         _write_ers(tmp_path, _VIDEO_PARAMS)
         tb = _write_tb(
             tmp_path / "tb" / "t.py",
             "import cocotb\n# MAXGEO: frame_width=640 frame_height=352\n")
-        # run3-followups: full coverage is an explicit PASS verdict, not None.
+        # Declared marker coverage is not execution evidence.
         v = pipeline_graph._maxgeo_gate_verdict(str(tmp_path), tb)
-        assert v is not None and v.get("verdict") == "pass"
+        assert v is not None and v.get("verdict") == "not_declared"
 
     def test_aes_nonvideo_schema_end_to_end(self, tmp_path):
         # NON-video two-domain proof: the deterministic gate fires identically
@@ -319,7 +319,7 @@ class TestMaxgeoEndToEndFromSchema:
             tmp_path / "tb" / "g.py",
             "import cocotb\n# MAXGEO: max_message_blocks=1024\n")
         v_ok = pipeline_graph._maxgeo_gate_verdict(str(tmp_path), tb_ok)
-        assert v_ok is not None and v_ok.get("verdict") == "pass"
+        assert v_ok is not None and v_ok.get("verdict") == "not_declared"
 
     def test_legacy_prose_ers_still_noops(self, tmp_path):
         _write_ers(tmp_path, _LEGACY_PROSE)
@@ -399,9 +399,7 @@ class TestMemManifestStrictFlip:
         _write_ers(tmp_path, _VIDEO_PARAMS)
         _write_spec(tmp_path, "fifo_ctrl", self._STORAGE_SPEC)
         v = pipeline_graph._mem_price_gate_verdict(str(tmp_path), "fifo_ctrl")
-        assert isinstance(v, dict)
-        assert v.get("action") == "revise"
-        assert "MANIFEST REQUIRED" in v.get("feedback", "")
+        assert v is None  # WP-11: advisory; the ledger records the missing manifest
 
     def test_global_optin_still_rejects_without_block(self, tmp_path, monkeypatch):
         # The global CORESMITH_MEM_MANIFEST_REQUIRED opt-in is untouched: it
@@ -410,8 +408,7 @@ class TestMemManifestStrictFlip:
         _write_ers(tmp_path, _LEGACY_PROSE)
         _write_spec(tmp_path, "fifo_ctrl", self._STORAGE_SPEC)
         v = pipeline_graph._mem_price_gate_verdict(str(tmp_path), "fifo_ctrl")
-        assert isinstance(v, dict)
-        assert v.get("action") == "revise"
+        assert v is None  # WP-11: advisory
 
 
 # ===========================================================================

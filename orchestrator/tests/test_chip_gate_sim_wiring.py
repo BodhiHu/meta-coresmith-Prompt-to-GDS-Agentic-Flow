@@ -22,77 +22,42 @@ real design and could never block one, while its unit tests passed:
 """
 from __future__ import annotations
 
-from pathlib import Path
+import shutil
+
+import pytest
 
 import orchestrator.harness.gate_sim as gs
+from orchestrator.harness.top_module import CandidateError, write_candidate_receipt
 from orchestrator.langgraph.backend_graph import (
     _run_chip_top_gate_sim,
     route_after_flat_synth,
 )
 from orchestrator.langgraph.integration_helpers import chip_rtl_sources
-
+from orchestrator.tests.candidate_fixtures import adopt
 
 # ---------------------------------------------------------------------------
 # The reference source list
 # ---------------------------------------------------------------------------
 
 class TestChipRtlSources:
-    """One definition, shared with integration/validation DV. If the gate's
-    reference elaborates a different source set than the DV that passed, the
-    comparison is against a different design and the verdict is meaningless."""
-
-    def test_top_comes_first(self, tmp_path):
+    def test_exact_manifest_sources_without_rewriting(self, tmp_path):
         top = tmp_path / "chip_top.v"
-        top.write_text("module chip_top(); endmodule\n")
-        blocks = {}
-        for n in ("b1", "b2", "b3"):
-            f = tmp_path / f"{n}.v"
-            f.write_text(f"module {n}(); endmodule\n")
-            blocks[n] = str(f)
-        srcs = chip_rtl_sources(str(top), blocks)
-        # Callers resolve the Verilator TOPLEVEL from the first entry.
-        assert srcs[0] == str(top)
-        assert set(srcs) == {str(top)} | set(blocks.values())
+        top.write_text("module chip_top(); endmodule")
+        leaf = tmp_path / "leaf.v"
+        leaf.write_text("module leaf(); endmodule")
+        blocks = {"leaf": str(leaf)}
+        rec = adopt(tmp_path, top, blocks)
+        assert chip_rtl_sources(str(top), blocks, top_module="chip_top", project_root=tmp_path,
+                                dedup_dir=tmp_path / "scratch") == rec["sources"]
+        assert not (tmp_path / "scratch").exists()
 
-    def test_every_block_is_included(self, tmp_path):
-        """The whole point: an assembled top is not one file."""
+    def test_missing_recorded_source_is_fatal(self, tmp_path):
         top = tmp_path / "chip_top.v"
-        top.write_text("module chip_top(); endmodule\n")
-        blocks = {}
-        for n in ("alpha", "beta", "gamma", "delta", "epsilon"):
-            f = tmp_path / f"{n}.v"
-            f.write_text(f"module {n}(); endmodule\n")
-            blocks[n] = str(f)
-        assert len(chip_rtl_sources(str(top), blocks)) == 6
-
-    def test_nonexistent_block_is_skipped_not_fatal(self, tmp_path):
-        top = tmp_path / "chip_top.v"
-        top.write_text("module chip_top(); endmodule\n")
-        srcs = chip_rtl_sources(str(top), {"ghost": str(tmp_path / "absent.v")})
-        assert srcs == [str(top)]
-
-    def test_top_is_not_duplicated_when_also_listed_as_a_block(self, tmp_path):
-        """Verilator MODDUP-aborts on a duplicated module before any
-        transaction runs, so a duplicate is a hard build failure."""
-        top = tmp_path / "chip_top.v"
-        top.write_text("module chip_top(); endmodule\n")
-        srcs = chip_rtl_sources(str(top), {"chip_top": str(top)})
-        assert srcs.count(str(top)) == 1
-
-    def test_sram_wrapper_lib_is_added_when_a_BLOCK_uses_it(self, tmp_path):
-        """The cs_sram instantiation lives in a LEAF block, not the top. A
-        builder that only inspected the top would miss it and the chip-level
-        build would die on 'Cannot find module cs_sram_1rw1r'."""
-        top = tmp_path / "chip_top.v"
-        top.write_text("module chip_top(); u_blk b(); endmodule\n")
-        blk = tmp_path / "blk.v"
-        blk.write_text(
-            "module blk();\n"
-            "  cs_sram_1rw1r #(.WIDTH(8), .DEPTH(4096)) u_mem (.clk(clk));\n"
-            "endmodule\n"
-        )
-        srcs = chip_rtl_sources(str(top), {"blk": str(blk)})
-        assert any("cs_sram" in s for s in srcs), srcs
+        top.write_text("module chip_top(); endmodule")
+        adopt(tmp_path, top)
+        top.unlink()
+        with pytest.raises(CandidateError):
+            chip_rtl_sources(str(top), {}, top_module="chip_top", project_root=tmp_path)
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +72,7 @@ def _run_dir(tmp_path):
     top.write_text("module my_chip(input clk); endmodule\n")
     blk = tmp_path / "rtl" / "blk.v"
     blk.write_text("module blk(); endmodule\n")
+    adopt(tmp_path, top, {"blk": str(blk)}, name="my_chip")
     return tmp_path, top, blk
 
 
@@ -150,7 +116,7 @@ class TestTheGateIsFedARealSourceList:
             "project_root": str(root),
             "design_name": "my_chip",
         }, "net.v")
-        assert ok is None and status == gs.STATUS_NOT_RUN
+        assert ok is False and status == gs.STATUS_NOT_RUN
         assert reason                            # absence is always explained
 
 
@@ -196,64 +162,12 @@ class TestTheVerdictBlocksPnR:
 
 
 class TestModdupHazard:
-    """A deterministically-assembled Caravel top and the pad-adapter BLOCK it
-    was assembled from both declare ``module user_project_wrapper``. Two
-    compilation units defining one module is a Verilator MODDUP abort at
-    elaboration -- before a single transaction runs -- so the reference source
-    list handed to a simulator has to be deduped or the gate reports a build
-    failure that says nothing about the netlist."""
-
-    def _caravel_layout(self, tmp_path):
-        pad = tmp_path / "rtl" / "user_project_wrapper.v"
-        pad.parent.mkdir(parents=True)
-        pad.write_text("module user_project_wrapper (input wire clk);\n"
-                       "endmodule\n")
-        top = tmp_path / "rtl" / "integration" / "user_project_wrapper.v"
-        top.parent.mkdir(parents=True)
-        top.write_text("module user_project_wrapper (input wire clk);\n"
-                       "  user_project_wrapper_pads u_pads ();\n"
-                       "endmodule\n")
-        return top, pad
-
-    def test_an_alias_carrier_is_excluded_at_the_source(self, tmp_path):
-        """A block file that RE-DECLARES the top's own module leaves the list
-        entirely. The generated pad block ships a thin `module
-        user_project_wrapper` alias plus STUBS of its sibling blocks; keeping
-        the file let the dedup keep the stubs (they sort first) and strip the
-        real logic -- the gate's reference then elaborated a hollow chip,
-        honestly failed it, and reported not_run on a design that was fine."""
-        top, pad = self._caravel_layout(tmp_path)
-        srcs = chip_rtl_sources(str(top), {"user_project_wrapper_io": str(pad)})
-        assert srcs == [str(top)]
-        # with a dedup dir the answer is the same -- exclusion happens earlier
-        srcs2 = chip_rtl_sources(
-            str(top), {"user_project_wrapper_io": str(pad)},
-            dedup_dir=tmp_path / "scratch")
-        decls = sum(Path(s).read_text().count("module user_project_wrapper ")
-                    for s in srcs2)
-        assert decls == 1, f"{decls} definitions survived: {srcs2}"
-
-    def test_dedup_still_handles_blocks_sharing_a_macro_module(self, tmp_path):
-        """The case the dedup genuinely exists for: two blocks each bundling
-        the SAME shared behavioural macro. Neither re-declares the top, so both
-        stay in the list, and the dedup strips the second copy of the macro."""
-        top = tmp_path / "rtl" / "integration" / "chip_top.v"
-        top.parent.mkdir(parents=True)
-        top.write_text("module chip_top (input wire clk);\nendmodule\n")
-        a = tmp_path / "rtl" / "a.v"
-        a.write_text("module a();\nendmodule\n"
-                     "module shared_macro();\nendmodule\n")
-        b = tmp_path / "rtl" / "b.v"
-        b.write_text("module b();\nendmodule\n"
-                     "module shared_macro();\nendmodule\n")
-        srcs = chip_rtl_sources(str(top), {"a": str(a), "b": str(b)},
-                                dedup_dir=tmp_path / "scratch")
-        # Count DECLARATIONS, not the substring: the dedup leaves a tombstone
-        # comment ("removed duplicate module shared_macro") that contains the
-        # module name -- a naive substring count reads the receipt of the
-        # removal as the thing it removed.
-        import re as _re
-        decls = sum(len(_re.findall(r"^\s*module\s+shared_macro\b",
-                                    Path(s).read_text(), _re.M))
-                    for s in srcs)
-        assert decls == 1, f"shared_macro declared {decls} times"
+    @pytest.mark.skipif(not shutil.which("yosys"), reason="requires yosys")
+    def test_duplicate_modules_are_rejected_at_adoption(self, tmp_path):
+        top = tmp_path / "chip_top.v"
+        top.write_text("module chip_top(); endmodule")
+        alias = tmp_path / "alias.v"
+        alias.write_text("module chip_top(); endmodule")
+        with pytest.raises(CandidateError):
+            write_candidate_receipt(tmp_path, "chip_top", str(top), {"alias": str(alias)})
+        assert not (tmp_path / ".coresmith/candidate.json").exists()

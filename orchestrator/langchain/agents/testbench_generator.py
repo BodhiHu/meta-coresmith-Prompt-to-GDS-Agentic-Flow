@@ -136,15 +136,15 @@ class TestbenchGeneratorAgent:
         block_title = block_name.replace("_", " ").title()
         span_name = f"Testbench Generator [{block_title}]"
 
-        # FUNCTIONAL-QUALITY block (e.g. a rate-distortion encoder): its per-block
+        # FUNCTIONAL-QUALITY block (judged by a declared quality criterion): its per-block
         # DV must NOT byte-exact-compare its output stream to one reference. Such a
         # block makes valid-but-different RD choices, and a faithful sequentialised
         # encoder can have a per-MB latency so large that a byte-exact stress test
-        # over hundreds of macroblocks is computationally intractable in sim.
+        # over hundreds of units is computationally intractable in sim.
         # Instead we instruct the generator to build a FUNCTIONAL testbench:
         # decode the DUT's emitted output through the block model's own
         # inverse/reconstruction reference and assert a real reconstruction-quality
-        # (PSNR) bound + structural validity + a sane rate bound, on a SMALL
+        # (quality-metric) bound + structural validity + a sane rate bound, on a SMALL
         # stimulus. This still genuinely fails a garbage encoder.
         try:
             from orchestrator.architecture import composition as _composition
@@ -215,54 +215,35 @@ class TestbenchGeneratorAgent:
             )
 
             if functional:
+                # WP-55: a functional-acceptance block is judged by the task's
+                # DECLARED quality criterion, never by a built-in codec recipe.
                 user_message += (
                     "\n## FUNCTIONAL-QUALITY ACCEPTANCE (this block ONLY)\n"
-                    "This block is a RATE-DISTORTION encoder. Do NOT byte/bit-exact "
-                    "compare its emitted output stream (syntax words) against the "
-                    "block model word-for-word -- a correct RD encoder may make "
-                    "valid-but-different mode/quant/trellis choices, and the "
-                    "faithful sequentialised RTL has a very large per-macroblock "
-                    "latency so a byte-exact stress test over many macroblocks does "
-                    "NOT finish in sim. Instead build an HONEST FUNCTIONAL gate:\n"
-                    "  A. Use a SMALL stimulus: the reset test PLUS one functional "
-                    "     test that drives ONE (or at most a FEW) macroblock(s) only "
-                    "     -- enough for the DUT to emit a complete syntax record, NOT "
-                    "     hundreds. Keep the total simulated time well under the sim "
-                    "     timeout (the per-MB latency may be hundreds of thousands of "
-                    "     cycles, so ONE MB is the right size).\n"
-                    "  B. RECONSTRUCT from the DUT output: decode the DUT's emitted "
-                    "     syntax word(s) back to a reconstructed macroblock using the "
-                    "     block model's OWN inverse-transform / dequant / prediction "
-                    "     reference helpers (import them from the block model -- e.g. "
-                    "     the inverse zigzag, dequantize, idct4x4, dc_dequantize, "
-                    "     pred_4x4 / pred_16x16 functions). Do the SAME reconstruction "
-                    "     from the block model's reference syntax output for the same "
-                    "     stimulus.\n"
-                    "  C. ASSERT QUALITY, not bytes:\n"
-                    "     - the DUT output must be STRUCTURALLY VALID (mb_type / "
-                    "       modes in legal range; coefficient fields decodable; no "
-                    "       X/Z bits);\n"
-                    "     - the DUT reconstruction PSNR vs the SOURCE macroblock must "
-                    "       be >= (block-model reconstruction PSNR vs the same SOURCE "
-                    "       macroblock) - 1.0 dB (a small defensible RD margin); "
-                    "       compute PSNR as 10*log10(255**2 / mean_squared_error) and "
-                    "       treat a zero-MSE (identical) case as a pass;\n"
-                    "     - the DUT's implied coded rate (e.g. total nonzero "
-                    "       coefficient count, or coded bit count if available) must "
-                    "       be within 1.5x of the block model's for the same MB.\n"
-                    "  D. This gate MUST genuinely FAIL a broken encoder: an all-zero "
-                    "     / flat / wrong-residual output reconstructs poorly and must "
-                    "     trip the PSNR assertion. Do NOT weaken or delete asserts to "
-                    "     force a pass, do NOT hardcode/replay expected bytes, do NOT "
+                    "The task declares this block's output as functionally "
+                    "acceptable by a QUALITY criterion (its acceptance predicate "
+                    "/ validation KPI), not by byte-exact equality with the block "
+                    "model: a correct implementation may make valid-but-different "
+                    "choices. Build an HONEST functional gate:\n"
+                    "  A. Use a SMALL stimulus (the reset test plus one or a few "
+                    "     complete units of work), well inside the sim timeout.\n"
+                    "  B. Evaluate the DUT output with the block model's OWN "
+                    "     reference helpers (import them; do not re-implement them) "
+                    "     and evaluate the block model's reference output the same "
+                    "     way for the same stimulus.\n"
+                    "  C. ASSERT the declared criterion: structural validity of the "
+                    "     output (legal ranges, decodable fields, no X/Z), the "
+                    "     declared quality metric within its declared margin of the "
+                    "     reference, and any declared rate/size bound.\n"
+                    "  D. The gate MUST genuinely FAIL a broken block (all-zero / "
+                    "     flat / wrong output must trip the metric). Do NOT weaken "
+                    "     or delete asserts, hardcode/replay expected bytes, or "
                     "     build a shadow datapath. Keep the reset test's strict "
-                    "     post-reset-idle assertions exactly as for any block.\n"
-                    "  E. If decoding the syntax word back to a reconstruction is not "
-                    "     tractable from the emitted fields alone, instead assert a "
-                    "     RELATIONAL quality proxy that still rejects garbage: the "
-                    "     DUT's quantised residual energy / mode decision must yield "
-                    "     a distortion (SSD vs source) no worse than the block "
-                    "     model's distortion + a small slack -- never an "
-                    "     always-true comparison.\n"
+                    "     post-reset-idle assertions.\n"
+                    "  E. If the declared metric cannot be evaluated from the "
+                    "     emitted fields alone, assert a RELATIONAL proxy that still "
+                    "     rejects garbage (distortion no worse than the reference "
+                    "     plus a small declared slack) -- never an always-true "
+                    "     comparison.\n"
                 )
 
             run_name = f"Generate Testbench [{block_title}]"

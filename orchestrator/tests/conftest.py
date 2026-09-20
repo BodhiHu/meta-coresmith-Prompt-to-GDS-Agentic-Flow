@@ -46,25 +46,6 @@ from orchestrator.tests.fft16_fixtures import (
     FFT16_SAD_MARKDOWN,
 )
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Fix import-time side effect in constraints module
-# ═══════════════════════════════════════════════════════════════════════════
-# orchestrator/architecture/constraints.py reads a prompt file at import time
-# using a path that resolves incorrectly (parents[2] misses 'orchestrator/').
-# Create the expected file so the import doesn't fail during tests.
-
-def _ensure_constraint_prompt():
-    """Create the constraint_check.md symlink/copy if missing."""
-    from pathlib import Path
-    src = Path(__file__).resolve().parents[1] / "langchain" / "prompts" / "constraint_check.md"
-    target_dir = Path(__file__).resolve().parents[2] / "langchain" / "prompts"
-    target = target_dir / "constraint_check.md"
-    if not target.exists() and src.exists():
-        target_dir.mkdir(parents=True, exist_ok=True)
-        target.write_text(src.read_text())
-
-_ensure_constraint_prompt()
-
 
 @pytest.fixture(autouse=True)
 def _reset_profile_state():
@@ -79,6 +60,82 @@ def _reset_profile_state():
     _profile.reset()
     yield
     _profile.reset()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Fail-closed: no live provider CLI in the marker-excluded (PR) suite
+# ═══════════════════════════════════════════════════════════════════════════
+# ``_detect_provider()`` defaults to ``claude_cli``, so any node that reaches a
+# real ``ClaudeLLM.call()`` shells out to the actual Claude CLI:
+#
+#   claude -p --output-format stream-json --model opus --max-turns 50 ...
+#
+# Several graph tests did exactly that while carrying no ``live_llm`` marker --
+# test_pipeline_graph's end-to-end walks reach ``uarch_integration_review``,
+# which runs the Integration Review agent for real. CI installs the Claude CLI
+# (the workflow needs it on PATH so import-time ``ClaudeLLM()`` construction
+# does not raise), so those calls actually launch. That is what turned a
+# minutes-long unit suite into a 2-6 hour job that intermittently hit GitHub's
+# 6-hour ceiling, and what starved the wall-clock budget of the fixed-timeout
+# assertions elsewhere in the suite.
+#
+# For every test NOT marked ``live_llm``, the five ``_find_*_binary`` resolvers
+# in ``coresmith_llm`` return a stub that exits non-zero immediately. Resolution
+# still succeeds (the stub exists and is executable), so import-time
+# construction behaves exactly as before -- only an actual model invocation
+# changes, and it now fails fast instead of burning wall-clock.
+#
+# Patching the resolvers rather than the ``*_CLI_PATH`` env vars is deliberate.
+# ``ClaudeLLM.__init__`` reads the env var FIRST and only falls back to the
+# resolver, so seeding the env would silently outrank the tests that patch a
+# resolver to pin an expected argv -- and ``pipeline_helpers`` preflight reads
+# two of those vars as presence checks. Patching the resolver leaves both
+# behaviors intact: a test that sets the env var or patches the resolver itself
+# still wins, because its patch is applied after this fixture's.
+#
+# Escape hatch: ``CORESMITH_ALLOW_LIVE_LLM_IN_TESTS=1`` restores the previous
+# behavior for the whole session.
+
+_PROVIDER_BINARY_FINDERS = (
+    "_find_claude_binary",
+    "_find_codex_binary",
+    "_find_kimi_binary",
+    "_find_agy_binary",
+    "_find_opencode_binary",
+)
+
+_LLM_CLI_STUB_SRC = """#!/bin/sh
+echo "coresmith tests: refusing a live provider CLI call." >&2
+echo "This test is not marked 'live_llm'. Mark it, or stub the agent." >&2
+exit 1
+"""
+
+
+def live_llm_calls_allowed() -> bool:
+    """True when the suite is permitted to shell out to a real provider CLI."""
+    return os.environ.get("CORESMITH_ALLOW_LIVE_LLM_IN_TESTS", "") == "1"
+
+
+@pytest.fixture(scope="session")
+def llm_cli_stub(tmp_path_factory) -> str:
+    """Path to an executable stub that stands in for a provider CLI."""
+    stub = tmp_path_factory.mktemp("llm_cli_stub") / "no-live-llm"
+    stub.write_text(_LLM_CLI_STUB_SRC)
+    stub.chmod(0o755)
+    return str(stub)
+
+
+@pytest.fixture(autouse=True)
+def _no_live_llm_cli(request, monkeypatch, llm_cli_stub):
+    """Resolve every provider CLI to the stub unless the test opts into live LLM."""
+    if live_llm_calls_allowed():
+        return
+    if request.node.get_closest_marker("live_llm"):
+        return
+    from orchestrator.langchain.agents import coresmith_llm as _llm
+
+    for finder in _PROVIDER_BINARY_FINDERS:
+        monkeypatch.setattr(_llm, finder, lambda *_a, **_kw: llm_cli_stub)
 
 
 @pytest.fixture
@@ -252,6 +309,61 @@ def fft16_full_docs(isolated_project):
     for name, text in _FFT16_MD_DOC_MAP.items():
         (arch / name).write_text(text)
     return isolated_project
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Architecture-graph LLM containment
+# ═══════════════════════════════════════════════════════════════════════════
+
+def enter_arch_llm_node_patches(stack) -> None:
+    """Shut the architecture-graph nodes that reach a live LLM but are not
+    "specialists", so a test driving the whole graph stays offline.
+
+    Every test module that runs the architecture graph maintains its own list
+    of specialist patches, and both lists independently missed these two: they
+    are graph nodes rather than ``architecture.specialists.*`` modules, so they
+    do not look like something a "patch all specialists" helper should cover.
+    The result was that tests carrying no ``live_llm`` marker made real, billed
+    API calls, and the agents' shell tools ran unbounded commands (one observed
+    run spent 30+ minutes on a filesystem-wide ``find /``). The failure mode is
+    load-bearing on latency, not correctness, so it hid in plain sight -- CI
+    just looked slow.
+
+    Kept here rather than duplicated per module so the containment cannot drift
+    out of sync again. A test that genuinely wants either node's real behaviour
+    should mark itself ``live_llm`` and not call this.
+
+    Args:
+        stack: An ``ExitStack`` the caller already owns; patches are entered
+            into it and unwound with it.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    stack.enter_context(patch(
+        "orchestrator.architecture.specialists.interface_definition"
+        ".analyze_interface_definition",
+        new_callable=AsyncMock,
+        return_value={
+            "result": {
+                "design_summary": "patched by enter_arch_llm_node_patches",
+                "contracts": [],
+                "contract_violations": [],
+                "open_questions": [],
+            },
+            "questions": [],
+        },
+    ))
+    stack.enter_context(patch(
+        "orchestrator.langchain.agents.output_contract_review_agent"
+        ".OutputContractReviewAgent.review",
+        new_callable=AsyncMock,
+        return_value={
+            "passed": True,
+            "orphaned_properties": [],
+            "summary": "patched by enter_arch_llm_node_patches",
+            "feedback_for_redecomposition": "",
+        },
+    ))
 
 
 # ═══════════════════════════════════════════════════════════════════════════

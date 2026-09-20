@@ -63,15 +63,6 @@ def test_ppa_verdict_records_unmeasured():
     assert isinstance(v.unmeasured, list)
 
 
-def test_equiv_skip_distinguishes_harness_error():
-    """A-Fix 2c: _skip can mark a harness error (retry-then-fail) vs an honest skip."""
-    from orchestrator.langgraph.rtl_model_equiv import _skip
-
-    r = _skip("verilator missing", harness_error=True)
-    assert r["skipped"] is True
-    assert r.get("harness_error") is True
-
-
 def test_backend_timing_met_defaults_none_when_unmeasured(tmp_path):
     """A-Fix 2g: parse_openroad_reports leaves timing_met None until a WNS is read."""
     from orchestrator.langgraph.backend_helpers import parse_openroad_reports

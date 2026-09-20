@@ -28,7 +28,7 @@ exactly ONE real block that has the interface to produce it:
 - **Global reductions / aggregation / namespaces**.
 - **Bidirectional chip-pin drive** (tri-state / shared pad bundles). When the
   golden protocol has the DUT **drive** shared package pins during some phases
-  (e.g. a QSPI quad-IO bus where the slave returns read/status nibbles on
+  (e.g. a quad-IO serial host bus where the slave returns read/status nibbles on
   `io_out[..]`, a shared data bus, any bidirectional pad), the decomposition
   MUST carry a **DUT→pad output-drive edge** — the response payload AND its
   output-enable (`oeb`) — from the driving block to the pad wrapper, not just

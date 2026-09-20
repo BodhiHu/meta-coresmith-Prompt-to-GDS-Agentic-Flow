@@ -69,11 +69,11 @@ from opentelemetry import trace
 from orchestrator.langgraph.event_stream import write_graph_event
 from orchestrator.langgraph.integration_helpers import (
     discover_block_rtl,
-    module_for_block,
     generate_integration_testbench,
     generate_validation_testbench,
     lint_top_level,
     load_architecture_connections,
+    module_for_block,
     parse_verilog_ports,
     run_integration_simulation,
 )
@@ -172,21 +172,6 @@ def _fuzzy_replace(
     return spec, ""
 
 
-def _file_is_fresh(path: Path, state: dict) -> bool:
-    """Check if *path* was written during the current pipeline run.
-
-    Fix #11: prevents reuse of stale RTL/TB files from previous runs.
-    Returns True if the file's mtime is newer than the pipeline start time.
-    """
-    try:
-        run_start = state.get("pipeline_run_start", 0.0)
-        if not run_start:
-            return True  # no start time recorded -> assume fresh (backwards compat)
-        return path.stat().st_mtime >= run_start
-    except OSError:
-        return False
-
-
 def _last(a, b):
     """Reducer that keeps the latest value.
 
@@ -210,10 +195,10 @@ class BlockState(TypedDict):
     logs) lives on disk.  Specialist agents read/write files directly
     via tool use (claude CLI with Read/Write/Edit tools enabled).
 
-    Per-block transient state on disk:
-      .coresmith/blocks/<block>/constraints.json    -- accumulated constraints
-      .coresmith/blocks/<block>/diagnosis.json      -- latest debug diagnosis
-      .coresmith/blocks/<block>/attempt_history.json -- attempt history
+    Per-block lifecycle state (constraints, diagnoses, attempt history, best
+    result) lives in the project database (.coresmith/project.sqlite), which
+    regenerates read-only JSON views of it under .coresmith/blocks/<block>/.
+    The latest error context stays a plain file the agents read:
       .coresmith/blocks/<block>/previous_error.txt  -- latest error context
 
     Existing artifact locations (unchanged):
@@ -236,16 +221,6 @@ class BlockState(TypedDict):
     attempt: int
     phase: str  # "init" | "uarch" | "rtl" | "lint" | "tb" | "sim" | "synth"
 
-    # Two-pass restructure: which orchestrator pass this block is running in.
-    # "uarch" = pass 1 (spec + Amaranth block model only, no RTL); "rtl" = pass 2
-    # (RTL gen + DV + synth). Threaded in from the orchestrator via Send.
-    # Only meaningful when CORESMITH_BLOCK_GOLDENS is on; "rtl" (the default)
-    # preserves single-pass behaviour when the flag is off.
-    pipeline_phase: str
-    # True only in pass 2 of the two-pass flow (after the µarch gate). Lets
-    # route_after_init distinguish flag-off "rtl" (re-spec each block) from
-    # pass-2 "rtl" (reuse the pass-1 spec/model, skip straight to RTL).
-    uarch_pass_done: bool
 
     # Routing-only flags (no content -- agents read/write disk directly) ────
     uarch_approved: bool
@@ -255,6 +230,7 @@ class BlockState(TypedDict):
     synth_gate_count: int
     ppa_ok: bool | None        # deterministic PPA gate verdict (None = not run)
     ppa_reasons: list             # human-readable budget-divergence reasons
+    timing_ok: bool | None        # measured WNS >= 0 (None = not measured)
     # Post-synthesis GATE-LEVEL SIM verdict (harness.gate_sim). None = not run.
     # False routes the block to diagnose: the synthesized netlist does not
     # reproduce the behaviour the RTL was verified with, so DV and PPA were
@@ -273,6 +249,9 @@ class BlockState(TypedDict):
     # letting a stub proceed to RTL. Threaded from generate_uarch_spec_node.
     uarch_blocking_issues: list | None
     uarch_feasible: bool | None
+    reuse_spec: bool  # targeted revise / single-context uArch: implement the
+                      # on-disk spec as-is unless feedback is pending for
+                      # this block (then revise it per block, as before)
 
     # File paths (set by nodes, consumed by routing and downstream nodes) ───
     rtl_path: str          # path to generated Verilog file
@@ -328,18 +307,6 @@ class OrchestratorState(TypedDict):
     tier_list: list[int]          # sorted unique tiers, e.g. [1, 2, 3]
     current_tier_index: int
 
-    # Two-pass restructure (CORESMITH_BLOCK_GOLDENS only) ────────────────────
-    # pipeline_phase: "uarch" (pass 1: spec+model, then µarch gate) | "rtl"
-    # (pass 2: RTL+DV+synth). uarch_pass_done flips True once the µarch gate
-    # passes and begin_rtl_pass resets the tier index. _last reducer so parallel
-    # Send branches merging the (identical) value back never conflict.
-    pipeline_phase: Annotated[str, _last]
-    uarch_pass_done: Annotated[bool, _last]
-    # Count of µarch-gate revise/re-spec iterations (both block_math and
-    # contract gaps). Bounds the in-loop re-spec so a non-composing decomposition
-    # retries a few variance draws instead of dead-ending, but cannot loop
-    # forever. Cap = CORESMITH_UARCH_REVISE_MAX (default 4).
-    uarch_revise_attempts: Annotated[int, _last]
 
     # Results (accumulated via reducer from all Send branches) ──────────────
     completed_blocks: Annotated[list[dict], operator.add]
@@ -353,12 +320,13 @@ class OrchestratorState(TypedDict):
 
     # Integration review decision (set by integration_review_node) ────────
     integration_review_action: str | None
+    # Targeted revise plan from integration_review: {block: reuse_spec}. Only
+    # these blocks re-enter the tier on a revise; None = normal entry.
+    integration_approved_specs: Annotated[dict | None, _last]
+    revise_blocks: Annotated[dict | None, _last]
 
     # Integration check results ────────────────────────────────────────────
     integration_result: dict | None  # set by integration_check node
-
-    # Model-integration gate results ───────────────────────────────────────
-    model_integration_result: dict | None  # set by model_integration node (env-gated)
 
     # Integration DV results ───────────────────────────────────────────────
     integration_dv_result: dict | None  # set by integration_dv node
@@ -444,51 +412,6 @@ def _record_coverage_row(project_root: str, **kw) -> None:
             pass
 
 
-def _stamp_engine_sha(project_root: str) -> None:
-    """Stamp the engine git SHA into run state (Section 7a) + WARN on a mid-run
-    change. Records ``.coresmith/engine_sha.json`` {sha, first_seen, ...} on the
-    first call; on re-entry, if the LIVE engine SHA differs from the recorded
-    one, a mid-run code hot-swap happened -- log a LOUD warning (it reaches the
-    daemon log) and record the change so the final report surfaces it. Never
-    raises."""
-    try:
-        from orchestrator.utils import engine_git_sha
-        live = engine_git_sha()
-        p = Path(project_root) / ".coresmith" / "engine_sha.json"
-        rec = {}
-        if p.exists():
-            try:
-                rec = json.loads(p.read_text())
-            except Exception:  # noqa: BLE001
-                rec = {}
-        import time as _t
-        if not rec:
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(json.dumps({
-                "sha": live, "first_seen": _t.time(), "changed": False,
-                "changes": [],
-            }, indent=2))
-            log(f"  [ENGINE] git SHA {live or '(unknown)'} stamped for this run",
-                CYAN)
-            return
-        if live and rec.get("sha") and live != rec.get("sha") and not any(
-                c.get("to") == live for c in rec.get("changes", [])):
-            log(f"\n{'!'*60}\n  [ENGINE] WARNING: engine git SHA CHANGED MID-RUN "
-                f"{rec.get('sha')} -> {live} (code hot-swap). Behavior may have "
-                f"shifted under the running pipeline -- results before/after this "
-                f"point are NOT from the same build.\n{'!'*60}\n", RED)
-            rec["changed"] = True
-            rec.setdefault("changes", []).append(
-                {"from": rec.get("sha"), "to": live, "at": _t.time()})
-            rec["sha"] = live
-            try:
-                p.write_text(json.dumps(rec, indent=2))
-            except OSError:
-                pass
-    except Exception:  # noqa: BLE001 - provenance is best-effort, never blocks
-        pass
-
-
 def _carried_forward_defects_path(project_root: str) -> Path:
     return Path(project_root) / ".coresmith" / "carried_forward_defects.json"
 
@@ -546,46 +469,6 @@ def record_carried_forward_defect(project_root: str, defect: dict) -> None:
         p.write_text(json.dumps(existing, indent=2))
     except Exception:  # noqa: BLE001
         pass
-
-
-def _advisory_composition_defect(project_root: str, gate: str,
-                                 violations: list) -> dict:
-    """Build a carried-forward defect from an ADVISORY composition-gate mismatch.
-
-    Names the SPECIFIC unmodeled bus role (DUT-blind, from the chip_top port
-    shape when it exists) instead of a generic single-role label, and carries a
-    few concrete expected/observed examples so the divergence stays auditable.
-    """
-    first = (violations or [{}])[0]
-    first_block = first.get("first_divergence_block", "")
-    unmodeled = ""
-    try:
-        from orchestrator.langgraph import bfm_lib as _bfm_lib
-        top_src = ""
-        for cand in (Path(project_root) / "rtl" / "user_project_wrapper.v",
-                     Path(project_root) / "rtl" / "chip_top.v"):
-            if cand.exists():
-                top_src = cand.read_text(encoding="utf-8", errors="replace")
-                break
-        unmodeled = _bfm_lib.describe_unmodeled_roles(project_root, top_src)
-    except Exception:  # noqa: BLE001
-        unmodeled = ""
-    return {
-        "gate": gate,
-        "kind": "composition_mismatch",
-        "advisory": True,
-        "first_divergence_block": first_block,
-        "violation_count": len(violations or []),
-        "unmodeled": unmodeled,
-        "examples": [{"expected": v.get("expected"), "observed": v.get("observed")}
-                     for v in (violations or [])[:5]],
-        "note": (
-            "ADVISORY bypass (CORESMITH_DETERMINISTIC_BFM) proceeded past a "
-            "REPRODUCIBLE model-composition mismatch. The deterministic "
-            "integration DV is expected to catch it on the real chip_top; "
-            "carried forward so it is re-checked, not silently swallowed."
-        ),
-    }
 
 
 def _persist_block_coverage(project_root: str, block_name: str,
@@ -740,8 +623,8 @@ def _reset_conformance_failures(project_root: str, block_name: str) -> None:
         pass
 
 
-def _park_conformance_unrepairable(state: BlockState, block_name: str,
-                                   record: dict, failures: int) -> None:
+async def _park_conformance_unrepairable(state: BlockState, block_name: str,
+                                         record: dict, failures: int) -> dict:
     """PARK when regeneration will not converge on the block's contract.
 
     The stage already told the generator the exact required port names, twice.
@@ -760,14 +643,18 @@ def _park_conformance_unrepairable(state: BlockState, block_name: str,
         "block": block_name, "consecutive_failures": failures,
         "deviations": (record.get("deviations") or [])[:16],
     })
-    interrupt({
+    # WP-74: the in-graph chip lead decides first (it may edit the block RTL
+    # or amend .coresmith/interface_contracts.json and answer `retry`); the
+    # caller re-checks conformance once and parks for a human only if the
+    # block still deviates. Without a chip lead this is the old human park.
+    resp = await _resolve_interrupt({
         "type": "contract_conformance_unrepairable",
         "block_name": block_name,
         "consecutive_failures": failures,
         "deviations": (record.get("deviations") or [])[:16],
         "renames_applied": record.get("renames") or {},
         "expected_ports": record.get("feedback", ""),
-        "supported_actions": ["retry", "proceed"],
+        "supported_actions": ["retry", "proceed", "abort"],
         "outer_agent_guidance": (
             f"'{block_name}' has now failed the deterministic "
             f"contract-conformance check {failures} times AFTER the engine "
@@ -782,23 +669,86 @@ def _park_conformance_unrepairable(state: BlockState, block_name: str,
             f"passes the block only if the RTL actually conforms."
         ),
     })
+    return resp if isinstance(resp, dict) else {}
 
 
-def _guard_rtl_phase(state: BlockState, node_name: str) -> None:
-    """Fail loud if an RTL-pass node runs during the uArch pass (phase "uarch").
+# Constraint sources that survive a fresh block lifecycle: chip-level DV
+# decisions and operator rules are pinned precisely because the spec appends
+# they mirror are destroyed by the per-tier re-spec.
+_PERSISTENT_CONSTRAINT_SOURCES = ("chip_dv_revise", "chip_dv_fix", "human")
 
-    In the two-pass flow, pass 1 must only produce uArch specs + Amaranth block
-    models; RTL/testbench/synth nodes are pass-2-only. Reaching one in phase
-    "uarch" means the block-subgraph routing regressed -- raise so the bug
-    surfaces immediately instead of silently building RTL against placeholders.
-    """
-    if state.get("pipeline_phase", "rtl") == "uarch":
-        raise RuntimeError(
-            f"{node_name} reached in pipeline_phase='uarch' (pass 1). Pass 1 "
-            "is spec+block-model only; RTL/DV/synth are pass-2-only. The block "
-            "subgraph routing (route_after_init / route_after_uarch_review) "
-            "regressed."
-        )
+
+from orchestrator.state_store.project_db import open_project as _open_project  # noqa: E402
+
+_PROJECT_DBS: dict = {}
+
+
+def _db(project_root):
+    """The project database for ``project_root`` (opened once per process)."""
+    root = str(project_root)
+    db = _PROJECT_DBS.get(root)
+    if db is None:
+        db = _open_project(root)
+        _PROJECT_DBS[root] = db
+    return db
+
+
+def _stamp_engine_sha(project_root: str) -> None:
+    """Stamp the engine git SHA into the project settings at run start and warn
+    loudly on a mid-run change (a code hot-swap under the run). Never raises."""
+    try:
+        from orchestrator.utils import engine_git_sha
+        live = engine_git_sha()
+        db = _db(project_root)
+        rec = db.get_setting("engine_sha") or ""
+        if not rec:
+            db.set_setting("engine_sha", live or "")
+            db.set_setting("engine_sha_first_seen", str(_time.time()))
+            log(f"  [ENGINE] git SHA {live or '(unknown)'} stamped for this run", CYAN)
+            return
+        if live and live != rec:
+            log(f"  [ENGINE] !!! engine git SHA CHANGED mid-run: {rec} -> {live} "
+                f"(a code hot-swap under this run; the final report records it)", RED)
+            changes = json.loads(db.get_setting("engine_sha_changes", "[]") or "[]")
+            changes.append({"from": rec, "to": live, "ts": _time.time()})
+            db.set_setting("engine_sha_changes", json.dumps(changes))
+            db.set_setting("engine_sha", live)
+    except Exception:  # noqa: BLE001 - provenance is best-effort
+        pass
+
+
+def _persist_chip_fix_constraint(pr: str, action: str, fix_desc: str,
+                                 response: dict, contract_audit: dict) -> None:
+    """Persist a chip-level fix into the affected blocks' constraints so
+    regeneration cannot silently resurrect the fixed bug."""
+    blocks = (response.get("affected_blocks")
+              or contract_audit.get("affected_blocks") or [])
+    for name in blocks:
+        try:
+            _db(pr).add_constraint(
+                name,
+                f"Chip-level {action} applied during DV -- this behavior MUST be "
+                f"preserved on any regeneration: {fix_desc}",
+                source="chip_dv_fix", attempt=0)
+        except Exception:  # noqa: BLE001
+            continue
+
+
+def _load_constraints_safe(project_root, block_name: str) -> list:
+    """A block's accumulated constraints from the project database (never raises)."""
+    try:
+        return _db(project_root).constraints(block_name)
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _stale_specs(project_root, block_names) -> list:
+    """Blocks whose uArch spec predates a change to their contract edges."""
+    try:
+        return [{"block": b, "reason": "interface contract revised after the spec"}
+                for b in _db(project_root).stale_spec_blocks(list(block_names))]
+    except Exception:  # noqa: BLE001
+        return []
 
 
 def _callbacks(state: BlockState) -> list:
@@ -828,7 +778,8 @@ async def init_block_node(state: BlockState) -> dict:
         "block": block_name,
     })
 
-    create_golden_model_wrapper(block_name, block.get("python_source", ""))
+    create_golden_model_wrapper(block_name, block.get("python_source", ""),
+                                project_root=_pr(state))
 
     log(f"\n{'='*60}", CYAN)
     log(f"  Block: {block_name} | Tier {block.get('tier', '?')}", CYAN)
@@ -838,17 +789,23 @@ async def init_block_node(state: BlockState) -> dict:
         "block": block_name,
     })
 
-    # Initialize per-block disk state directory
+    # Per-block working directory (logs, previous_error.txt and other agent-facing
+    # artifacts). Lifecycle state lives in the project database.
     block_dir = Path(_pr(state)) / ".coresmith" / "blocks" / block_name
     block_dir.mkdir(parents=True, exist_ok=True)
-    # Reset transient files for a fresh block lifecycle
-    for fname in ("constraints.json", "diagnosis.json",
-                  "attempt_history.json", "previous_error.txt"):
-        fpath = block_dir / fname
-        if fname.endswith(".json"):
-            fpath.write_text("[]" if "history" in fname or "constraint" in fname else "{}")
-        else:
-            fpath.write_text("")
+    (block_dir / "previous_error.txt").write_text("")
+    _bdb = _db(_pr(state))
+    _round = _bdb.begin_round(block_name)
+    if _round > 1:
+        try:
+            from orchestrator.langgraph.pipeline_helpers import archive_step_logs
+            archive_step_logs(block_name, _round - 1)
+        except Exception:  # noqa: BLE001 - archiving is best-effort
+            pass
+    # Constraints are an accumulating ledger: chip-level revise/fix pins and
+    # operator rules survive a fresh lifecycle; per-lifecycle (debug-agent)
+    # entries are dropped.
+    _bdb.prune_constraints(block_name, _PERSISTENT_CONSTRAINT_SOURCES)
 
     return {
         "attempt": 1,
@@ -872,6 +829,257 @@ async def init_block_node(state: BlockState) -> dict:
 
 def _env_truthy(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+_CHIP_LEAD_TRIPPED = False
+
+
+def _chip_lead_enabled() -> bool:
+    """CORESMITH_ENABLE_CHIP_LEAD=1: interrupts resolved by the IN-GRAPH
+    chip-lead agent instead of parking. Default-OFF: parks exactly as today."""
+    return _env_truthy("CORESMITH_ENABLE_CHIP_LEAD")
+
+
+def _chip_lead_ledger_path() -> Path:
+    pr = os.environ.get("CORESMITH_PROJECT_ROOT", ".")
+    return Path(pr) / ".coresmith" / "chip_lead" / "decisions.jsonl"
+
+
+def _chip_lead_max_decisions() -> int:
+    try:
+        return int(os.environ.get("CORESMITH_CHIP_LEAD_MAX_DECISIONS", "50"))
+    except ValueError:
+        return 50
+
+
+
+def _engine_checkout_guard() -> list[str]:
+    """WP-25/WP-37: the engine checkout is read-only for the chip lead.
+
+    After every chip-lead decision, look for modifications in the engine's own
+    git checkout (observed: a chip lead "repaired the DV resolver" inside
+    orchestrator/ and its tests). ``CORESMITH_ENGINE_READONLY``: ``0`` -> off,
+    anything else -> detect. Returns the modified paths (staged, unstaged or
+    untracked); the CALLER parks the run. Nothing is reverted: WP-25's
+    `git checkout -- .` restored from the index and missed staged edits, and
+    `git clean` could destroy legitimate operator files (review round 2). The
+    real boundary is a checkout the worker cannot write; this is detection.
+    Never raises.
+    """
+    mode = (os.environ.get("CORESMITH_ENGINE_READONLY", "1") or "1").strip().lower()
+    if mode in ("0", "false", "no", "off"):
+        return []
+    import subprocess as _sp
+    root = Path(__file__).resolve().parent.parent.parent
+    try:
+        r = _sp.run(["git", "-C", str(root), "status", "--porcelain", "--untracked-files=normal"],
+                    capture_output=True, text=True, timeout=30)
+    except Exception:  # noqa: BLE001
+        return []
+    dirty = [ln[3:] for ln in (r.stdout or "").splitlines() if ln.strip()]
+    if not dirty:
+        return []
+    log(f"  [CHIP-LEAD] ENGINE CHECKOUT MODIFIED ({len(dirty)} path(s)): "
+        f"{dirty[:6]} -- the engine is read-only for the chip lead", RED)
+    try:
+        write_graph_event(os.environ.get("CORESMITH_PROJECT_ROOT", str(PROJECT_ROOT)),
+                          "Chip Lead", "engine_modified", {"paths": dirty[:32], "mode": mode})
+    except Exception:  # noqa: BLE001
+        pass
+    return dirty
+
+
+def _engine_modified_payload(payload: dict, dirty: list) -> dict:
+    """The parked payload for a chip-lead decision made from a modified engine
+    checkout (WP-37): the decision is discarded, a human takes over."""
+    parked = dict(payload or {})
+    parked["engine_modified"] = list(dirty)[:32]
+    parked["message"] = (
+        "ENGINE CHECKOUT MODIFIED after a chip-lead decision "
+        f"({len(dirty)} path(s): {list(dirty)[:6]}). The decision was discarded and "
+        "the chip lead is tripped for this run. Restore the engine checkout "
+        "(git status / git stash) and resume; nothing was reverted "
+        "automatically.\n\n" + str(parked.get("message", "")))
+    return parked
+
+
+async def _resolve_interrupt(payload: dict) -> dict:
+    """Park (default) or let the in-graph chip lead decide. Fail-safe: any
+    chip-lead failure trips to parked interrupts for the process lifetime
+    (re-armed on a fresh run start in init_tier_node)."""
+    global _CHIP_LEAD_TRIPPED
+    if not _chip_lead_enabled() or _CHIP_LEAD_TRIPPED:
+        return interrupt(payload)
+
+    ledger = _chip_lead_ledger_path()
+    # Arm-U audit #10: two concurrently-parked blocks read the same ledger
+    # length -> duplicate decision_index, budget drift. Serialize readers/
+    # writers with an advisory lock on a sidecar lockfile.
+    import fcntl as _fcntl
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    _lockf = open(ledger.parent / ".ledger.lock", "a+")
+    _fcntl.flock(_lockf, _fcntl.LOCK_EX)
+    try:
+        prior = ([ln for ln in ledger.read_text().splitlines() if ln.strip()]
+                 if ledger.exists() else [])
+    finally:
+        _fcntl.flock(_lockf, _fcntl.LOCK_UN)
+        _lockf.close()
+    if len(prior) >= _chip_lead_max_decisions():
+        log(f"  [CHIP-LEAD] decision budget exhausted "
+            f"({len(prior)}/{_chip_lead_max_decisions()}) -- parking", YELLOW)
+        _CHIP_LEAD_TRIPPED = True
+        return interrupt(payload)
+
+    try:
+        from orchestrator.langchain.agents.chip_lead_agent import ChipLeadAgent
+        decision = await ChipLeadAgent().decide(
+            payload=payload, prior_decisions=prior[-10:],
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Arm-F live finding: a single provider hard-timeout tripped the
+        # fail-safe, and un-tripping needs a daemon restart. One fresh
+        # retry before the trip absorbs one-off provider stalls; a second
+        # consecutive failure still trips.
+        log(f"  [CHIP-LEAD] agent failed ({exc}) -- one retry before "
+            "tripping", YELLOW)
+        try:
+            decision = await ChipLeadAgent().decide(
+                payload=payload, prior_decisions=prior[-10:],
+            )
+        except Exception as exc2:  # noqa: BLE001
+            log(f"  [CHIP-LEAD] agent failed again ({exc2}) -- tripping "
+                "to parked interrupts", RED)
+            _CHIP_LEAD_TRIPPED = True
+            return interrupt(payload)
+
+    _dirty = _engine_checkout_guard()
+    if _dirty:
+        # WP-37: a decision made from a modified engine is invalid. Trip the
+        # chip lead and park for a human; never revert automatically.
+        _CHIP_LEAD_TRIPPED = True
+        return interrupt(_engine_modified_payload(payload, _dirty))
+    action = (decision or {}).get("action", "")
+    supported = payload.get("supported_actions") or []
+    if not action or (supported and action not in supported):
+        # Arm-S retro: a single unsupported action ('revise' at a park that
+        # only offered retry/fix_*) tripped the fail-safe and stranded the
+        # run until a human restarted the daemon. Give the agent exactly one
+        # corrective round with the violation spelled out before tripping.
+        log(f"  [CHIP-LEAD] unsupported action {action!r} (supported: "
+            f"{supported}) -- one corrective retry", YELLOW)
+        try:
+            retry_payload = dict(payload)
+            retry_payload["action_correction"] = (
+                f"Your previous answer used action={action!r}, which is NOT "
+                f"in supported_actions={supported}. Answer again choosing "
+                "strictly from that list."
+            )
+            decision = await ChipLeadAgent().decide(
+                payload=retry_payload, prior_decisions=prior[-10:],
+            )
+        except Exception:  # noqa: BLE001
+            decision = None
+        action = (decision or {}).get("action", "")
+        if not action or (supported and action not in supported):
+            log(f"  [CHIP-LEAD] unsupported action {action!r} after "
+                "correction -- tripping to parked interrupts", RED)
+            _CHIP_LEAD_TRIPPED = True
+            return interrupt(payload)
+
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    _lockf = open(ledger.parent / ".ledger.lock", "a+")
+    _fcntl.flock(_lockf, _fcntl.LOCK_EX)
+    try:
+        prior = ([ln for ln in ledger.read_text().splitlines() if ln.strip()]
+                 if ledger.exists() else prior)
+        # Re-check the budget under the write lock: the check above happened
+        # before two awaited agent calls, so N concurrently-parked branches
+        # can each have passed it and overshoot the cap.
+        if len(prior) >= _chip_lead_max_decisions():
+            log(f"  [CHIP-LEAD] decision budget exhausted "
+                f"({len(prior)}/{_chip_lead_max_decisions()}) -- parking",
+                YELLOW)
+            _CHIP_LEAD_TRIPPED = True
+            return interrupt(payload)
+        # The append and the event write stay inside the try: a raise here
+        # with the flock held would block every other branch forever on the
+        # (synchronous) flock syscall.
+        with ledger.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps({
+                "interrupt_type": payload.get("type", ""),
+                "block_name": payload.get("block_name", ""),
+                "action": action,
+                "reasoning": decision.get("reasoning", ""),
+                "ts": _time.time(),
+            }) + "\n")
+        write_graph_event(
+            os.environ.get("CORESMITH_PROJECT_ROOT", "."), "Chip Lead",
+            "chip_lead_decision",
+            {"type": payload.get("type", ""), "action": action,
+             "decision_index": len(prior) + 1},
+        )
+    finally:
+        _fcntl.flock(_lockf, _fcntl.LOCK_UN)
+        _lockf.close()
+    log(f"  [CHIP-LEAD] {payload.get('type', '?')} -> {action} "
+        f"({len(prior) + 1}/{_chip_lead_max_decisions()})", GREEN)
+    return decision
+
+
+def _is_content_free_revise(response: dict) -> bool:
+    """True when a revise carries no substance (no block_actions, feedback,
+    or reasoning) -- the reviewer-churn class that is safe to downgrade to
+    approve. A chip-lead/human revise naming real findings is NOT churn."""
+    return not (response.get("block_actions")
+                or response.get("feedback")
+                or response.get("reasoning"))
+
+
+def _apply_revise_uarch(pr: str, response: dict, contract_audit: dict,
+                        stage: str) -> list[str]:
+    """Automate the operator playbook for a chip-level ``revise``: append the
+    revision feedback to each affected block's uArch spec and drop
+    best_result (the block re-enters through the targeted plan)."""
+    feedback = (response.get("feedback")
+                or contract_audit.get("suggested_fix") or "").strip()
+    blocks = (response.get("affected_blocks")
+              or contract_audit.get("affected_blocks") or [])
+    applied: list[str] = []
+    for name in blocks:
+        spec = Path(pr) / "arch" / "uarch_specs" / f"{name}.md"
+        if not spec.exists():
+            continue
+        try:
+            with spec.open("a", encoding="utf-8") as fh:
+                fh.write(
+                    f"\n\n## {stage.upper()} REVISION FEEDBACK (MANDATORY)\n\n"
+                    "Chip-level DV failed against this block's contract. This "
+                    "section OVERRIDES any conflicting statement above:\n\n"
+                    f"{feedback}\n"
+                )
+        except OSError:
+            continue
+        _db(pr).clear_result(name, "best")
+        try:
+            _bdir = Path(pr) / ".coresmith" / "blocks" / name
+            _bdir.mkdir(parents=True, exist_ok=True)
+            with (_bdir / "gate_feedback.txt").open("a", encoding="utf-8") as fh:
+                fh.write(f"\n\n## {stage.upper()} REVISION (MANDATORY)\n\n{feedback}\n")
+        except OSError:
+            pass
+        # Arm-U audit CRITICAL #2/#3: spec appends are destroyed by the
+        # per-tier re-spec, so a correctly-fixed bug regressed 4h later.
+        # constraints.json survives regeneration and is read by the spec/RTL/
+        # TB generators -- pin the revision there too.
+        try:
+            _db(pr).add_constraint(
+                name, f"{stage.upper()} REVISION (regeneration-proof): {feedback[:1500]}",
+                source="chip_dv_revise", attempt=0)
+        except Exception:  # noqa: BLE001
+            pass
+        applied.append(name)
+    return applied
 
 
 def _spec_pins_ignored() -> bool:
@@ -1000,28 +1208,25 @@ async def generate_uarch_spec_node(state: BlockState) -> dict:
         # the pin suppressed exactly the regen it was written to steer. A
         # pinned SPEC still regenerates its model (OPERATOR_MODEL_PIN and the
         # gate-scope check inside the helper still protect the model file).
-        try:
-            from orchestrator.langgraph.pipeline_helpers import (
-                _maybe_generate_block_golden,
-            )
-
-            await _maybe_generate_block_golden(block, callbacks=_callbacks(state))
-        except Exception as _exc:  # noqa: BLE001 - best-effort; gate is the backstop
-            log(f"  [UARCH] {block_name}: pinned-spec model regen raised: "
-                f"{_exc}", YELLOW)
         return {"uarch_approved": False, "phase": "uarch"}
 
-    # GATE-SCOPED REVISE [dv-hardening-7]: during a µarch-gate failure
-    # iteration, a block the gate did NOT implicate keeps its on-disk spec
-    # verbatim -- re-drawing it burns an LLM round for zero information and
-    # the churn cascades (reviewer edits -> spec mtime bump -> model regen).
-    from orchestrator.langgraph.pipeline_helpers import gate_scoped_reuse_reason
-
-    _scope = gate_scoped_reuse_reason(_pr(state), block_name)
-    if _scope and _pinned_spec.exists():
-        log(f"  [UARCH] {block_name}: {_scope}", YELLOW)
-        write_graph_event(_pr(state), "Generate Uarch Spec", "gate_scope_reuse", {
-            "block": block_name, "reason": _scope,
+    # Targeted revise / single-context uArch: the spec on disk is the one to
+    # implement (adopted from the integration review, or written by the
+    # single-context author). Reuse it unless feedback is pending for THIS
+    # block -- a chip-lead finding or a mem-price re-spec -- which revises
+    # the spec per block exactly as before.
+    _resp0 = state.get("human_response") or {}
+    _fb_pending = (
+        (Path(_pr(state)) / ".coresmith" / "blocks" / block_name
+         / "gate_feedback.txt").exists()
+        or (_resp0.get("action") == "revise" and bool(_resp0.get("feedback")))
+    )
+    if state.get("reuse_spec") and _pinned_spec.exists() and not _fb_pending:
+        log(f"  [UARCH] {block_name}: implementing the on-disk spec as-is "
+            "(targeted revise / single-context uArch) -- no per-block "
+            "regeneration", YELLOW)
+        write_graph_event(_pr(state), "Generate Uarch Spec", "spec_reused", {
+            "block": block_name, "spec_path": str(_pinned_spec),
         })
         return {"uarch_approved": False, "phase": "uarch"}
 
@@ -1113,6 +1318,15 @@ async def generate_uarch_spec_node(state: BlockState) -> dict:
             chars = len(result.get("spec_text", ""))
             log(f"  [UARCH] Generated spec ({chars} chars)", GREEN)
             span.set_attribute("chars", chars)
+            # Consume ONE-SHOT prescriptions (the uarch_patch MICROARCH
+            # REVISION channel has no other deleter) so they cannot steer
+            # later tiers or runs. init_tier's OWN gate feedback must SURVIVE
+            # this node: its presence is the 'gate implicated this block'
+            # signal that gate_scoped_reuse_reason / review_uarch_spec_node
+            # key on during a revise iteration, and init_tier clears it
+            # itself on the next tier pass.
+            if gate_feedback and not _is_own_gate_feedback(gate_fb_path):
+                gate_fb_path.unlink(missing_ok=True)
 
     write_graph_event(_pr(state), "Generate Uarch Spec", "graph_node_exit", {
         "block": block_name,
@@ -1129,11 +1343,14 @@ async def generate_uarch_spec_node(state: BlockState) -> dict:
 # ---------------------------------------------------------------------------
 
 def _mem_price_max_revise() -> int:
-    """CORESMITH_MEM_PRICE_MAX_REVISE (default 3): bound the spec re-spec loop."""
+    """CORESMITH_MEM_PRICE_MAX_REVISE (default 0 since WP-10c): the mem-price
+    verdict is advisory -- priced, recorded and carried to the integration review
+    summary, but it no longer re-specs a block on its own. Set >0 to restore
+    the bounded auto re-spec loop."""
     try:
-        return max(0, int(os.environ.get("CORESMITH_MEM_PRICE_MAX_REVISE", "3") or "3"))
+        return max(0, int(os.environ.get("CORESMITH_MEM_PRICE_MAX_REVISE", "0") or "0"))
     except ValueError:
-        return 3
+        return 0
 
 
 def _ers_parameters_block_present(project_root: str) -> bool:
@@ -1148,6 +1365,74 @@ def _ers_parameters_block_present(project_root: str) -> bool:
         return _psch.ers_has_parameters_block(project_root)
     except Exception:  # noqa: BLE001
         return False
+
+
+# Every uarch_feasibility blocking issue LEADS WITH ITS CATEGORY, e.g.
+# "[area] storage exceeds the block budget" -> "area" (see the park payload's
+# outer_agent_guidance, which documents the tag set to the chip-lead).
+_FEAS_ISSUE_TAG_RE = re.compile(r"^\s*\[([A-Za-z_][A-Za-z0-9_-]*)\]")
+
+
+def _feas_issue_categories(issues) -> list[str]:
+    """Ordered, de-duplicated ``[tag]`` categories of blocking issues."""
+    cats: list[str] = []
+    for issue in issues or []:
+        m = _FEAS_ISSUE_TAG_RE.match(str(issue))
+        if m:
+            tag = m.group(1).lower()
+            if tag not in cats:
+                cats.append(tag)
+    return cats
+
+
+def _feas_override_scope(project_root, block_name: str) -> dict | None:
+    """SCOPE of the chip-lead's ``uarch_feasibility_override``, or None.
+
+    The marker used to be a bare ``"1"`` whose mere EXISTENCE waived every
+    budget gate for the block -- block-global, and therefore wrong: an override
+    granted for an ``[interface]`` (or tooling) blocker silently forced the
+    block past the deterministic mem_price gate and the post-synth budget gate
+    as well, and labelled within-budget blocks "over-budget accepted". The
+    marker is now JSON recording WHICH categories were actually overridden and
+    against WHICH contract version, so each gate can ask whether the override
+    is about IT.
+
+    Returns the scope dict (``categories`` always present and lower-cased), or
+    None when there is no marker or the override has EXPIRED -- a recorded
+    ``contract_sha1`` that no longer matches this block's current contract
+    means the lead accepted a different design than the one in front of us. A
+    legacy ``"1"`` marker reads as an ``[area]`` override so pre-JSON runs keep
+    exactly the behavior they had.
+    """
+    path = (Path(project_root) / ".coresmith" / "blocks" / block_name
+            / "uarch_feasibility_override")
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return None
+    try:
+        scope = json.loads(raw)
+    except ValueError:
+        scope = None
+    if not isinstance(scope, dict):
+        return {"categories": ["area"], "legacy": True}
+    scope["categories"] = [
+        str(c).strip().lower()
+        for c in (scope.get("categories") or []) if str(c).strip()
+    ]
+    ver = scope.get("contract_version")
+    if ver:
+        # Only a KNOWN, DIFFERENT contract version expires the override.
+        current = _db(project_root).block_contract_version(block_name)
+        if current and current != int(ver):
+            return None
+    return scope
+
+
+def _feas_override_covers(project_root, block_name: str, category: str) -> bool:
+    """True when a live override explicitly covers ``category`` (e.g. "area")."""
+    scope = _feas_override_scope(project_root, block_name)
+    return bool(scope) and category in (scope.get("categories") or [])
 
 
 def _mem_price_gate_verdict(project_root: str, block_name: str) -> dict | None:
@@ -1179,8 +1464,15 @@ def _mem_price_gate_verdict(project_root: str, block_name: str) -> dict | None:
     # price the manifest for the ledger record, then DEFER (carry-forward
     # advisory) instead of demanding a re-spec. The chip-lead has explicitly
     # accepted the area; force past, don't loop.
-    _bdir = Path(project_root) / ".coresmith" / "blocks" / block_name
-    if (_bdir / "uarch_feasibility_override").exists():
+    #
+    # ONLY when the override actually covers [area], though. The marker records
+    # the categories the lead waived; an [interface] / [capability] / tooling
+    # override says nothing about this block's MEMORY budget, and honoring its
+    # bare existence forced unrelated (and within-budget) blocks past this gate.
+    _feas_scope = _feas_override_scope(project_root, block_name)
+    if _feas_scope and "area" in (_feas_scope.get("categories") or []):
+        _ovr_cats = ", ".join(
+            f"[{c}]" for c in (_feas_scope.get("categories") or [])) or "[area]"
         spec_text0 = spec_path.read_text(encoding="utf-8", errors="replace")
         decls0 = _mprice.parse_mem_manifest(spec_text0)
         area_budget0 = floor_area_budget(
@@ -1195,16 +1487,20 @@ def _mem_price_gate_verdict(project_root: str, block_name: str) -> dict | None:
                         block_name, verdict0, area_budget_um2=area_budget0,
                         manifest_present=True, over_budget=not verdict0.ok,
                         deferred=True,
-                        deferred_reason="operator override (uarch_feasibility "
-                                        "[area] override) -- mem_price forced "
-                                        "past, carried forward"))
+                        deferred_reason=(
+                            "operator override (uarch_feasibility override "
+                            f"scoped to {_ovr_cats}, covers [area]) -- "
+                            "mem_price forced past, carried forward")))
         except Exception:  # noqa: BLE001 - never block on the ledger record
             pass
-        log(f"  [MEM-PRICE] {block_name}: uarch_feasibility_override present -- "
-            f"FORCING PAST the mem_price gate (deferred, carried forward) "
-            f"instead of re-entering the revise loop", YELLOW)
+        log(f"  [MEM-PRICE] {block_name}: uarch_feasibility_override scoped to "
+            f"{_ovr_cats} covers [area] -- FORCING PAST the mem_price gate "
+            f"(deferred, carried forward) instead of re-entering the revise "
+            f"loop", YELLOW)
         write_graph_event(project_root, "Review Uarch Spec",
-                          "mem_price_override_deferred", {"block": block_name})
+                          "mem_price_override_deferred",
+                          {"block": block_name,
+                           "categories": _feas_scope.get("categories") or []})
         return None
 
     spec_text = spec_path.read_text(encoding="utf-8", errors="replace")
@@ -1228,13 +1524,9 @@ def _mem_price_gate_verdict(project_root: str, block_name: str) -> dict | None:
                     block_name, _mprice.MemPriceVerdict(ok=False), area_budget_um2=area_budget,
                     manifest_present=False, note="storage declared but no # MEM manifest")
                 _mprice.write_ledger(project_root, block_name, led)
-                return {"action": "revise", "feedback": (
-                    "MEMORY MANIFEST REQUIRED: this spec declares on-chip storage "
-                    "(sram_budget) but emits no machine-readable memory manifest. "
-                    "Add one `# MEM <name>: <width>x<depth> ports=<...> "
-                    "impl=<flop|fpmem|sram> justification=<why the dependency "
-                    "window cannot be smaller>` line PER storage element so the "
-                    "physical-feasibility gate can price it.")}
+                log(f"  [MEM-PRICE] {block_name}: storage declared but no # MEM "
+                    "manifest -- advisory (WP-11); pricing skipped", YELLOW)
+                return None
             log(f"  [MEM-PRICE] {block_name}: spec declares storage but has NO "
                 f"# MEM manifest -- UNPRICED (set CORESMITH_MEM_MANIFEST_REQUIRED=1 "
                 f"to enforce). Accepting with warning.", YELLOW)
@@ -1381,26 +1673,6 @@ async def review_uarch_spec_node(state: BlockState) -> dict:
         "block": block_name,
     })
 
-    # GATE-SCOPED REVISE [dv-hardening-7]: a non-implicated block's spec was
-    # reused verbatim by generate_uarch_spec_node -- it was already reviewed +
-    # priced when it first passed. Re-reviewing re-EDITS it (the reviewer
-    # always changes something), bumping mtimes and cascading regens of
-    # correct collateral. Skip straight to approval.
-    from orchestrator.langgraph.pipeline_helpers import gate_scoped_reuse_reason
-
-    _scope = gate_scoped_reuse_reason(_pr(state), block_name)
-    if _scope:
-        log(f"  [UARCH-REVIEW] {block_name}: {_scope}", YELLOW)
-        write_graph_event(_pr(state), "Review Uarch Spec", "gate_scope_reuse", {
-            "block": block_name, "reason": _scope,
-        })
-        write_graph_event(_pr(state), "Review Uarch Spec", "graph_node_exit", {
-            "block": block_name,
-        })
-        return {"human_response": {"action": "approve"},
-                "uarch_approved": True,
-                "mem_price_deferred": False}
-
     # uArch FEASIBILITY GATE (CORESMITH_UARCH_FEASIBILITY_GATE, default ON).
     # The spec's machine-readable {feasible, blocking_issues} verdict is the
     # engine's OWN diagnosis that a block cannot be built byte-exactly with its
@@ -1428,40 +1700,13 @@ async def review_uarch_spec_node(state: BlockState) -> dict:
 
     _bdir = Path(_pr(state)) / ".coresmith" / "blocks" / block_name
 
-    # C6: model/spec feasibility CONFLICT. The block-model generator declared
-    # it cannot realize this block's datapath from the frozen interface
-    # (model_interface_gap.txt, written at model generation) while the spec
-    # verdict claims feasible -- the residual_recon_engine stub wall: a stub
-    # model + stub-consistent TB/RTL passed per-block DV 6/6 and the chip
-    # failed only at integration. Surface the conflict HERE as a [capability]
-    # blocking issue so the existing interrupt engages the chip-lead pre-RTL.
-    # A revise regenerates the model (clearing or re-asserting the marker);
-    # the chip-lead override below silences it like any other blocker.
-    if _uarch_feasibility_gate_enabled():
-        _gap_p = _bdir / "model_interface_gap.txt"
-        if _gap_p.exists():
-            try:
-                _gap_txt = _gap_p.read_text(encoding="utf-8").strip()
-            except OSError:
-                _gap_txt = "model declared an interface gap"
-            _gap_issue = (
-                "[capability] model/spec conflict: the block-model generator "
-                "declared it cannot realize this block's datapath from the "
-                f"frozen interface ({_gap_txt}) while the spec verdict claims "
-                "feasible. Resolve where the missing data actually comes from "
-                "(an existing contract field, a shared memory region, or a new "
-                "contract field) and revise the interface -- do NOT let a stub "
-                "proceed to RTL: it will pass per-block DV against its own "
-                "stub-consistent TB and fail only at integration."
-            )
-            if _gap_issue not in blocking_issues:
-                blocking_issues.append(_gap_issue)
-                feasible = False
-
-    if blocking_issues and (_bdir / "uarch_feasibility_override").exists():
+    if blocking_issues and _feas_override_scope(_pr(state), block_name):
         # A prior review round was overridden by the chip-lead; do not re-prompt
         # for the same (unchanged) spec on a two-pass re-entry. A genuine re-spec
         # (revise) rewrites the spec and clears intent by producing a new verdict.
+        # An override recorded against a since-changed interface contract has
+        # EXPIRED (_feas_override_scope returns None) -- re-prompt, because the
+        # lead accepted a different design than the one in front of us.
         log(f"  [UARCH-FEAS] {block_name}: blockers present but chip-lead "
             f"OVERRODE earlier -- proceeding without re-prompting", YELLOW)
         blocking_issues = []
@@ -1521,7 +1766,7 @@ async def review_uarch_spec_node(state: BlockState) -> dict:
                 "`abort` ends this block without RTL."
             ),
         }
-        response = interrupt(payload) or {}
+        response = (await _resolve_interrupt(payload)) or {}
         action = response.get("action", "revise_interface")
         write_graph_event(_pr(state), "Review Uarch Spec",
                           "uarch_feasibility_resume",
@@ -1531,7 +1776,19 @@ async def review_uarch_spec_node(state: BlockState) -> dict:
                 f"despite reported blockers", YELLOW)
             try:
                 _bdir.mkdir(parents=True, exist_ok=True)
-                (_bdir / "uarch_feasibility_override").write_text("1")
+                # SCOPED marker: record WHICH blocker categories were waived and
+                # WHICH contract version they were waived against, so the
+                # downstream budget gates can tell whether this override is
+                # about them and so it expires when the contract moves under it.
+                (_bdir / "uarch_feasibility_override").write_text(
+                    json.dumps({
+                        "gate": "uarch_feasibility",
+                        "categories": _feas_issue_categories(blocking_issues),
+                        "contract_version": _db(_pr(state)).block_contract_version(
+                            block_name),
+                        "ts": _time.time(),
+                    }, indent=2),
+                    encoding="utf-8")
             except OSError:
                 pass
             # fall through to the normal review/approve path below
@@ -1684,58 +1941,6 @@ async def review_uarch_spec_node(state: BlockState) -> dict:
 # Node: generate_rtl  (with lint built-in)
 # ---------------------------------------------------------------------------
 
-# Deterministic-gate rejection markers a reused sim-passing RTL re-fails forever
-# (Finding 1: the skip_regen livelock). The stage / storage / ifdef lints write
-# these strings into <block>/previous_error.txt; they survive verbatim in the
-# diagnosis raw-log tail when diagnose reroutes the error, so matching the file
-# catches the re-entry regardless of who last wrote it.
-_DETERMINISTIC_GATE_MARKERS = (
-    "WIDE FLAT PACKED STORAGE WITH DYNAMIC PART-SELECT",   # storage lint report
-    "pre-synth storage lint",                              # storage synth wrapper
-    "SPLIT-BRAIN CONDITIONAL-COMPILATION",                 # ifdef lint report
-    "deterministic stage-realization",                     # stage lint subtitle
-    "UNSYNTHESIZABLE COMBINATIONAL CLOUD",                 # stage lint header
-)
-
-
-def _load_constraints_safe(constr_path) -> list:
-    """Load a block's accumulated ``constraints.json`` -- NEVER crash on it.
-
-    C21: a malformed constraints.json (observed on a regression sweep: a
-    concatenated ``[]`` + array producing ``JSONDecodeError: Extra data``)
-    must not terminate the RTL tier via an unguarded ``json.loads`` in
-    block_done_node. The learned-constraints cache is best-effort context, not
-    a correctness artifact -- fall back to no learned constraints (and try to
-    recover the trailing valid array if the file is a concatenation) rather
-    than crashing the whole pipeline. Pre-existing loader hardening, exposed by
-    the sweep's extra block-failure traffic.
-    """
-    import json as _j
-    try:
-        p = Path(constr_path)
-        if not p.exists():
-            return []
-        text = p.read_text()
-        try:
-            val = _j.loads(text)
-            return val if isinstance(val, list) else []
-        except _j.JSONDecodeError:
-            # Best-effort recovery: the writer concatenated documents; take the
-            # LAST valid top-level JSON array in the file if there is one.
-            import re as _re
-            arrays = _re.findall(r"\[.*?\]", text, _re.DOTALL)
-            for chunk in reversed(arrays):
-                try:
-                    v = _j.loads(chunk)
-                    if isinstance(v, list) and v:
-                        return v
-                except _j.JSONDecodeError:
-                    continue
-            return []
-    except OSError:
-        return []
-
-
 def _rtl_sha1(rtl_path) -> str:
     """sha1 of the RTL file bytes ('' on any error) -- sim-pass provenance.
 
@@ -1746,21 +1951,6 @@ def _rtl_sha1(rtl_path) -> str:
         import hashlib
 
         return hashlib.sha1(Path(rtl_path).read_bytes()).hexdigest()
-    except Exception:  # noqa: BLE001 - provenance is best-effort
-        return ""
-
-
-def _block_contract_sha1(project_root, block_name: str) -> str:
-    """sha1 of THIS block's frozen interface-contract slice ('' on any error).
-
-    C5: a sim-pass is provenance for the contract it was earned against, not
-    just the RTL bytes. Delegates to the canonical helper in pipeline_helpers
-    (single hashing scheme, shared with the block-model sidecar).
-    """
-    try:
-        from orchestrator.langgraph.pipeline_helpers import block_contract_sha1
-
-        return block_contract_sha1(project_root, block_name)
     except Exception:  # noqa: BLE001 - provenance is best-effort
         return ""
 
@@ -1780,150 +1970,9 @@ def _pass_provenance(project_root, block_name: str, rtl_path, tb_path) -> dict:
     prov = {
         "rtl_sha1": _rtl_sha1(rtl_path),
         "tb_sha1": _rtl_sha1(tb_path) if tb_path else "",
-        "contract_sha1": _block_contract_sha1(project_root, block_name),
+        "contract_version": _db(project_root).block_contract_version(block_name) or "",
     }
     return {k: v for k, v in prov.items() if v}
-
-
-def _deterministic_gate_retry(block_dir: Path) -> bool:
-    """True when this regen re-entry was routed from a DETERMINISTIC gate
-    rejection (stage / storage / ifdef lint).
-
-    Such gates fail the SAME RTL every time, so the ``best_result.sim_passed``
-    reuse short-circuit livelocks: it re-submits the identical rejected RTL,
-    which re-fails the identical gate forever (observed twice live in Phase B).
-    Mirrors the ``ppa_ok is False`` bypass, which breaks the same deadlock class
-    for the PPA budget gate. Detected from the on-disk ``previous_error.txt``
-    (the gate reports write their marker there).
-    """
-    try:
-        txt = (block_dir / "previous_error.txt").read_text()
-    except OSError:
-        return False
-    return any(m in txt for m in _DETERMINISTIC_GATE_MARKERS)
-
-
-def _gate_retry_bypass(
-    state: BlockState, block_name: str, rtl_path_obj: Path, attempt: int,
-    *, kind: str = "ppa",
-) -> None:
-    """Break a deadlock where a sim-passing RTL is routed BACK to
-    ``generate_rtl_node`` by a deterministic gate that reuse would re-fail
-    forever.
-
-    ``kind='ppa'`` -- the block PASSED sim but FAILED the deterministic PPA
-    budget gate (``ppa_ok is False``); ``kind='lint'`` -- it was REJECTED by a
-    deterministic stage/storage/ifdef lint (Finding 1). In both cases the
-    regression guard's ``sim_passed`` short-circuit would reuse the SAME rejected
-    RTL and re-fail the SAME gate every attempt. Before regenerating:
-      1. Back up the passing RTL (a later NON-gated re-entry can still reuse a
-         known-good functional version) and annotate ``best_result.json``.
-      2. Invalidate the block's sim caches so the regenerated RTL re-sims fresh.
-    ``best_result.json`` keeps ``sim_passed=True``; the bypass is keyed SOLELY on
-    the LIVE gate verdict, so a later non-gated re-entry still reuses the RTL.
-    """
-    pr = _pr(state)
-    block_dir = Path(pr) / ".coresmith" / "blocks" / block_name
-    block_dir.mkdir(parents=True, exist_ok=True)
-    backup = block_dir / f"rtl_backup_attempt{attempt}.v"
-    try:
-        backup.write_text(rtl_path_obj.read_text())
-    except OSError:
-        backup = None
-    best_path = block_dir / "best_result.json"
-    try:
-        best = json.loads(best_path.read_text()) if best_path.exists() else {}
-        if backup is not None:
-            best[f"{kind}_bypass_backup"] = str(backup)
-        best[f"{kind}_retry_attempt"] = attempt
-        best_path.write_text(json.dumps(best))
-    except (OSError, json.JSONDecodeError):
-        pass
-    # Invalidate sim caches (no netlist cache exists -- synth runs fresh).
-    import shutil as _sh
-    import tempfile as _tf
-    sim_root = Path(pr) / "sim_build"
-    stale = [sim_root / block_name]
-    stale += list(sim_root.glob(f"rme_{block_name}*"))
-    # The equivalence harness builds under /tmp/rme_<block>_* -- clean those too.
-    stale += list(Path(_tf.gettempdir()).glob(f"rme_{block_name}_*"))
-    for d in stale:
-        try:
-            if d.exists():
-                _sh.rmtree(d, ignore_errors=True)
-        except OSError:
-            pass
-    _why = ("passed sim but FAILED the PPA budget gate" if kind == "ppa" else
-            "passed sim but was REJECTED by a deterministic lint gate "
-            "(stage/storage/ifdef) that reusing the same RTL re-fails forever")
-    log(f"  [RTL] {kind}-retry bypass: {block_name} {_why} -- regenerating "
-        f"(backed up passing RTL to {backup}, invalidated sim caches)", YELLOW)
-    write_graph_event(pr, "Generate RTL", f"{kind}_retry_bypass", {
-        "block": block_name, "attempt": attempt,
-        "backup": str(backup) if backup else "",
-    })
-
-
-def _ppa_retry_bypass(
-    state: BlockState, block_name: str, rtl_path_obj: Path, attempt: int
-) -> None:
-    """A-Fix 4: break the PPA-retry deadlock (see :func:`_gate_retry_bypass`)."""
-    _gate_retry_bypass(state, block_name, rtl_path_obj, attempt, kind="ppa")
-
-
-def _snapshot_passing_block(
-    pr: str, block_name: str, block: dict, rtl_path_obj: Path, attempt: int,
-    reason: str,
-) -> None:
-    """PR#12 finding #4 (data-loss guard): before the regression guard
-    invalidates a block's sim-pass and REGENERATES it (contract/tb/rtl-hash
-    staleness), snapshot the CURRENT passing RTL **and** testbench to a
-    recoverable location and record it in ``best_result.json``.
-
-    The fft sweep casualty: a chip-lead contract edit (an authorized cs_sram
-    ERS amendment) bumped user_project_wrapper's ``contract_sha1``; the guard
-    invalidated its sim-pass and regenerated it into a WRONG boundary, and the
-    correct passing RTL+TB were gone forever (checkpoint references RTL by
-    path; the on-disk file was overwritten). A regeneration that produces a
-    WORSE result must never be irrecoverable. Snapshots let a later re-entry
-    (or an operator) restore the last-known-good artifact. Best-effort; never
-    raises. Disable with ``CORESMITH_SNAPSHOT_BEFORE_REGEN=0``.
-    """
-    if os.environ.get("CORESMITH_SNAPSHOT_BEFORE_REGEN", "1").strip().lower() \
-            in {"0", "false", "no", "off"}:
-        return
-    try:
-        block_dir = Path(pr) / ".coresmith" / "blocks" / block_name
-        snap = block_dir / f"passing_snapshot_attempt{attempt}"
-        snap.mkdir(parents=True, exist_ok=True)
-        saved = {}
-        if rtl_path_obj.exists():
-            dst = snap / rtl_path_obj.name
-            dst.write_text(rtl_path_obj.read_text())
-            saved["rtl"] = str(dst)
-        tb_rel = block.get("testbench", "")
-        if tb_rel:
-            tb_obj = Path(pr) / tb_rel
-            if tb_obj.exists():
-                dst = snap / tb_obj.name
-                dst.write_text(tb_obj.read_text())
-                saved["tb"] = str(dst)
-        best_path = block_dir / "best_result.json"
-        if best_path.exists() and saved:
-            best = json.loads(best_path.read_text())
-            hist = best.get("passing_snapshots", [])
-            hist.append({"attempt": attempt, "reason": reason, **saved})
-            best["passing_snapshots"] = hist
-            best_path.write_text(json.dumps(best))
-        log(f"  [RTL] snapshot before regen: {block_name} passing artifacts "
-            f"saved to {snap} ({reason}) -- recoverable if the regen is worse",
-            YELLOW)
-        write_graph_event(pr, "Generate RTL", "passing_snapshot", {
-            "block": block_name, "attempt": attempt, "reason": reason,
-            "dir": str(snap),
-        })
-    except (OSError, json.JSONDecodeError):
-        pass
 
 
 async def generate_rtl_node(state: BlockState) -> dict:
@@ -1934,11 +1983,10 @@ async def generate_rtl_node(state: BlockState) -> dict:
     to disk.  After generation, runs Verilator lint and attempts local
     LLM fixes before escalating to the diagnose lead.
 
-    Regression guard: if a previous attempt passed simulation, skip RTL
-    regeneration AND reuse the passing testbench (re-validate only). Set
-    CORESMITH_FORCE_TB_REGEN=1 to restore the old force-TB-regen behavior.
+    A block that reaches this node regenerates its RTL (WP-10b removed the
+    sha1 regression guard and the skip-regen fast path: re-entry is targeted
+    by the revise plan, so nothing reaches here that should be reused).
     """
-    _guard_rtl_phase(state, "generate_rtl_node")
     block = state["current_block"]
     block_name = block["name"]
     attempt = state["attempt"]
@@ -1948,140 +1996,32 @@ async def generate_rtl_node(state: BlockState) -> dict:
         "block": block_name, "attempt": attempt,
     })
 
-    best_result_path = (
-        Path(_pr(state)) / ".coresmith" / "blocks" / block_name / "best_result.json"
-    )
-
     with _tracer.start_as_current_span(
         f"Generate RTL [{block_name}] attempt {attempt}"
     ) as span:
         span.set_attribute("block_name", block_name)
         span.set_attribute("attempt", attempt)
 
-        # --- Regression guard ---
-        # A-Fix 4: a block whose LIVE PPA verdict is False (passed sim but blew
-        # its PPA budget) must REGENERATE -- reusing the passing RTL would re-fail
-        # PPA forever (deadlock). Keyed on live state.ppa_ok (not best_result), so
-        # a non-PPA re-entry (ppa_ok None/True) still reuses the passing RTL.
-        ppa_retry = state.get("ppa_ok") is False
-        if attempt > 1 and rtl_path_obj.exists() and best_result_path.exists():
-            try:
-                best = json.loads(best_result_path.read_text())
-                # dv-hardening-10: a sim-pass is provenance for the RTL it
-                # passed WITH. If the on-disk RTL hash differs from the
-                # recorded one, the pass is stale -- do not reuse it (the
-                # armC livelock: reuse decisions honored a sim_passed that
-                # belonged to different RTL bytes).
-                _rec_sha = best.get("rtl_sha1")
-                if best.get("sim_passed") and _rec_sha:
-                    _cur_sha = _rtl_sha1(str(rtl_path_obj))
-                    if _cur_sha and _cur_sha != _rec_sha:
-                        log(f"  [RTL] best_result sim-pass is for DIFFERENT "
-                            f"RTL (hash mismatch) -- ignoring stale pass, "
-                            f"re-validating {block_name}", YELLOW)
-                        best["sim_passed"] = False
-                # C5: the pass is ALSO provenance for the TB and the block's
-                # frozen interface contract. fragment_metadata_memory livelock:
-                # the recorded pass had a MATCHING rtl_sha1 (the obsolete
-                # 48-bit RTL still on disk) but the TB/contract had moved to
-                # 56 bits -- skip-regen reused the stale RTL forever. Absent
-                # recorded hashes (older runs) skip these axes unchanged.
-                _rec_tb = best.get("tb_sha1")
-                if best.get("sim_passed") and _rec_tb:
-                    _tb_obj = Path(_pr(state)) / block.get("testbench", "")
-                    _cur_tb = (_rtl_sha1(str(_tb_obj))
-                               if block.get("testbench") and _tb_obj.exists()
-                               else "")
-                    if _cur_tb and _cur_tb != _rec_tb:
-                        log(f"  [RTL] best_result sim-pass was earned with a "
-                            f"DIFFERENT testbench (hash mismatch) -- ignoring "
-                            f"stale pass, regenerating {block_name}", YELLOW)
-                        _snapshot_passing_block(
-                            _pr(state), block_name, block, rtl_path_obj,
-                            attempt, "tb_sha1_stale")
-                        best["sim_passed"] = False
-                _rec_ct = best.get("contract_sha1")
-                if best.get("sim_passed") and _rec_ct:
-                    _cur_ct = _block_contract_sha1(_pr(state), block_name)
-                    if _cur_ct and _cur_ct != _rec_ct:
-                        log(f"  [RTL] best_result sim-pass predates a revision "
-                            f"of this block's interface contract -- ignoring "
-                            f"stale pass, regenerating {block_name}", YELLOW)
-                        _snapshot_passing_block(
-                            _pr(state), block_name, block, rtl_path_obj,
-                            attempt, "contract_sha1_stale")
-                        best["sim_passed"] = False
-                # Finding 1: was this retry routed from a DETERMINISTIC gate
-                # rejection (stage/storage/ifdef lint)? Reusing the same
-                # sim-passing RTL re-fails that gate forever -- the skip_regen
-                # livelock. Detected from the block's previous_error.txt.
-                det_gate_retry = _deterministic_gate_retry(best_result_path.parent)
-                if best.get("sim_passed") and ppa_retry:
-                    # PPA-retry deadlock bypass: back up the passing RTL +
-                    # invalidate sim caches, then fall through to REGENERATE.
-                    _ppa_retry_bypass(state, block_name, rtl_path_obj, attempt)
-                elif best.get("sim_passed") and det_gate_retry:
-                    # Deterministic-lint-retry deadlock bypass (same mechanism as
-                    # the PPA bypass): back up + invalidate caches + regenerate.
-                    _gate_retry_bypass(
-                        state, block_name, rtl_path_obj, attempt, kind="lint",
-                    )
-                elif best.get("sim_passed"):
-                    # A block that already passed sim is functionally done. On
-                    # re-entry (e.g. an integration-review restart) REUSE the
-                    # passing RTL+TB and just re-validate -- do NOT regenerate
-                    # the testbench. Force-regenerating a passing block's TB
-                    # produced a worse TB that re-failed, and since best_result
-                    # stays sim_passed=True it re-triggered every restart -> an
-                    # infinite regen/fail loop (observed wedging whole runs).
-                    # The old force-regen behavior is recoverable, opt-in.
-                    import os as _os_regen
-                    force_tb = _os_regen.environ.get(
-                        "CORESMITH_FORCE_TB_REGEN", ""
-                    ).strip().lower() in {"1", "true", "yes", "on"}
-                    log(f"  [RTL] SKIP regeneration -- attempt {best.get('attempt')} "
-                        f"passed sim ({best.get('tests_passed')}/{best.get('tests_total')} tests). "
-                        f"{'Forcing TB regen (opt-in)' if force_tb else 'Reusing passing TB'}.",
-                        YELLOW)
-                    span.set_attribute("skipped_regen", True)
-                    span.set_attribute("force_regen_tb", force_tb)
-                    write_graph_event(_pr(state), "Generate RTL", "graph_node_exit", {
-                        "block": block_name, "attempt": attempt,
-                        "action": "skip_regen (previous sim passed)"
-                        + ("; force TB regen" if force_tb else "; reuse TB"),
-                    })
-                    return {
-                        "rtl_path": str(rtl_path_obj),
-                        "phase": "rtl",
-                        "lint_clean": True,
-                        "force_regen_tb": force_tb,
-                    }
-            except (json.JSONDecodeError, OSError):
-                pass
+        log(f"  [RTL] Generating Verilog for {block_name}...", YELLOW)
+        rtl_result = await generate_rtl(
+            block, attempt,
+            callbacks=_callbacks(state),
+        )
+        if "error" in rtl_result:
+            log(f"  [RTL] FAILED: {rtl_result['error']}", RED)
+            span.set_attribute("error", rtl_result["error"])
 
-        if attempt == 1 and rtl_path_obj.exists() and _file_is_fresh(rtl_path_obj, state):
-            log(f"  [RTL] Using existing (fresh): {block['rtl_target']}", GREEN)
-        else:
-            log(f"  [RTL] Generating Verilog for {block_name}...", YELLOW)
-            rtl_result = await generate_rtl(
-                block, attempt,
-                callbacks=_callbacks(state),
+            write_graph_event(_pr(state), "Generate RTL", "graph_node_exit", {
+                "block": block_name, "attempt": attempt, "error": rtl_result["error"],
+            })
+            block_dir = Path(_pr(state)) / ".coresmith" / "blocks" / block_name
+            block_dir.mkdir(parents=True, exist_ok=True)
+            (block_dir / "previous_error.txt").write_text(
+                f"RTL generation failed: {rtl_result['error']}"
             )
-            if "error" in rtl_result:
-                log(f"  [RTL] FAILED: {rtl_result['error']}", RED)
-                span.set_attribute("error", rtl_result["error"])
-
-                write_graph_event(_pr(state), "Generate RTL", "graph_node_exit", {
-                    "block": block_name, "attempt": attempt, "error": rtl_result["error"],
-                })
-                block_dir = Path(_pr(state)) / ".coresmith" / "blocks" / block_name
-                block_dir.mkdir(parents=True, exist_ok=True)
-                (block_dir / "previous_error.txt").write_text(
-                    f"RTL generation failed: {rtl_result['error']}"
-                )
-                return {"rtl_path": str(rtl_path_obj), "phase": "lint", "lint_clean": False}
-            else:
-                log(f"  [RTL] Generated to {block['rtl_target']}", GREEN)
+            return {"rtl_path": str(rtl_path_obj), "phase": "lint", "lint_clean": False}
+        else:
+            log(f"  [RTL] Generated to {block['rtl_target']}", GREEN)
 
     # --- Lint with local fix loop ---
     rtl_path = str(rtl_path_obj)
@@ -2181,134 +2121,6 @@ async def generate_rtl_node(state: BlockState) -> dict:
     # Reject it at generation time and route the SAME actionable "write ONE
     # implementation" message to regeneration. Same acceptance path + env-gate
     # convention as the pre-synth storage lint. CORESMITH_IFDEF_LINT=0 bypasses.
-    if lint_clean:
-        try:
-            from orchestrator.langgraph.rtl_storage_lint import (
-                find_functional_ifdef_regions,
-                format_ifdef_lint_report,
-                ifdef_lint_enabled,
-            )
-            if ifdef_lint_enabled():
-                _is_lib = f"{os.sep}rtl_lib{os.sep}" in rtl_path
-                _ir = find_functional_ifdef_regions(
-                    rtl_path_obj.read_text(), is_library=_is_lib,
-                )
-                if not _ir.ok:
-                    lint_clean = False
-                    _imsg = format_ifdef_lint_report(_ir, block=block_name)
-                    log(f"  [LINT] FUNCTIONAL-IFDEF GATE failed "
-                        f"({len(_ir.findings)} split-brain `ifdef region(s)) -- "
-                        f"one module must have ONE implementation, routing regen",
-                        RED)
-                    block_dir = Path(_pr(state)) / ".coresmith" / "blocks" / block_name
-                    block_dir.mkdir(parents=True, exist_ok=True)
-                    (block_dir / "previous_error.txt").write_text(_imsg[-5000:])
-                    write_graph_event(_pr(state), "Functional Ifdef Gate",
-                                      "gate_failed", {
-                        "block": block_name,
-                        "findings": [f.condition for f in _ir.findings],
-                    })
-        except Exception as _e:  # never let the gate crash the node
-            log(f"  [LINT] functional-ifdef gate error (skipped): {_e}", YELLOW)
-
-    # STAGE-REALIZATION GATE (pipeline-campaign). A spec-declared multi-stage
-    # datapath collapsed into a single-cycle combinational cloud lints AND
-    # simulates clean (it is functionally correct) but yosys `proc` unrolls every
-    # constant-bound `for` and inlines every task/function -> the whole
-    # N-candidate search elaborates in one cycle and the synth gate times out
-    # (the four-generation RD-encoder wall). A deterministic arithmetic census
-    # (loop-unroll + task-inline) makes the amplification visible in ms, BEFORE
-    # the 600 s synth timeout, and routes an actionable module-per-stage remedy
-    # to regen -- same acceptance path + env-gate convention as the storage/ifdef
-    # lints. CORESMITH_STAGE_LINT=0 bypasses.
-    if lint_clean:
-        try:
-            from orchestrator.langgraph.rtl_stage_lint import (
-                census_rtl,
-                census_signature,
-                format_stage_lint_report,
-                load_stage_map,
-                stage_lint_enabled,
-                stage_modules_enabled,
-            )
-            if stage_lint_enabled():
-                _sm = load_stage_map(_pr(state), block_name)
-                _sr = census_rtl(
-                    rtl_path_obj.read_text(), stage_map=_sm,
-                    enforce_stage_modules=stage_modules_enabled(),
-                )
-                if not _sr.ok:
-                    lint_clean = False
-                    # [Deliverable 3] trajectory-aware, fresh-session escalation:
-                    # a byte-for-byte-identical census across retries means the
-                    # regen re-registered outputs / renamed states without moving
-                    # the arithmetic -- escalate the directive (and, after two
-                    # identical rounds, demand a fresh-from-stage-map rewrite).
-                    _sig = census_signature(_sr)
-                    _blk_dir = Path(_pr(state)) / ".coresmith" / "blocks" / block_name
-                    _blk_dir.mkdir(parents=True, exist_ok=True)
-                    _sig_path = _blk_dir / "_stage_lint_signature.txt"
-                    _prev_sig, _n_same = "", 0
-                    if _sig_path.exists():
-                        try:
-                            _pv = _sig_path.read_text().split()
-                            _prev_sig = _pv[0] if _pv else ""
-                            _n_same = int(_pv[1]) if len(_pv) > 1 else 0
-                        except Exception:  # noqa: BLE001
-                            pass
-                    _identical = bool(_prev_sig) and _prev_sig == _sig
-                    _n_same = (_n_same + 1) if _identical else 0
-                    _sig_path.write_text(f"{_sig} {_n_same}")
-                    _smsg = format_stage_lint_report(
-                        _sr, block=block_name,
-                        trajectory=("identical" if _identical else ""),
-                        fresh_session=(_n_same >= 2),
-                    )
-                    (_blk_dir / "previous_error.txt").write_text(_smsg[-8000:])
-                    # dv-hardening-11: name the BINDING criterion. The old
-                    # headline unconditionally printed the multiplier compare
-                    # -- on a factor-only failure it read "32 effective
-                    # multipliers > cap 64" (false on its face) and steered
-                    # regens toward an already-green metric.
-                    if _sr.mul_violations:
-                        _why = (f"worst always-block = {_sr.worst_mul:,} "
-                                f"effective multipliers > cap {_sr.mul_cap}")
-                    elif _sr.factor_violations:
-                        _wo = max(_sr.factor_violations,
-                                  key=lambda b: b.eff_ops)
-                        _why = (f"TOTAL EFFECTIVE OPS over stage-map budget; "
-                                f"worst `{_wo.name}` = {_wo.eff_ops:,} eff-ops "
-                                f"(multiplier census GREEN: {_sr.worst_mul} "
-                                f"<= cap {_sr.mul_cap} -- do not optimize "
-                                f"multipliers)")
-                    else:
-                        _why = "structural stage-module deficiency"
-                    log(f"  [LINT] STAGE-REALIZATION GATE failed ({_why}) -- "
-                        f"routing module-per-stage remedy to regen", RED)
-                    write_graph_event(_pr(state), "Stage Realization Gate",
-                                      "gate_failed", {
-                        "block": block_name,
-                        "worst_effective_multipliers": _sr.worst_mul,
-                        "mul_cap": _sr.mul_cap,
-                        "mul_violations": [b.name for b in _sr.mul_violations],
-                        "factor_violations": [b.name for b in _sr.factor_violations],
-                        "stage_module_deficient": _sr.stage_module_deficient,
-                        "identical_resubmission": _identical,
-                        "fresh_session_escalation": bool(_n_same >= 2),
-                    })
-                else:
-                    # clean pass: drop any stale rejection signature so a later
-                    # unrelated failure is not misread as an identical resubmission.
-                    _sig_path = (Path(_pr(state)) / ".coresmith" / "blocks"
-                                 / block_name / "_stage_lint_signature.txt")
-                    if _sig_path.exists():
-                        try:
-                            _sig_path.unlink()
-                        except OSError:
-                            pass
-        except Exception as _e:  # never let the gate crash the node
-            log(f"  [LINT] stage-realization gate error (skipped): {_e}", YELLOW)
-
     write_graph_event(_pr(state), "Generate RTL", "graph_node_exit", {
         "block": block_name, "attempt": attempt, "lint_clean": lint_clean,
     })
@@ -2356,134 +2168,6 @@ def _is_likely_testbench_bug(sim_log: str) -> bool:
     return any(p in sim_log for p in _TB_BUG_PATTERNS)
 
 
-# ---------------------------------------------------------------------------
-# v3 Section 4: bounded post-block-DV throughput squeeze
-# ---------------------------------------------------------------------------
-async def _maybe_squeeze_throughput(state, block, block_name, rtl_path, tb_path,
-                                    attempt, sim_result, block_dir, span):
-    """Bounded cycle-minimization squeeze for a block that passed EVERY gate.
-
-    Fires ONLY when the block's measured cyc/op still sits above the roofline
-    PEAK x 1.1. Each round asks the worker (with the measured number, the peak,
-    and the binding constraint) to close the gap, then re-runs DV + measurement
-    AND the byte-exact equivalence gate; the new RTL is KEPT only if it still
-    passes and STRICTLY improves the measured rate, else the prior RTL is
-    restored. Bounded by CORESMITH_SQUEEZE_MAX_ROUNDS (default 2); never loops on
-    a block already at <= peak x 1.1; never regresses function/area/Fmax (a
-    worse or failing attempt is reverted). Best-effort: any error returns the
-    original result unchanged. Returns the (possibly-updated) sim_result.
-    """
-    import shutil
-    try:
-        from orchestrator.langgraph import throughput_gate as _tg
-        if not _tg.throughput_squeeze_enabled():
-            return sim_result
-        max_rounds = _tg.squeeze_max_rounds()
-        if max_rounds <= 0 or not rtl_path or not Path(rtl_path).exists():
-            return sim_result
-        cur = sim_result
-        best_measured = ((cur or {}).get("throughput") or {}).get(
-            "measured_cyc_per_op")
-        need = _tg.squeeze_needed(_pr(state), block_name, best_measured)
-        if need is None:
-            return sim_result  # no peak / no measured / already within peak x1.1
-
-        from orchestrator.harness.verify import run_block_equiv_gate as _run_equiv
-        backup = block_dir / "rtl_pre_squeeze.v.bak"
-        for rnd in range(1, max_rounds + 1):
-            log(f"  [SQUEEZE] {block_name}: measured "
-                f"{need['measured_cyc_per_op']} cyc/op > peak "
-                f"{need['peak_cyc_per_op']} x1.1 = {need['threshold_cyc_per_op']}"
-                f" -- round {rnd}/{max_rounds}", YELLOW)
-            try:
-                shutil.copyfile(rtl_path, backup)
-            except OSError:
-                return cur
-            try:
-                (block_dir / "previous_error.txt").write_text(
-                    _tg.format_squeeze_request(block_name, need))
-            except OSError:
-                return cur
-            write_graph_event(_pr(state), "Throughput Squeeze", "llm_start", {
-                "block": block_name, "round": rnd,
-                "measured": need["measured_cyc_per_op"],
-                "peak": need["peak_cyc_per_op"],
-            })
-            rgen = await generate_rtl(block, attempt + rnd,
-                                      callbacks=_callbacks(state))
-            improved = False
-            if not rgen.get("error"):
-                new_sim = await asyncio.to_thread(
-                    run_simulation, block, rtl_path, tb_path, attempt)
-                new_meas = ((new_sim or {}).get("throughput") or {}).get(
-                    "measured_cyc_per_op")
-                ok = (bool(new_sim.get("passed")) and new_meas is not None
-                      and (best_measured is None or new_meas < best_measured))
-                if ok:
-                    # RTL changed -> re-confirm byte-exact equivalence.
-                    eqr = await asyncio.to_thread(
-                        _run_equiv, block_name, rtl_path, _pr(state))
-                    if eqr.get("ran") and (
-                        eqr.get("failed_closed")
-                        or (not eqr.get("passed") and not eqr.get("skipped"))
-                    ):
-                        ok = False
-                        log(f"  [SQUEEZE] {block_name}: faster RTL broke "
-                            "equivalence -- reverting", YELLOW)
-                if ok:
-                    improved = True
-                    log(f"  [SQUEEZE] {block_name}: improved {best_measured} -> "
-                        f"{new_meas} cyc/op (peak {need['peak_cyc_per_op']})",
-                        GREEN)
-                    cur = new_sim
-                    best_measured = new_meas
-                    span.set_attribute("throughput_squeezed", True)
-                    # keep best_result.json + throughput fact in sync with the
-                    # kept RTL (rtl_sha1 gates the reuse-skip logic).
-                    try:
-                        (block_dir / "best_result.json").write_text(json.dumps({
-                            "sim_passed": True, "attempt": attempt,
-                            "tests_passed": new_sim.get("tests_passed", 0),
-                            "tests_total": new_sim.get("tests_total", 0),
-                            "coverage": new_sim.get("coverage"),
-                            "throughput": new_sim.get("throughput"),
-                            # dv-hardening-10 + C5: full pass provenance
-                            # (RTL + TB + contract), same as the sim node.
-                            **_pass_provenance(
-                                _pr(state), block_name, rtl_path, tb_path),
-                        }))
-                    except OSError:
-                        pass
-            write_graph_event(_pr(state), "Throughput Squeeze", "llm_end", {
-                "block": block_name, "round": rnd, "improved": improved,
-                "measured": best_measured,
-            })
-            if not improved:
-                # a non-improving / failing / equiv-breaking attempt: restore the
-                # last good RTL and stop (the worker won't do better next round).
-                try:
-                    shutil.copyfile(backup, rtl_path)
-                except OSError:
-                    pass
-                break
-            need = _tg.squeeze_needed(_pr(state), block_name, best_measured)
-            if need is None:
-                break  # reached peak x1.1 -- done
-        try:
-            if backup.exists():
-                backup.unlink()
-        except OSError:
-            pass
-        return cur
-    except Exception as _se:  # noqa: BLE001 - squeeze is best-effort, never blocks
-        log(f"  [SQUEEZE] {block_name}: skipped ({_se})", YELLOW)
-        return sim_result
-
-
-# ---------------------------------------------------------------------------
-# Node: generate_testbench  (with simulation + local TB fix loop)
-# ---------------------------------------------------------------------------
-
 async def generate_testbench_node(state: BlockState) -> dict:
     """Generate testbench, run simulation, and fix TB locally on failure.
 
@@ -2495,7 +2179,6 @@ async def generate_testbench_node(state: BlockState) -> dict:
     Only escalates to the diagnose lead for failures that appear to be
     RTL bugs (wrong computation, stuck signals, etc.).
     """
-    _guard_rtl_phase(state, "generate_testbench_node")
     block = state["current_block"]
     block_name = block["name"]
     attempt = state["attempt"]
@@ -2570,8 +2253,13 @@ async def generate_testbench_node(state: BlockState) -> dict:
                                   "reason": "contract_port_mismatch",
                                   "errors": _port_errors[:8],
                               })
+            # PHASE = "conformance", NOT "sim": this gate FAILS BEFORE any
+            # testbench is generated, so there is no simulation, no VCD and no
+            # WaveKit audit. Labelling it "sim" sent 3/3 diagnosis agents
+            # hunting for waveforms that cannot exist -- they then blamed the
+            # engine for the missing artifacts.
             return {"tb_path": str(tb_path_obj), "sim_passed": False,
-                    "phase": "sim", "force_regen_tb": False,
+                    "phase": "conformance", "force_regen_tb": False,
                     "step_log_paths": existing_logs}
 
     # --- CONTRACT-CONFORMANCE stage: check + repair the block's PORT NAMES ---
@@ -2621,39 +2309,17 @@ async def generate_testbench_node(state: BlockState) -> dict:
                 YELLOW)
             _conform = {}
     if _conform.get("ran"):
-        _renames = _conform.get("renames") or {}
-        _chans = _conform.get("rename_channels") or {}
-        for _old, _new in _renames.items():
-            log(f"  [CONFORM] renamed {_old} -> {_new} "
-                f"(contract: channel {_chans.get(_old) or '?'})", YELLOW)
-        _tbrep = _conform.get("tb") or {}
-        if _tbrep.get("changed"):
-            log(f"  [CONFORM] {block_name}: rewrote "
-                f"{sum((_tbrep.get('applied') or {}).values())} testbench DUT "
-                f"reference(s) to match "
-                f"(backup at {Path(tb_path_obj).name}.pre_portrepair)", YELLOW)
-        if _renames and _tbrep.get("needs_regen"):
-            _conform_force_tb = True
-            log(f"  [CONFORM] {block_name}: the testbench still mentions "
-                f"{', '.join(_tbrep['residual'])} in a form this stage will "
-                f"NOT rewrite blind (a generated TB drives getattr(dut, "
-                f"<name-string>) and keys its model stimulus with the same "
-                f"strings) -- REGENERATING the testbench against the repaired "
-                f"RTL", YELLOW)
+        _renames: dict = {}
         _record_block_conformance(_pr(state), block_name, _conform)
-        if _renames:
-            log(f"  [CONFORM] {block_name}: repaired {len(_renames)} "
-                f"contract deviation(s) in the generated RTL", YELLOW)
         if _conform.get("ok"):
-            if not _renames:
-                log(f"  [CONFORM] {block_name}: ports match the contract "
-                    f"({_conform.get('checked_edges')} edge(s))", GREEN)
+            log(f"  [CONFORM] {block_name}: ports match the contract "
+                f"({_conform.get('checked_edges')} edge(s))", GREEN)
         else:
             _cf_n = _bump_conformance_failures(_pr(state), block_name)
             for _d in (_conform.get("deviations") or [])[:8]:
                 log(f"  [CONFORM] {block_name}: {_d}", RED)
             log(f"  [CONFORM] {block_name}: RTL does NOT conform to the "
-                f"interface contract after repair "
+                f"interface contract "
                 f"({_conform.get('after_missing')} missing, failure "
                 f"{_cf_n}/{_CONFORMANCE_MAX_FAILURES}) -- FAILING before "
                 f"TB/sim; a deviating block must not reach integration", RED)
@@ -2663,8 +2329,7 @@ async def generate_testbench_node(state: BlockState) -> dict:
                 (_bd / "previous_error.txt").write_text(
                     "DETERMINISTIC CONTRACT-CONFORMANCE FAILURE (no sim was "
                     "run). The RTL does not expose the ports the FROZEN "
-                    "interface contract declares, and the deviation is not one "
-                    "the engine can rename unambiguously. Regenerate the RTL "
+                    "interface contract declares. Regenerate the RTL "
                     "with these EXACT port names:\n\n"
                     + _conform.get("feedback", ""), encoding="utf-8")
             except OSError:
@@ -2678,17 +2343,47 @@ async def generate_testbench_node(state: BlockState) -> dict:
                                       _conform.get("deviations") or [])[:8],
                                   "consecutive_failures": _cf_n,
                               })
+            _lead_cleared = False
             if _cf_n >= _CONFORMANCE_MAX_FAILURES:
-                # Cap: regeneration is not converging on the contract. PARK
-                # with the exact expected names rather than burn the rest of
-                # the attempt budget rediscovering the same deviation.
-                _park_conformance_unrepairable(state, block_name, _conform,
-                                               _cf_n)
+                # Cap: regeneration is not converging on the contract. The
+                # chip lead decides (WP-74); a human park only if it cannot.
+                _decision = await _park_conformance_unrepairable(
+                    state, block_name, _conform, _cf_n)
                 _reset_conformance_failures(_pr(state), block_name)
-            return {"tb_path": str(tb_path_obj), "sim_passed": False,
-                    "phase": "sim", "force_regen_tb": False,
-                    "conformance_renames": _renames,
-                    "step_log_paths": existing_logs}
+                _lead_action = str(_decision.get("action", ""))
+                if _lead_action == "retry":
+                    # Re-check once after the chip lead's edits (RTL or contract).
+                    _conform = await asyncio.to_thread(
+                        run_conformance_stage, _pr(state), block_name, rtl_path,
+                        _sibs, str(tb_path_obj),
+                    )
+                    _record_block_conformance(_pr(state), block_name, _conform)
+                    if _conform.get("ran") and _conform.get("ok"):
+                        log(f"  [CONFORM] {block_name}: conforms after the chip "
+                            f"lead's repair ({_conform.get('checked_edges')} "
+                            "edge(s))", GREEN)
+                        _lead_cleared = True
+                    else:
+                        for _d in (_conform.get("deviations") or [])[:8]:
+                            log(f"  [CONFORM] {block_name}: {_d}", RED)
+                        log(f"  [CONFORM] {block_name}: still deviating after the "
+                            "retry -- the block fails this attempt; the next "
+                            "entry re-checks (and parks again after two more "
+                            "failures)", RED)
+                elif _lead_action == "proceed":
+                    log(f"  [CONFORM] {block_name}: chip lead chose `proceed` -- "
+                        "the deviation stays recorded; integration decides "
+                        "whether the chip top can be assembled", YELLOW)
+                    _lead_cleared = True
+                # any other answer (abort, none): the block fails this attempt
+                # exactly as before; the node re-checks on its next entry.
+            if not _lead_cleared:
+                # PHASE = "conformance" (see the width gate above): pre-TB,
+                # pre-sim, no waveform exists.
+                return {"tb_path": str(tb_path_obj), "sim_passed": False,
+                        "phase": "conformance", "force_regen_tb": False,
+                        "conformance_renames": _renames,
+                        "step_log_paths": existing_logs}
         _reset_conformance_failures(_pr(state), block_name)
     elif _conform_on and _conform.get("reason"):
         log(f"  [CONFORM] {block_name}: NOT RUN -- {_conform['reason']}",
@@ -2704,11 +2399,10 @@ async def generate_testbench_node(state: BlockState) -> dict:
         # stale by construction, so it also forces regeneration (the reuse
         # branches below key on freshness, which a rename does not change).
         force_regen = state.get("force_regen_tb", False) or _conform_force_tb
-        if not force_regen and (
-            (state.get("preserve_testbench") and tb_path_obj.exists()) or
-            (attempt == 1 and tb_path_obj.exists() and _file_is_fresh(tb_path_obj, state))
-        ):
-            log(f"  [TB] Using existing (fresh): {block['testbench']}", GREEN)
+        if (not force_regen and state.get("preserve_testbench")
+                and tb_path_obj.exists()):
+            log(f"  [TB] Keeping the testbench (diagnosis: RTL-side fix): "
+                f"{block['testbench']}", GREEN)
         else:
             log("  [TB] Generating cocotb testbench...", YELLOW)
             try:
@@ -2746,7 +2440,8 @@ async def generate_testbench_node(state: BlockState) -> dict:
                 f"{f' (TB fix #{sim_attempt})' if sim_attempt > 0 else ''}...",
                 YELLOW)
             sim_result = await asyncio.to_thread(
-                run_simulation, block, rtl_path, tb_path, attempt
+                run_simulation, block, rtl_path, tb_path, attempt,
+                project_root=_pr(state),
             )
 
             if sim_result["passed"]:
@@ -2757,8 +2452,7 @@ async def generate_testbench_node(state: BlockState) -> dict:
                 span.set_attribute("passed", True)
                 span.set_attribute("tb_fixes", sim_attempt)
 
-                best_path = block_dir / "best_result.json"
-                best_path.write_text(json.dumps({
+                _db(_pr(state)).set_result(block_name, "best", {
                     "sim_passed": True,
                     "attempt": attempt,
                     "tests_passed": sim_result.get("tests_passed", 0),
@@ -2774,7 +2468,7 @@ async def generate_testbench_node(state: BlockState) -> dict:
                     # burned attempts against changed RTL that never re-ran;
                     # a contract widening left a stale-era pass honored forever).
                     **_pass_provenance(_pr(state), block_name, rtl_path, tb_path),
-                }))
+                })
                 break
 
             sim_log = sim_result.get("log", "")
@@ -2848,44 +2542,6 @@ async def generate_testbench_node(state: BlockState) -> dict:
 
         span.set_attribute("sim_passed", sim_passed)
 
-        # RTL<->model byte-exact EQUIVALENCE GATE (fix #1 / A-Fix 5 / B3).
-        # Delegated to the SHARED harness gate (orchestrator.harness.verify.
-        # run_block_equiv_gate) so the CLI (`coresmith verify rtl`) and this node
-        # apply the IDENTICAL check -- parity by construction -- with the same
-        # fail-closed + harness-error-2x-retry semantics (commits 5/8). The
-        # per-block cocotb TB is LLM-authored and can be weakened; this
-        # engine-run check drives generated Verilog and the Amaranth block model
-        # on the same seeded vectors and asserts byte-exact. It SKIPs (never
-        # false-passes) on a non-AXIS interface / no deterministic reference;
-        # ran=False means the gate does not apply (equiv off / block-goldens off)
-        # -> the sim verdict stands.
-        if sim_passed and rtl_path:
-            from orchestrator.harness.verify import run_block_equiv_gate as _run_equiv
-            _eqr = await asyncio.to_thread(
-                _run_equiv, block_name, rtl_path, _pr(state),
-            )
-            if _eqr.get("ran"):
-                if _eqr.get("failed_closed") or (
-                    not _eqr.get("passed") and not _eqr.get("skipped")
-                ):
-                    sim_passed = False
-                    log(f"  [EQUIV] RTL != model -- FAIL: "
-                        f"{str(_eqr.get('reason', ''))[:160]}", RED)
-                    if _eqr.get("prev_error_text"):
-                        try:
-                            (block_dir / "previous_error.txt").write_text(
-                                _eqr["prev_error_text"]
-                            )
-                        except OSError:
-                            pass
-                    span.set_attribute("equiv_passed", False)
-                elif _eqr.get("skipped"):
-                    log(f"  [EQUIV] skipped ({_eqr.get('reason', '')})", YELLOW)
-                else:
-                    log(f"  [EQUIV] RTL == model byte-exact "
-                        f"({_eqr.get('checked_vectors', 0)} vectors)", GREEN)
-                    span.set_attribute("equiv_passed", True)
-
         # BRANCH-PARITY SMOKE (rung3 split-brain backstop). When the RTL still
         # carries a conditional-compilation region that survived the functional-
         # ifdef lint (i.e. debug/assertion-only or a macro-module split), rebuild
@@ -2939,8 +2595,8 @@ async def generate_testbench_node(state: BlockState) -> dict:
             try:
                 from orchestrator.state_store.trust import check_oracle_manifest
                 _ocheck = check_oracle_manifest(_pr(state))
-            except Exception:  # noqa: BLE001
-                _ocheck = {"ok": True}
+            except Exception as exc:  # noqa: BLE001
+                _ocheck = {"ok": False, "violation": {"detail": f"Oracle baseline check failed: {exc}"}}
             if not _ocheck.get("ok"):
                 sim_passed = False
                 _viol = _ocheck.get("violation") or {}
@@ -2954,19 +2610,13 @@ async def generate_testbench_node(state: BlockState) -> dict:
                     pass
                 span.set_attribute("oracle_tamper", True)
 
-        # v3 Section 4: bounded post-DV throughput SQUEEZE. Only when the block
-        # passed EVERY gate (functional + coverage + throughput + equiv + parity
-        # + oracle) but its measured cyc/op is still above the roofline PEAK x
-        # 1.1 -- ask the worker to close the gap, re-verify (DV + equiv +
-        # measurement), keep the better result. Bounded + fail-open.
-        if sim_passed and rtl_path:
-            sim_result = await _maybe_squeeze_throughput(
-                state, block, block_name, rtl_path, tb_path, attempt,
-                sim_result, block_dir, span,
-            )
 
-    # Write sim error for diagnose if failed
-    if not sim_passed and sim_result:
+    # Write sim error for diagnose if failed -- but ONLY when the sim loop
+    # itself failed. The equiv / branch-parity / oracle gates above flip
+    # sim_passed on a PASSING sim_result after writing their own actionable
+    # report; overwriting it with the tail of a passing sim log leaves
+    # diagnose with no failure evidence at all.
+    if not sim_passed and sim_result and sim_result.get("passed") is not True:
         sim_log = sim_result.get("log", "")
         (block_dir / "previous_error.txt").write_text(sim_log[-5000:])
 
@@ -3063,19 +2713,30 @@ def _ppa_waivers_path(project_root: str) -> Path:
     return Path(project_root) / ".coresmith" / "ppa_waivers.json"
 
 
-def _ppa_tooling_waived(project_root: str) -> bool:
+def _ppa_tooling_waived(project_root: str, run_key: float | None = None) -> bool:
     """True once the operator has accepted an unmeasurable (yosys-absent) PPA
-    gate for this run (A-Fix 2f) -- so we PARK at most once per run."""
+    gate for this run (A-Fix 2f) -- so we PARK at most once per run.
+
+    The waiver file outlives the process, so ``run_key`` (the run's
+    ``pipeline_run_start``) scopes it: a waiver recorded by an EARLIER run does
+    not silently suppress the park in every future run. ``run_key=None`` keeps
+    the unscoped behavior for callers with no run context."""
     p = _ppa_waivers_path(project_root)
     if not p.exists():
         return False
     try:
-        return bool(json.loads(p.read_text()).get("tooling_missing_accepted"))
+        data = json.loads(p.read_text())
     except (OSError, json.JSONDecodeError):
         return False
+    if not data.get("tooling_missing_accepted"):
+        return False
+    if run_key is None:
+        return True
+    return str(data.get("run", "")) == str(run_key)
 
 
-def _record_ppa_tooling_waiver(project_root: str, block_name: str) -> None:
+def _record_ppa_tooling_waiver(project_root: str, block_name: str,
+                               run_key: float | None = None) -> None:
     """Persist the operator's 'proceed' on an unmeasurable PPA gate."""
     p = _ppa_waivers_path(project_root)
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -3086,12 +2747,17 @@ def _record_ppa_tooling_waiver(project_root: str, block_name: str) -> None:
         except (OSError, json.JSONDecodeError):
             data = {}
     data["tooling_missing_accepted"] = True
+    if data.get("run") != run_key:
+        data["waived_at_block"] = block_name
     data.setdefault("waived_at_block", block_name)
+    # Scope the waiver to THIS run (see _ppa_tooling_waived).
+    data["run"] = run_key
     p.write_text(json.dumps(data, indent=2))
 
 
 def _ppa_should_park_tooling_missing(
-    project_root: str, ppa_ok: bool | None, ppa_meta: dict | None
+    project_root: str, ppa_ok: bool | None, ppa_meta: dict | None,
+    run_key: float | None = None,
 ) -> bool:
     """A-Fix 2f decision (pure): PARK when the deterministic PPA gate could not
     run because its tooling (yosys) is absent, under the STRICT profile, and it
@@ -3111,7 +2777,7 @@ def _ppa_should_park_tooling_missing(
     ensure_applied()
     if resolve_profile() != "strict":
         return False
-    return not _ppa_tooling_waived(project_root)
+    return not _ppa_tooling_waived(project_root, run_key)
 
 
 def _park_ppa_unmeasurable(state: BlockState, block_name: str) -> None:
@@ -3145,7 +2811,8 @@ def _park_ppa_unmeasurable(state: BlockState, block_name: str) -> None:
             "not re-ask."
         ),
     })
-    _record_ppa_tooling_waiver(pr, block_name)
+    _record_ppa_tooling_waiver(pr, block_name,
+                               state.get("pipeline_run_start") or None)
 
 
 def _evaluate_ppa_gate(
@@ -3228,11 +2895,11 @@ def _evaluate_ppa_gate(
     # Chip-lead uarch_feasibility override (the marker the mem_price gate
     # honors): defer the BUDGET dimensions (area + logic-FF) of this post-synth
     # gate too, instead of re-failing a storage cost the lead already accepted.
-    # Hard FF ceiling + timing still gate.
+    # Hard FF ceiling + timing still gate. Scoped exactly like mem_price -- only
+    # an [area] override waives an area/FF budget; an [interface] one does not.
     _budget_overridden = bool(
         ppa_honor_feas_override_enabled()
-        and (Path(project_root) / ".coresmith" / "blocks" / block_name
-             / "uarch_feasibility_override").exists()
+        and _feas_override_covers(project_root, block_name, "area")
     )
 
     # rung2 defect 2: seed meta with the parsed budgets so a persisted
@@ -3240,7 +2907,7 @@ def _evaluate_ppa_gate(
     _meta: dict = {"budget_ff": ff_budget, "budget_area_um2": area_budget}
     if _budget_overridden:
         _meta["feas_override_deferred"] = True
-        log(f"  [PPA] {block_name}: uarch_feasibility_override present -- "
+        log(f"  [PPA] {block_name}: uarch_feasibility_override covers [area] -- "
             f"budget dimensions (area/logic-FF) DEFERRED to the die-level "
             f"rollup (hard FF ceiling + timing still gate)", YELLOW)
 
@@ -3269,7 +2936,14 @@ def _evaluate_ppa_gate(
                 )
             except OSError:
                 pass
-        (block_dir / "previous_error.txt").write_text(_err)
+        # WP-11: only a MEASURED timing failure is a rework reason; budget
+        # divergence is advisory and must not poison a later retry's
+        # previous_error.txt.
+        _timing_failed = any(
+            (c or {}).get("metric") == "wns_ns" and (c or {}).get("passed") is False
+            for c in (checks or []))
+        (block_dir / ("previous_error.txt" if _timing_failed
+                      else "ppa_advisory.txt")).write_text(_err)
         return False, reasons, dict(_meta)
 
     # HOT-PATCH (chip-lead): honor CORESMITH_SYNTH_TIMEOUT_S so the generic
@@ -3416,11 +3090,15 @@ def _evaluate_ppa_gate(
                     ])
 
     sta: dict = {}
+    _sta_dir = Path(project_root) / "syn" / "output" / block_name
     if synth_result:
         sta = run_pre_layout_sta(
             synth_result.get("netlist_path", ""), synth_result.get("sdc_path", ""),
             synth_result.get("liberty_path", ""), block_name,
+            report_path=str(_sta_dir / f"{block_name}_sta.rpt"),
         ) or {}
+        _meta["sta_report_path"] = str(_sta_dir / f"{block_name}_sta.rpt")
+        _meta["tns_ns"] = sta.get("tns_ns")
     # pdk-fixes-1: surface the pre-layout WNS so it lands in the ppa_history
     # wns_ns column (it has always been NULL) and so a LOUD sta_error (STA ran
     # for a block that has a netlist but produced no parseable timing) is
@@ -3486,6 +3164,7 @@ def _evaluate_ppa_gate(
         mf = run_maxfanout_buffered_sta(
             rtl_path, _liberty_p, block_name, _mf_period, _clk,
             timeout_s=_synth_timeout, extra_sources=_mem_lib_srcs,
+            report_dir=_sta_dir,
         )
         if mf is not None:
             _meta["wns_ns_base_unbuffered"] = _eff_wns
@@ -3545,6 +3224,14 @@ def _evaluate_ppa_gate(
     return _flag(verdict.reasons, verdict.checks)
 
 
+def _resolve_probe_top(design_name: str, top_txt: str, project_root: str = "") -> str:
+    """Resolve a chip probe only from the validated project manifest."""
+    from orchestrator.harness.top_module import CandidateError, resolve_top
+    if not project_root:
+        raise CandidateError("Chip probe requires a project candidate manifest")
+    return resolve_top(project_root)[0]
+
+
 def _chip_top_synth_ok(
     project_root: str,
     design_name: str,
@@ -3561,6 +3248,7 @@ def _chip_top_synth_ok(
     disabled, yosys is absent, or sources are missing -- "cannot judge" never
     fails the chip.
     """
+    from orchestrator.harness.top_module import CandidateError, candidate_for_inputs
     from orchestrator.langgraph.ppa_check import (
         chip_top_min_cells as _cell_floor,
     )
@@ -3573,129 +3261,16 @@ def _chip_top_synth_ok(
     from orchestrator.langgraph.ppa_check import (
         synth_cell_gate_enabled as _cell_gate_on,
     )
-    if not _cell_gate_on() or not top_rtl_path or not Path(top_rtl_path).exists():
+    try:
+        rec = candidate_for_inputs(project_root, top_rtl_path, block_rtl_paths)
+        if rec["defines"] != "none" or rec["parameters"] != "none":
+            raise CandidateError("Cell probe does not support the candidate configuration")
+    except CandidateError as exc:
+        return False, str(exc)
+    if not _cell_gate_on():
         return True, ""
-    sources = [top_rtl_path] + [p for p in (block_rtl_paths or {}).values() if p]
-    try:
-        _all_rtl = "\n".join(
-            Path(p).read_text() for p in sources if p and Path(p).exists()
-        )
-        from orchestrator.langgraph.sram_wrapper import (
-            uses_wrapper as _uses_wrapper,
-        )
-        from orchestrator.langgraph.sram_wrapper import (
-            wrapper_lib_path as _wrapper_lib_path,
-        )
-        if _uses_wrapper(_all_rtl):
-            sources.append(_wrapper_lib_path())
-    except Exception:  # noqa: BLE001 - best effort
-        pass
-    import tempfile as _tf
-    _synth_timeout = int(
-        os.environ.get("CORESMITH_SYNTH_TIMEOUT_S", "300") or "300"
-    )
-    try:
-        from orchestrator.langgraph.integration_helpers import (
-            _dedup_module_sources,
-            _drop_include_provided_sources,
-        )
-        # SYNTH-SCOPED include-provision dedup: yosys EXPANDS `include`s at
-        # read time, so a listed file that another source `include`s
-        # double-defines its modules -> MODDUP. Scoped HERE (not inside
-        # _dedup_module_sources) because the sim assembly must keep the
-        # explicit files: a legacy top may reference block modules directly
-        # while a non-top source carries preprocessor-guarded `include`s the
-        # sim never expands -- dropping the files there MODMISSINGs the sim.
-        _synth_srcs = _drop_include_provided_sources(sources)
-        _dd = Path(_tf.mkdtemp(prefix="chiptop_synth_"))
-        deduped = _dedup_module_sources(_synth_srcs, _dd)
-    except Exception:  # noqa: BLE001 - fall back to raw sources
-        deduped = sources
-    # F1 (canonical chip_top filelist): publish the deduped one-file-per-
-    # module source set the gate actually synthesizes, so downstream tooling
-    # (backend P&R, external graders) consumes an authoritative list instead
-    # of globbing rtl/**/*.v -- the run tree can carry DUPLICATE module copies
-    # (a top/ vs integration/ wrapper variant, an inline vs standalone block),
-    # and a naive glob then MODDUP-collides or picks a stale/stub copy.
-    try:
-        _flist = Path(project_root) / ".coresmith" / "chip_top_sources.f"
-        _flist.parent.mkdir(parents=True, exist_ok=True)
-        _flist.write_text("\n".join(str(_p) for _p in deduped) + "\n")
-    except OSError:
-        pass
-    # C24: yosys `hierarchy -top` needs the ACTUAL top module of the assembled
-    # chip_top, NOT the DESIGN NAME. The deterministic Caravel assembly's top
-    # module is `user_project_wrapper` (or openframe_project_wrapper); passing
-    # design_name (e.g. a `<design>_qspi_rom_top`) made yosys fail "Module <design>
-    # not found" and falsely report EVERY chip as un-synthesizable at the final
-    # gate. Resolve the real top from the assembled RTL: prefer a Caravel
-    # wrapper module, else the last module declared (the top is conventionally
-    # last), else the parsed first module, else fall back to design_name.
-    _top_name = design_name
-    try:
-        _top_txt = Path(top_rtl_path).read_text(errors="ignore")
-        import re as _re24
-        _mods = _re24.findall(r"^\s*module\s+([A-Za-z_]\w*)", _top_txt, _re24.MULTILINE)
-        for _pref in ("openframe_project_wrapper", "user_project_wrapper"):
-            if _pref in _mods:
-                _top_name = _pref
-                break
-        else:
-            if _mods:
-                _top_name = _mods[-1]
-    except OSError:
-        pass
-    # F3 (audit): a run may DELIVER a separate locked-ABI top at
-    # rtl/chip_top.v (e.g. the ppab_dut chassis contract) that is NOT part of
-    # the assembled manifest -- two near-equivalent tops that silently drift
-    # apart (the reference codec encoder shipped `ppab_dut` while chip_top_sources.f
-    # rooted at `reference_codec_enc_top`). When such a file exists outside the deduped
-    # set and its module names are all novel, co-elaborate it, publish it in
-    # the canonical filelist, and probe it as a SECOND top below so the gate
-    # covers the artifact that actually gets graded. Either way record a
-    # carried-forward defect naming the dual-top drift risk.
-    _delivered_top = None
-    try:
-        import re as _re3
-        _dpath = Path(project_root) / "rtl" / "chip_top.v"
-        _dedup_resolved = {str(Path(_p).resolve()) for _p in deduped}
-        if _dpath.exists() and str(_dpath.resolve()) not in _dedup_resolved:
-            _mod_re = _re3.compile(r"^\s*module\s+([A-Za-z_]\w*)", _re3.MULTILINE)
-            _d_mods = _mod_re.findall(_dpath.read_text(errors="ignore"))
-            _defined: set = set()
-            for _p in deduped:
-                try:
-                    _defined.update(
-                        _mod_re.findall(Path(_p).read_text(errors="ignore")))
-                except OSError:
-                    continue
-            _collisions = [m for m in _d_mods if m in _defined]
-            if _d_mods and not _collisions:
-                deduped = list(deduped) + [str(_dpath)]
-                try:
-                    _flist.write_text(
-                        "\n".join(str(_p) for _p in deduped) + "\n")
-                except (OSError, NameError):
-                    pass
-                _delivered_top = _d_mods[-1]
-                _drift_detail = (
-                    f"delivered ABI top `{_delivered_top}` ({_dpath}) is not "
-                    "part of the assembled manifest -- co-elaborated + probed "
-                    "as a second top; unify on ONE canonical top (a locked-ABI "
-                    "wrapper around the integration module)")
-            else:
-                _drift_detail = (
-                    f"delivered top file {_dpath} redefines manifest modules "
-                    f"{_collisions[:4]} -- cannot co-elaborate, so its drift "
-                    "vs the assembled manifest is UNCHECKED")
-            record_carried_forward_defect(project_root, {
-                "gate": "chip_top_synth",
-                "kind": "canonical_top_drift",
-                "unmodeled": str(_dpath),
-                "detail": _drift_detail,
-            })
-    except Exception:  # noqa: BLE001 - detection is best-effort
-        _delivered_top = None
+    deduped, _top_name = rec["sources"], rec["top_module"]
+    _synth_timeout = int(os.environ.get("CORESMITH_SYNTH_TIMEOUT_S", "300") or "300")
     # C27: probe from the PROJECT ROOT so project-relative $readmemh init
     # files (cs_sram/cs_rom INIT_FILE="inputs/...") resolve; the deduped
     # source copies live in a temp dir but yosys resolves $readmemh against
@@ -3725,31 +3300,6 @@ def _chip_top_synth_ok(
             f"wrapper won assembly dedup). A synthesizable-but-empty top "
             f"is not a working chip_top."
         )
-    # F3: the DELIVERED ABI top (rtl/chip_top.v) must synthesize too -- it is
-    # the artifact that gets graded, and it can drift from the assembled
-    # manifest independently.
-    if _delivered_top and _delivered_top != _top_name:
-        probe2 = _probe_multi(
-            deduped, _delivered_top, timeout_s=_synth_timeout,
-            cwd=project_root,
-        )
-        if probe2 is not None:
-            if probe2.get("elaborated") is False:
-                return False, (
-                    f"delivered ABI top `{_delivered_top}` (rtl/chip_top.v) "
-                    f"did not techmap: {probe2.get('reason', '')} -- the "
-                    "delivered top drifted from the assembled manifest")
-            _cc2 = probe2.get("cell_count")
-            if _cc2 is not None and _cc2 > _ceil:
-                return False, (
-                    f"delivered ABI top `{_delivered_top}` cell count "
-                    f"{_cc2:,} exceeds the max-cell ceiling {_ceil:,}")
-            if _cc2 is not None and _floor > 0 and _cc2 < _floor:
-                return False, (
-                    f"delivered ABI top `{_delivered_top}` collapsed to "
-                    f"{_cc2:,} gate cells (< floor {_floor:,}) -- a "
-                    "synthesizable-but-empty delivered top is not a working "
-                    "chip_top")
     return True, ""
 
 
@@ -3783,20 +3333,21 @@ def _resolve_run_die_budget(project_root: str) -> tuple[float | None, str]:
         prd=prd, requirements=reqs, ers_technology_text=ers_tech)
 
 
-def _container_block_names(project_root: str, block_names: list) -> set:
-    """Blocks whose measured per-block synth CONTAINS other listed blocks.
+def _container_leaf_map(project_root: str, block_names: list) -> dict:
+    """Map each container block -> the set of listed blocks its RTL contains.
 
-    An integration-top block built as a self-contained source (its RTL --
-    directly or via one level of ``include`` -- instantiates other listed
-    blocks) synthesizes FLAT: its measured area already includes the leaves.
+    Same detection as ``_container_block_names`` (whose result is this map's
+    key set); the per-container membership is what lets the die rollup
+    de-duplicate every container against ITS OWN leaves instead of collapsing
+    all containers into one group and dropping the smaller ones.
     """
     inc_re = re.compile(r'^\s*`include\s+"([^"]+)"', re.MULTILINE)
-    out: set = set()
+    out: dict = {}
     for name in block_names:
         try:
-            br = json.loads(
-                (Path(project_root) / ".coresmith" / "blocks" / name
-                 / "best_result.json").read_text())
+            br = _db(project_root).result(name, "best")
+            if not br:
+                continue
             # Resolve the block's measured RTL: rtl_target when recorded;
             # otherwise glob rtl/**/<name>.v and prefer the file whose sha1
             # matches best_result.rtl_sha1 (older runs record the hash but
@@ -3833,24 +3384,38 @@ def _container_block_names(project_root: str, block_names: list) -> set:
             continue
         if not text:
             continue
-        for other in block_names:
-            if other == name:
-                continue
-            if re.search(
-                rf"\b{re.escape(other)}\s+(?:#|[a-zA-Z_]\w*\s*\()", text
-            ):
-                out.add(name)
-                break
+        contained = {
+            other for other in block_names
+            if other != name and re.search(
+                rf"\b{re.escape(other)}\s+(?:#|[a-zA-Z_]\w*\s*\()", text)
+        }
+        if contained:
+            out[name] = contained
     return out
 
 
-def _subsume_container_items(items: list, containers: set) -> tuple:
+def _container_block_names(project_root: str, block_names: list) -> set:
+    """Blocks whose measured per-block synth CONTAINS other listed blocks.
+
+    An integration-top block built as a self-contained source (its RTL --
+    directly or via one level of ``include`` -- instantiates other listed
+    blocks) synthesizes FLAT: its measured area already includes the leaves.
+    """
+    return set(_container_leaf_map(project_root, block_names))
+
+
+def _subsume_container_items(items: list, containers: set,
+                             containment: dict | None = None) -> tuple:
     """Drop the double-count between flat container blocks and their leaves.
 
-    Returns ``(items, note)``: when both containers and leaves carry measured
-    area, keep whichever side is LARGER -- the honest design area is
-    max(flat container, sum-of-leaves), never their sum -- and drop the
-    other, with a note for the log/report.
+    Returns ``(items, note)``. With a ``containment`` map the resolution is
+    RECURSIVE: a container's honest area is max(flat container,
+    sum-of-its-direct-children), where a nested container child contributes
+    its RESOLVED max -- never its flat area PLUS its own leaves, which the
+    flat area already includes. Disjoint container tops resolve
+    independently instead of the design being reported as only the biggest
+    one. Without a ``containment`` map every container is assumed to cover
+    every leaf (single group, legacy behavior).
     ``CORESMITH_DIE_ROLLUP_CONTAINER_DEDUP=0`` restores the legacy sum.
     """
     if (os.environ.get("CORESMITH_DIE_ROLLUP_CONTAINER_DEDUP", "1")
@@ -3860,18 +3425,93 @@ def _subsume_container_items(items: list, containers: set) -> tuple:
     leaf = [i for i in items if i.name not in containers]
     if not cont or not leaf:
         return items, ""
-    cont_max = max(i.area_um2 for i in cont)
-    leaf_sum = sum(i.area_um2 for i in leaf)
-    if leaf_sum >= cont_max:
-        return leaf, (
-            f"container block(s) {sorted(i.name for i in cont)} subsumed by "
-            f"their leaves (flat {cont_max:,.0f} um2 <= sum-of-leaves "
-            f"{leaf_sum:,.0f} um2) -- not double-counted")
-    biggest = max(cont, key=lambda i: i.area_um2)
-    return [biggest], (
-        f"leaf blocks subsumed by flat container {biggest.name} "
-        f"({cont_max:,.0f} um2 >= sum-of-leaves {leaf_sum:,.0f} um2) -- "
-        f"not double-counted")
+    notes: list = []
+    kept: list = []
+    by_name = {i.name: i for i in items}
+    order = {i.name: n for n, i in enumerate(items)}
+
+    if not containment:
+        # Legacy: one group -- the biggest container vs every leaf.
+        top = max(cont, key=lambda i: i.area_um2)
+        leaf_sum = sum(i.area_um2 for i in leaf)
+        if leaf_sum >= top.area_um2:
+            kept.extend(leaf)
+            notes.append(
+                f"container block(s) {[top.name]} subsumed by "
+                f"their leaves (flat {top.area_um2:,.0f} um2 <= sum-of-leaves "
+                f"{leaf_sum:,.0f} um2) -- not double-counted")
+        else:
+            kept.append(top)
+            notes.append(
+                f"leaf blocks subsumed by flat container {top.name} "
+                f"({sorted(i.name for i in leaf)}: {top.area_um2:,.0f} "
+                f"um2 >= sum-of-leaves {leaf_sum:,.0f} um2) -- not "
+                f"double-counted")
+        kept.sort(key=lambda i: order.get(i.name, 0))
+        return kept, "; ".join(notes)
+
+    def _reach(name: str) -> set:
+        seen: set = set()
+        stack = list(containment.get(name) or ())
+        while stack:
+            n = stack.pop()
+            if n in seen or n == name:
+                continue
+            seen.add(n)
+            stack.extend(containment.get(n) or ())
+        return seen
+
+    claimed: set = set()
+
+    def _resolve(name: str, visiting: set) -> tuple:
+        """(kept_items, resolved_area) for the subtree rooted at ``name``."""
+        if name in visiting or name in claimed:
+            return [], 0.0  # cycle, or already claimed by a larger root
+        item = by_name.get(name)
+        children = containment.get(name) or ()
+        # Direct children only: a name also reachable through a SIBLING
+        # nested container is counted inside that sibling's resolution.
+        direct = [c for c in sorted(children)
+                  if not any(c in _reach(c2) for c2 in children if c2 != c)]
+        child_kept: list = []
+        child_area = 0.0
+        for c in direct:
+            k, a = _resolve(c, visiting | {name})
+            child_kept.extend(k)
+            child_area += a
+        if item is None:
+            return child_kept, child_area  # unmeasured container: pass through
+        if name not in containers or not child_kept:
+            return [item], item.area_um2
+        if child_area >= item.area_um2:
+            notes.append(
+                f"container block(s) {[name]} subsumed by "
+                f"their leaves (flat {item.area_um2:,.0f} um2 <= sum-of-leaves "
+                f"{child_area:,.0f} um2) -- not double-counted")
+            return child_kept, child_area
+        notes.append(
+            f"leaf blocks subsumed by flat container {name} "
+            f"({sorted(i.name for i in child_kept)}: {item.area_um2:,.0f} "
+            f"um2 >= sum-of-leaves {child_area:,.0f} um2) -- not "
+            f"double-counted")
+        return [item], item.area_um2
+
+    contained_anywhere: set = set()
+    for c in cont:
+        contained_anywhere |= _reach(c.name)
+    roots = [c for c in cont if c.name not in contained_anywhere]
+    if not roots:  # pathological containment cycle: legacy single group
+        return _subsume_container_items(items, containers, None)
+    for top in sorted(roots, key=lambda i: -i.area_um2):
+        k, _a = _resolve(top.name, set())
+        kept.extend(i for i in k if i.name not in {j.name for j in kept})
+        claimed.add(top.name)
+        claimed |= _reach(top.name)
+    # Containers never re-surface as standalone leaves.
+    claimed |= {c.name for c in cont}
+    kept.extend(i for i in leaf if i.name not in claimed)
+    kept.sort(key=lambda i: order.get(i.name, 0))
+    return kept, "; ".join(notes)
 
 
 def _die_cap_excludes_sram(project_root: str) -> bool:
@@ -3963,8 +3603,8 @@ def _measured_die_rollup(project_root: str, block_names: list):
     # FLAT elaboration of the leaves it instantiates already CONTAINS their
     # area -- summing both double-counts the design (0.250 flat top + 0.254
     # leaves rolled to 0.504 against a 0.337 budget the 0.254 design fits).
-    items, _subsume_note = _subsume_container_items(
-        items, _container_block_names(project_root, block_names))
+    _cmap = _container_leaf_map(project_root, block_names)
+    items, _subsume_note = _subsume_container_items(items, set(_cmap), _cmap)
     if _subsume_note:
         log(f"  [DIE-ROLLUP] {_subsume_note}", YELLOW)
     std_rollup = _mprice.evaluate_die_rollup(
@@ -4086,7 +3726,11 @@ def _run_gate_sim_gate(
 
     write_graph_event(_pr(state), "Gate Sim", "gate_result", {
         "block": block_name, "name": "gate_level_sim", "kind": "gate_sim",
-        "status": res.status, "passed": res.status == _gs.STATUS_PASS,
+        "status": res.status,
+        # WP-15: not_run/disabled is neither pass nor fail (38/38 leaf
+        # invocations logged passed=false while never having run).
+        "passed": (res.status == _gs.STATUS_PASS
+                   if res.status not in (_gs.STATUS_NOT_RUN, "disabled") else None),
         "cycles_compared": res.cycles_compared,
         "reason": res.reason,
     })
@@ -4097,7 +3741,7 @@ def _run_gate_sim_gate(
             f"({res.output_bits_compared:,} output bits)", GREEN)
         return (True, res.status, res.reason)
 
-    if res.status == _gs.STATUS_FAIL:
+    if res.status in (_gs.STATUS_FAIL, _gs.STATUS_BOUNDED):
         log(f"  [GATE-SIM] FAIL -- {res.reason}", RED)
         try:
             block_dir = Path(_pr(state)) / ".coresmith" / "blocks" / block_name
@@ -4122,87 +3766,8 @@ async def synthesize_node(state: BlockState) -> dict:
     are exhausted, the routing function sends failures to the diagnose
     lead for deeper analysis.
     """
-    _guard_rtl_phase(state, "synthesize_node")
     block = state["current_block"]
     block_name = block["name"]
-
-    # Honor CORESMITH_SKIP_SYNTH=1 so hosts with no Sky130 PDK can still
-    # complete RTL + sim.  Treat as a no-op success.
-    import os as _os
-    if _os.environ.get("CORESMITH_SKIP_SYNTH") == "1":
-        import sys as _sys
-        _loud = (f"  [SYNTH] !!! GATE DISABLED (CORESMITH_SKIP_SYNTH=1) for "
-                 f"{block_name} -- un-synthesizable RTL WILL NOT be caught")
-        log(_loud, RED)
-        print("=" * 78 + "\n" + _loud.strip() + "\n" + "=" * 78,
-              file=_sys.stderr, flush=True)
-        # rung2 defect 2: the PDK-free synthesizability probes (generic
-        # elaborate / cell-explosion / logic-depth / generic-FF-budget) need no
-        # PDK, so they MUST still run and GATE under SKIP_SYNTH -- otherwise
-        # SKIP_SYNTH silently hides an un-synthesizable design (the exact hole
-        # the synth-gate-default work closed). Pass require_gate_flag=False so
-        # they run even when CORESMITH_PPA_GATE is not seeded; yosys-absent
-        # falls into the tooling_missing park path below. Only area/WNS are
-        # genuinely unavailable here. Real probe metrics are recorded (was NULL).
-        ppa_ok, ppa_reasons, ppa_meta = _evaluate_ppa_gate(
-            _pr(state), block_name, state.get("rtl_path", ""), None,
-            require_gate_flag=False,
-        )
-        # rung3-fixes-1 (minor 4): the SKIP_SYNTH row references
-        # ppa_report.json, but the PDK-free probe only writes that file on a
-        # FAIL (via _evaluate_ppa_gate's _flag). On a PASS it never existed, so
-        # the scoreboard row pointed at a nonexistent report. Write the
-        # same-shape report from the probe metrics whenever the gate didn't
-        # already drop one -- the fail path keeps its richer {checks, reasons}
-        # report; the pass path now has a real file at the recorded path.
-        _skip_report_path = (
-            Path(_pr(state)) / ".coresmith" / "blocks" / block_name
-            / "ppa_report.json"
-        )
-        try:
-            _skip_report_path.parent.mkdir(parents=True, exist_ok=True)
-            if not _skip_report_path.exists():
-                _skip_report_path.write_text(json.dumps({
-                    "probe": "skip_synth",
-                    "ppa_ok": ppa_ok,
-                    "reasons": ppa_reasons or [],
-                    "checks": [],
-                    "ff": ppa_meta.get("ff"),
-                    "cells": ppa_meta.get("cells"),
-                    "mem_bits": ppa_meta.get("mem_bits"),
-                    "area_um2": ppa_meta.get("area_um2"),
-                    "elaborated": ppa_meta.get("elaborated"),
-                    "budget_ff": ppa_meta.get("budget_ff"),
-                    "budget_area_um2": ppa_meta.get("budget_area_um2"),
-                }, indent=2))
-        except OSError:
-            pass
-        _record_ppa_row(
-            _pr(state), block=block_name, attempt=state.get("attempt", 0),
-            source="gate", probe="skip_synth", ppa_ok=ppa_ok,
-            reasons=ppa_reasons or None,
-            cells=ppa_meta.get("cells"),
-            ff=ppa_meta.get("ff"),
-            mem_bits=ppa_meta.get("mem_bits"),
-            area_um2=ppa_meta.get("area_um2"),
-            wns_ns=ppa_meta.get("wns_ns"),
-            elaborated=ppa_meta.get("elaborated"),
-            budget_ff=ppa_meta.get("budget_ff"),
-            budget_area_um2=ppa_meta.get("budget_area_um2"),
-            report_path=str(_skip_report_path),
-        )
-        if _ppa_should_park_tooling_missing(_pr(state), ppa_ok, ppa_meta):
-            _park_ppa_unmeasurable(state, block_name)
-        return {"synth_success": True, "synth_gate_count": 0,
-                "ppa_ok": ppa_ok, "ppa_reasons": ppa_reasons,
-                # No yosys run -> no netlist -> nothing for the gate-level sim
-                # to simulate. Recorded explicitly (never blank) so the absence
-                # of a gate-sim verdict is visible downstream.
-                "gate_sim_ok": None, "gate_sim_status": "not_run",
-                "gate_sim_reason": "CORESMITH_SKIP_SYNTH=1 -- no netlist was "
-                                   "produced, so the gate netlist was never "
-                                   "simulated",
-                "phase": "synth"}
 
     rtl_path = state.get("rtl_path", "")
     if not rtl_path or not Path(rtl_path).exists():
@@ -4228,56 +3793,8 @@ async def synthesize_node(state: BlockState) -> dict:
         # raw log tail. The codec RD-core burned ~12 h on exactly this; the
         # detector + diagnosis already existed but were never wired.
         # CORESMITH_STORAGE_PRESYNTH_GATE=0 restores straight-to-yosys.
-        storage_gate_failed = False
-        if _os.environ.get("CORESMITH_STORAGE_PRESYNTH_GATE", "1").strip() != "0":
-            try:
-                from orchestrator.langgraph.rtl_storage_lint import (
-                    find_flat_packed_dynamic_storage,
-                    find_oversized_memory_arrays,
-                    format_lint_report,
-                    format_memory_tier_report,
-                )
-                _src = Path(rtl_path).read_text()
-                _rpt = find_flat_packed_dynamic_storage(_src)
-                # Section 5f/4a: register-tier memory over the SRAM threshold (or
-                # whose single-cycle flat read mux busts the period) flattens to a
-                # giant mux -- untimeable. Catch it structurally BEFORE synth, the
-                # same class the flat-packed gate catches. Priced against the run's
-                # target clock so an untimeable single-cycle read is caught too.
-                _period = 1000.0 / max(1.0, float(state.get("target_clock_mhz", 50.0)))
-                _mtr = find_oversized_memory_arrays(_src, period_ns=_period)
-                if not _rpt.ok:
-                    storage_gate_failed = True
-                    _msg = format_lint_report(_rpt, block=block_name)
-                    log(f"  [SYNTH] PRE-SYNTH STORAGE GATE failed "
-                        f"({len(_rpt.findings)} flat-packed reg(s) w/ dynamic "
-                        f"part-select) -- skipping yosys (would time out), "
-                        f"routing actionable fix to regen", RED)
-                    result = {
-                        "success": False, "gate_count": 0,
-                        "log": ("UNSYNTHESIZABLE -- pre-synth storage lint "
-                                "(yosys NOT run):\n\n" + _msg),
-                    }
-                    span.set_attribute("storage_gate_failed", True)
-                elif not _mtr.ok:
-                    storage_gate_failed = True
-                    _msg = format_memory_tier_report(_mtr, block=block_name)
-                    log(f"  [SYNTH] PRE-SYNTH MEMORY-TIER GATE failed "
-                        f"({len(_mtr.findings)} register-tier memor(y/ies) over "
-                        f"the SRAM threshold) -- skipping yosys (untimeable flat "
-                        f"read mux), routing macro-tier fix to regen", RED)
-                    result = {
-                        "success": False, "gate_count": 0,
-                        "log": ("UNSYNTHESIZABLE -- pre-synth memory-tier lint "
-                                "(yosys NOT run):\n\n" + _msg),
-                    }
-                    span.set_attribute("memory_tier_gate_failed", True)
-            except Exception as _e:  # never let the gate crash the node
-                log(f"  [SYNTH] pre-synth storage gate error: {_e}", RED)
-
         local_attempt = 0
-        for local_attempt in range(0 if storage_gate_failed
-                                   else (1 + MAX_LOCAL_RETRIES)):
+        for local_attempt in range(1 + MAX_LOCAL_RETRIES):
             log(f"  [SYNTH] Running Yosys synthesis"
                 f"{f' (local fix #{local_attempt})' if local_attempt > 0 else ''}...",
                 YELLOW)
@@ -4365,7 +3882,9 @@ async def synthesize_node(state: BlockState) -> dict:
         ppa_ok, ppa_reasons, ppa_meta = _evaluate_ppa_gate(
             _pr(state), block_name, rtl_path, result,
         )
-        if _ppa_should_park_tooling_missing(_pr(state), ppa_ok, ppa_meta):
+        if _ppa_should_park_tooling_missing(
+                _pr(state), ppa_ok, ppa_meta,
+                state.get("pipeline_run_start") or None):
             _park_ppa_unmeasurable(state, block_name)
 
     # --- POST-SYNTHESIS GATE-LEVEL SIMULATION (CORESMITH_GATE_SIM) ----------
@@ -4400,6 +3919,7 @@ async def synthesize_node(state: BlockState) -> dict:
         cells=(result or {}).get("gate_count"),
         area_um2=(result or {}).get("chip_area_um2"),
         wns_ns=ppa_meta.get("wns_ns"),
+        tns_ns=ppa_meta.get("tns_ns"),
         ppa_ok=ppa_ok, reasons=ppa_reasons or None,
         report_path=(result or {}).get("report_path", ""),
     )
@@ -4409,6 +3929,8 @@ async def synthesize_node(state: BlockState) -> dict:
         "synth_gate_count": gate_count,
         "ppa_ok": ppa_ok,
         "ppa_reasons": ppa_reasons,
+        "timing_ok": (None if ppa_meta.get("wns_ns") is None
+                      else bool(float(ppa_meta["wns_ns"]) >= 0.0)),
         "gate_sim_ok": gate_sim_ok,
         "gate_sim_status": gate_sim_status,
         "gate_sim_reason": gate_sim_reason,
@@ -4533,7 +4055,6 @@ async def diagnose_node(state: BlockState) -> dict:
     # instead of looping -- the diagnose node had already flagged needs_human.
     _wall_budget = float(os.environ.get("CORESMITH_BLOCK_WALL_BUDGET_S", "0") or 0)
     if _wall_budget > 0:
-        import json as _jw
         import time as _time
         _seen = block_dir / "_first_seen.txt"
         if not _seen.exists():
@@ -4562,7 +4083,7 @@ async def diagnose_node(state: BlockState) -> dict:
                     "is_testbench_bug": False, "local_fix_possible": False,
                     "constraints": [], "affected_blocks": [block_name],
                 }
-                (block_dir / "diagnosis.json").write_text(_jw.dumps(_wb, indent=2))
+                _db(_pr(state)).set_diagnosis(block_name, _wb, attempt=state["attempt"])
                 write_graph_event(_pr(state), "Diagnose Failure",
                                   "graph_node_exit", {
                     "block": block_name, "category": "WALL_BUDGET_EXCEEDED",
@@ -4595,26 +4116,50 @@ async def diagnose_node(state: BlockState) -> dict:
             "constraints": [],
             "affected_blocks": [],
         }
-        _ah_path = block_dir / "attempt_history.json"
-        _hist = _json.loads(_ah_path.read_text()) if _ah_path.exists() else []
-        _hist.append({
+        _db(_pr(state)).record_attempt(block_name, {
             "attempt": state["attempt"],
-            "phase": phase,
             "error": error_log[:500],
             "category": "SIM_TIMEOUT",
         })
-        _ah_path.write_text(_json.dumps(_hist, indent=2))
-        (block_dir / "diagnosis.json").write_text(_json.dumps(_to_diag, indent=2))
+        _hist = _db(_pr(state)).attempt_history(block_name)
+        # Bounded exactly like _route_decision's Rule -1: this short-circuit
+        # returns before the router ever sees the category, so the cap has to
+        # be enforced here or a genuinely-hung block retries forever (the sim
+        # timeout also does not consume the attempt budget in decide_node).
+        try:
+            _sim_to_max = int(
+                os.environ.get("CORESMITH_SIM_TIMEOUT_MAX_RETRIES", "4"))
+        except ValueError:
+            _sim_to_max = 4
+        _to_count = sum(1 for _h in _hist
+                        if _h.get("category") == "SIM_TIMEOUT")
+        _to_exhausted = _to_count >= _sim_to_max
+        if _to_exhausted:
+            log(f"  [DIAGNOSE] SIM_TIMEOUT x{_to_count} (max {_sim_to_max}) -- "
+                f"the extended cap is no longer helping, escalating", RED)
+            _to_diag["escalate"] = True
+            _to_diag["diagnosis"] += (
+                f" Retried {_to_count} time(s) with an extended cap without "
+                f"producing a verdict -- the block is hung or far too slow.")
+        _db(_pr(state)).set_diagnosis(block_name, _to_diag, attempt=state["attempt"])
         write_graph_event(_pr(state), "Diagnose Failure", "graph_node_exit", {
             "block": block_name, "category": "SIM_TIMEOUT",
             "confidence": 0.0, "needs_human": False,
+            "escalate": _to_exhausted,
         })
-        return {"debug_action": "retry_rtl"}
+        return {"debug_action": "escalate" if _to_exhausted else "retry_rtl"}
 
     # Short-circuit: detect infrastructure failures (LLM timeout/crash)
     # and skip the debug LLM call which would likely also fail.
-    _INFRA_MARKERS = ("[ClaudeLLM error:", "timed out", "exit_code=-9",
-                      "circuit breaker open")
+    # The markers must stay LLM-SPECIFIC: a bare "timed out" also matches
+    # genuine tool/design failures that land here ("Verilator lint timed out",
+    # "OpenSTA timed out after 300s" inside a fail-closed PPA reason), which
+    # were then misfiled as infrastructure and never diagnosed.
+    _INFRA_MARKERS = ("[ClaudeLLM error:", "claude CLI timed out",
+                      "exit_code=-9", "circuit breaker open",
+                      # WP-15: provider quota/outage text (codex)
+                      "usage limit", "usage_limit", "rate limit",
+                      "rate_limit_exceeded", "insufficient_quota")
     if any(m in error_log for m in _INFRA_MARKERS):
         log("  [DIAGNOSE] Infrastructure failure detected, skipping debug LLM", YELLOW)
         infra_diag = {
@@ -4629,16 +4174,13 @@ async def diagnose_node(state: BlockState) -> dict:
             "affected_blocks": [],
         }
         import json as _json
-        _ah_path = block_dir / "attempt_history.json"
-        history = _json.loads(_ah_path.read_text()) if _ah_path.exists() else []
-        history.append({
+        _db(_pr(state)).record_attempt(block_name, {
             "attempt": state["attempt"],
-            "phase": phase,
             "error": error_log[:500],
             "category": "INFRASTRUCTURE_ERROR",
         })
-        _ah_path.write_text(_json.dumps(history, indent=2))
-        (block_dir / "diagnosis.json").write_text(_json.dumps(infra_diag, indent=2))
+        history = _db(_pr(state)).attempt_history(block_name)
+        _db(_pr(state)).set_diagnosis(block_name, infra_diag, attempt=state["attempt"])
         write_graph_event(_pr(state), "Diagnose Failure", "graph_node_exit", {
             "block": block_name, "category": "INFRASTRUCTURE_ERROR",
             "confidence": 0.0, "needs_human": False,
@@ -4691,7 +4233,7 @@ async def diagnose_node(state: BlockState) -> dict:
                 "is_testbench_bug": False, "local_fix_possible": False,
                 "constraints": [], "affected_blocks": [block_name],
             }
-            (block_dir / "diagnosis.json").write_text(_json.dumps(_sig_diag, indent=2))
+            _db(_pr(state)).set_diagnosis(block_name, _sig_diag, attempt=state["attempt"])
             write_graph_event(_pr(state), "Diagnose Failure", "graph_node_exit", {
                 "block": block_name, "category": "UARCH_SPEC_ERROR",
                 "confidence": 1.0, "needs_human": True,
@@ -4758,16 +4300,13 @@ async def diagnose_node(state: BlockState) -> dict:
         log(f"  [DIAGNOSE] Fast-path: {_fast_diag['category']} "
             f"(skipped opus LLM call)", GREEN)
         import json as _json
-        _ah_path = block_dir / "attempt_history.json"
-        history = _json.loads(_ah_path.read_text()) if _ah_path.exists() else []
-        history.append({
+        _db(_pr(state)).record_attempt(block_name, {
             "attempt": state["attempt"],
-            "phase": phase,
             "error": error_log[:500],
             "category": _fast_diag["category"],
         })
-        _ah_path.write_text(_json.dumps(history, indent=2))
-        (block_dir / "diagnosis.json").write_text(_json.dumps(_fast_diag, indent=2))
+        history = _db(_pr(state)).attempt_history(block_name)
+        _db(_pr(state)).set_diagnosis(block_name, _fast_diag, attempt=state["attempt"])
         fast_action = "retry_tb" if _fast_diag.get("is_testbench_bug") else "retry_rtl"
         write_graph_event(_pr(state), "Diagnose Failure", "graph_node_exit", {
             "block": block_name, "category": _fast_diag["category"],
@@ -4793,7 +4332,7 @@ async def diagnose_node(state: BlockState) -> dict:
 
     import json as _json
 
-    (block_dir / "diagnosis.json").write_text(_json.dumps(diag, indent=2))
+    _db(_pr(state)).set_diagnosis(block_name, diag, attempt=state["attempt"])
 
     # Route the structured diagnosis into previous_error.txt so the REGEN
     # (rtl_generator reads previous_error.txt, not diagnosis.json) gets the
@@ -4802,15 +4341,13 @@ async def diagnose_node(state: BlockState) -> dict:
     if _route_diagnosis_to_previous_error(block_dir, diag, error_log):
         log("  [DIAGNOSE] Routed actionable diagnosis -> previous_error.txt", GREEN)
 
-    _ah_path = block_dir / "attempt_history.json"
-    history = _json.loads(_ah_path.read_text()) if _ah_path.exists() else []
-    history.append({
+    _db(_pr(state)).record_attempt(block_name, {
         "attempt": state["attempt"],
         "phase": phase,
         "error": error_log[:500],
         "category": category,
     })
-    _ah_path.write_text(_json.dumps(history, indent=2))
+    history = _db(_pr(state)).attempt_history(block_name)
 
     action = _route_decision(
         debug_result=diag,
@@ -4835,6 +4372,23 @@ async def diagnose_node(state: BlockState) -> dict:
 # ---------------------------------------------------------------------------
 # Node: decide (deterministic -- no LLM call)
 # ---------------------------------------------------------------------------
+
+def _infrastructure_streak(history: list[dict]) -> int:
+    count = 0
+    for row in reversed(history):
+        category = row.get("category") or (row.get("diagnosis") or {}).get("category")
+        if category != "INFRASTRUCTURE_ERROR":
+            break
+        count += 1
+    return count
+
+
+def _infrastructure_retry_cap() -> int:
+    try:
+        return max(1, int(os.environ.get("CORESMITH_INFRA_MAX_RETRIES", "6") or 6))
+    except ValueError:
+        return 6
+
 
 def _route_decision(debug_result: dict, attempt_history: list[dict],
                     attempt: int, max_attempts: int, phase: str) -> str:
@@ -4891,9 +4445,14 @@ def _route_decision(debug_result: dict, attempt_history: list[dict],
             return "escalate"
         return "retry_rtl"
 
-    # Rule 0: Infrastructure errors get special handling -- escalate on 2+
+    # Rule 0: Infrastructure errors get special handling. WP-16: an LLM
+    # outage is not the block's fault -- retry (without consuming the
+    # attempt budget, see route_decision_node) and only ask a human after
+    # CORESMITH_INFRA_MAX_RETRIES consecutive failures. Asking after 2
+    # meant calling the chip lead (also an LLM) during the same outage,
+    # and once it answered it skipped a block over 3 'attempts'.
     if category == "INFRASTRUCTURE_ERROR":
-        if category_counts.get("INFRASTRUCTURE_ERROR", 0) >= 2:
+        if _infrastructure_streak(attempt_history) >= _infrastructure_retry_cap():
             return "ask_human"
         return "retry_rtl"
 
@@ -4920,6 +4479,11 @@ def _route_decision(debug_result: dict, attempt_history: list[dict],
         return "retry_tb"
 
     # Rule 6: Route based on failed phase
+    if phase == "conformance":
+        # Deterministic pre-sim contract gate (port names / widths). The fix is
+        # always in the RTL, and the exact expected names are already in
+        # previous_error.txt.
+        return "retry_rtl"
     if phase == "sim":
         return "retry_rtl"  # sim failure -> regenerate RTL
     if phase == "synth":
@@ -4965,11 +4529,30 @@ async def decide_node(state: BlockState) -> dict:
             # exhausting attempts on repeated timeouts.
             _diag_cat = None
             try:
-                _dp = Path(_pr(state)) / ".coresmith" / "blocks" / block_name / "diagnosis.json"
-                if _dp.exists():
-                    _diag_cat = json.loads(_dp.read_text()).get("category")
-            except (json.JSONDecodeError, OSError):
+                _diag_cat = (_db(_pr(state)).diagnosis(block_name) or {}).get("category")
+            except Exception:  # noqa: BLE001
                 _diag_cat = None
+            if _diag_cat == "INFRASTRUCTURE_ERROR":
+                # WP-16: the LLM was unavailable; re-run the SAME attempt
+                # after a real backoff. Budget is for design failures.
+                _infra_n = 0
+                try:
+                    _infra_n = _infrastructure_streak(_db(_pr(state)).attempt_history(block_name) or [])
+                except Exception:  # unreadable history cannot reset the retry cap
+                    return {"debug_action": "ask_human"}
+                if _infra_n >= _infrastructure_retry_cap():
+                    return {"debug_action": "ask_human"}
+                backoff_s = min(60 * (2 ** max(_infra_n - 1, 0)), 900)
+                log(f"  [RETRY] INFRASTRUCTURE_ERROR -- re-running attempt "
+                    f"{state['attempt']} after {backoff_s}s backoff (budget not "
+                    f"consumed; consecutive infra failures: {_infra_n})", YELLOW)
+                write_graph_event(_pr(state), "Route Decision", "graph_node_exit", {
+                    "block": block_name, "decision": action,
+                    "infra_retry": True, "backoff_s": backoff_s,
+                })
+                await asyncio.sleep(backoff_s)
+                span.set_attribute("final_decision", action)
+                return update
             if _diag_cat == "SIM_TIMEOUT":
                 log(f"  [RETRY] SIM_TIMEOUT -- re-running attempt {state['attempt']} "
                     f"with extended sim timeout (budget not consumed)", YELLOW)
@@ -4990,17 +4573,11 @@ async def decide_node(state: BlockState) -> dict:
                 update["attempt"] = new_attempt
                 log(f"  [RETRY] Attempt {new_attempt}/{state['max_attempts']}", YELLOW)
 
-                block_dir = Path(_pr(state)) / ".coresmith" / "blocks" / block_name
-                diag_path = block_dir / "diagnosis.json"
-                if diag_path.exists():
-                    try:
-                        diag = json.loads(diag_path.read_text())
-                        if diag.get("category") == "INFRASTRUCTURE_ERROR":
-                            backoff_s = min(30 * (2 ** (new_attempt - 1)), 120)
-                            log(f"  [RETRY] Backing off {backoff_s}s after infra failure", YELLOW)
-                            await asyncio.sleep(backoff_s)
-                    except (json.JSONDecodeError, OSError):
-                        pass
+                diag = _db(_pr(state)).diagnosis(block_name) or {}
+                if diag.get("category") == "INFRASTRUCTURE_ERROR":
+                    backoff_s = min(30 * (2 ** (new_attempt - 1)), 120)
+                    log(f"  [RETRY] Backing off {backoff_s}s after infra failure", YELLOW)
+                    await asyncio.sleep(backoff_s)
 
         span.set_attribute("final_decision", action)
 
@@ -5039,17 +4616,13 @@ async def ask_human_node(state: BlockState) -> dict:
     block_dir = Path(_pr(state)) / ".coresmith" / "blocks" / block_name
     block_dir.mkdir(parents=True, exist_ok=True)
 
-    diag_path = block_dir / "diagnosis.json"
-    diag = _json.loads(diag_path.read_text()) if diag_path.exists() else {}
-
-    ah_path = block_dir / "attempt_history.json"
-    attempt_history = _json.loads(ah_path.read_text()) if ah_path.exists() else []
+    diag = _db(_pr(state)).diagnosis(block_name) or {}
+    attempt_history = _db(_pr(state)).attempt_history(block_name)
 
     error_path = block_dir / "previous_error.txt"
     error_text = error_path.read_text() if error_path.exists() else ""
 
-    constr_path = block_dir / "constraints.json"
-    constraints = _load_constraints_safe(constr_path)
+    constraints = _load_constraints_safe(_pr(state), block_name)
 
     category_counts: dict[str, int] = {}
     for entry in attempt_history:
@@ -5139,7 +4712,7 @@ async def ask_human_node(state: BlockState) -> dict:
     except Exception:
         pass
 
-    response = interrupt(payload)
+    response = await _resolve_interrupt(payload)
 
     write_graph_event(_pr(state), "Ask Human", "graph_node_exit", {
         "block": block_name, "action": response.get("action", "unknown"),
@@ -5149,20 +4722,13 @@ async def ask_human_node(state: BlockState) -> dict:
     updated: dict = {"human_response": response}
 
     if action == "add_constraint" and response.get("constraint"):
-        constraints.append({
-            "rule": response["constraint"],
-            "source": "human",
-            "attempt": state["attempt"],
-        })
-        constr_path.write_text(_json.dumps(constraints, indent=2))
+        _db(_pr(state)).add_constraint(
+            block_name, response["constraint"], source="human", attempt=state["attempt"])
 
     if action == "fix_rtl" and response.get("description"):
-        constraints.append({
-            "rule": f"Outer-agent RTL fix applied: {response['description']}",
-            "source": "human",
-            "attempt": state["attempt"],
-        })
-        constr_path.write_text(_json.dumps(constraints, indent=2))
+        _db(_pr(state)).add_constraint(
+            block_name, f"Outer-agent RTL fix applied: {response['description']}",
+            source="human", attempt=state["attempt"])
 
     return updated
 
@@ -5185,33 +4751,20 @@ async def block_done_node(state: BlockState) -> dict:
     sim_passed = state.get("sim_passed", False)
     synth_success = state.get("synth_success", False)
     gate_count = state.get("synth_gate_count", 0)
-    phase = state.get("pipeline_phase", "rtl")
-
     human_resp = state.get("human_response") or {}
     is_skip = human_resp.get("action") == "skip"
     is_abort = human_resp.get("action") == "abort"
     is_escalate = state.get("debug_action") == "escalate"
 
-    # Pass 1 of the two-pass flow (phase "uarch") only produces a uArch spec +
-    # Amaranth block model -- there is NO RTL/sim/synth yet, so success is gated on
-    # the spec being approved (R2), NOT on sim_passed AND synth_success. Pass 2
-    # ("rtl") and the flag-off default keep the historical sim+synth gate.
-    if phase == "uarch":
-        all_passed = (
-            state.get("uarch_approved", False)
-            and not is_skip and not is_abort and not is_escalate
-        )
-    else:
-        all_passed = (
-            sim_passed and synth_success
-            and not is_skip and not is_abort and not is_escalate
-        )
+    all_passed = (
+        sim_passed and synth_success
+        and not is_skip and not is_abort and not is_escalate
+    )
 
     step_log_paths = dict(state.get("step_log_paths") or {})
 
     block_dir = Path(_pr(state)) / ".coresmith" / "blocks" / block_name
-    constr_path = block_dir / "constraints.json"
-    constraints = _load_constraints_safe(constr_path)
+    constraints = _load_constraints_safe(_pr(state), block_name)
 
     # When this completion event happened. `completed_blocks` is append-only, so
     # membership alone cannot tell a LEFTOVER interrupt (the graph moved past it
@@ -5230,7 +4783,6 @@ async def block_done_node(state: BlockState) -> dict:
             "synth_success": True,
             "constraints_learned": len(constraints),
             "step_log_paths": step_log_paths,
-            "phase": phase,
             "completed_at": completed_at,
         }
         log(f"  [{block_name}] PASSED (attempt {attempt})", GREEN)
@@ -5249,7 +4801,6 @@ async def block_done_node(state: BlockState) -> dict:
             "sim_passed": sim_passed,
             "synth_success": synth_success,
             "step_log_paths": step_log_paths,
-            "phase": phase,
             "completed_at": completed_at,
         }
         reason = (
@@ -5286,13 +4837,9 @@ def route_after_uarch_review(state: BlockState) -> str:
     """
     response = state.get("human_response") or {}
     action = response.get("action", "abort")
-    phase = state.get("pipeline_phase", "rtl")
     if action == "revise":
         return "generate_uarch_spec"
     if action == "skip":
-        return "block_done"
-    # approve / default
-    if phase == "uarch":
         return "block_done"
     return "generate_rtl"
 
@@ -5301,28 +4848,6 @@ route_after_uarch_review.__edge_labels__ = {
     "generate_rtl": "APPROVED",
     "generate_uarch_spec": "REVISE",
     "block_done": "SKIP",
-}
-
-
-def route_after_init(state: BlockState) -> str:
-    """Route after init_block.
-
-    Two-pass: in phase ``"rtl"`` (pass 2) the uArch spec + Amaranth block model
-    already exist on disk from pass 1, so skip re-spec and go straight to
-    ``generate_rtl`` (which reuses the on-disk spec/model). Phase ``"uarch"``
-    (pass 1) and the flag-off default go to ``generate_uarch_spec`` -- identical
-    to today's hard ``init_block -> generate_uarch_spec`` edge.
-    """
-    if state.get("pipeline_phase", "rtl") == "rtl" and state.get(
-        "uarch_pass_done"
-    ):
-        return "generate_rtl"
-    return "generate_uarch_spec"
-
-
-route_after_init.__edge_labels__ = {
-    "generate_uarch_spec": "SPEC",
-    "generate_rtl": "RTL (pass 2)",
 }
 
 
@@ -5351,12 +4876,9 @@ route_after_tb.__edge_labels__ = {
 def route_after_synth(state: BlockState) -> str:
     """Route after synthesis: SUCCESS -> block_done, FAIL -> diagnose.
 
-    When the PPA gate is enabled (``CORESMITH_PPA_GATE=1``), a block that
-    *compiled* but failed the deterministic PPA budget check
-    (``ppa_ok is False``) is also routed to diagnose, so the synth_fixer can
-    restructure it (e.g. a memory that should be an SRAM macro synthesized
-    to flops). Default-off preserves the legacy "compiles == done" behavior.
-    ``ppa_ok`` of None (not computed) never blocks.
+    The PPA budget verdict (``ppa_ok``) is advisory since WP-10c: it is
+    measured and reported but never routes a compiled, DV-passing block back
+    to rework.
 
     The post-synthesis GATE-LEVEL SIM gate (``CORESMITH_GATE_SIM``, default ON)
     routes ``gate_sim_ok is False`` to diagnose: the netlist that carries the
@@ -5369,15 +4891,9 @@ def route_after_synth(state: BlockState) -> str:
         return "diagnose"
     if state.get("gate_sim_ok") is False:
         return "diagnose"
-    # rung2 defect 2: under SKIP_SYNTH the PDK-free synthesizability probes run
-    # and GATE unconditionally (they need no PDK / no PPA-budget flag), so a
-    # probe FAIL (ppa_ok False) must route to diagnose there too -- otherwise
-    # SKIP_SYNTH would run the probes but ignore their verdict.
-    import os as _os_ras
-
-    from orchestrator.langgraph.ppa_check import ppa_gate_enabled
-    _skip_synth = _os_ras.environ.get("CORESMITH_SKIP_SYNTH") == "1"
-    if (ppa_gate_enabled() or _skip_synth) and state.get("ppa_ok") is False:
+    # WP-11: MEASURED timing is a hard verdict (an external oracle); the
+    # PPA budget verdict (``ppa_ok``) stays advisory (WP-10c).
+    if state.get("timing_ok") is False:
         return "diagnose"
     return "block_done"
 
@@ -5435,7 +4951,7 @@ route_after_human.__edge_labels__ = {
 # Block subgraph builder
 # ---------------------------------------------------------------------------
 
-def build_block_subgraph(two_pass: bool | None = None):
+def build_block_subgraph():
     """Build the block lifecycle subgraph (uncompiled StateGraph).
 
     Contains the full lifecycle for a single block:
@@ -5447,23 +4963,10 @@ def build_block_subgraph(two_pass: bool | None = None):
     Plus the diagnose/decide/retry failure loop, where decide routes
     directly back to generate_rtl (no intermediate increment node).
 
-    ``two_pass`` selects the topology:
-      - ``False`` (or flag off, the default) -> the historical single-pass
-        graph: a HARD ``init_block -> generate_uarch_spec`` edge. Byte-identical
-        node/edge set to before the two-pass restructure.
-      - ``True`` (block-goldens on) -> a CONDITIONAL ``init_block`` edge
-        (``route_after_init``) so pass 2 can skip re-spec and jump to
-        ``generate_rtl``.
-    ``None`` reads ``composition.block_goldens_enabled()``.
-
     Returns:
         Uncompiled ``StateGraph(BlockState)`` -- the caller compiles it
         (with or without a checkpointer) before adding it as a node.
     """
-    if two_pass is None:
-        from orchestrator.architecture import composition as _composition
-        two_pass = _composition.block_goldens_enabled()
-
     graph = StateGraph(BlockState)
 
     # Nodes (10 -- lint, simulate, increment_attempt are folded in)
@@ -5480,13 +4983,7 @@ def build_block_subgraph(two_pass: bool | None = None):
 
     # Happy path
     graph.add_edge(START, "init_block")
-    if two_pass:
-        # Conditional: pass 2 of the two-pass flow skips re-spec and goes
-        # straight to generate_rtl; pass 1 goes to generate_uarch_spec.
-        graph.add_conditional_edges("init_block", route_after_init)
-    else:
-        # Single-pass (flag off): historical hard edge, identical topology.
-        graph.add_edge("init_block", "generate_uarch_spec")
+    graph.add_edge("init_block", "generate_uarch_spec")
     graph.add_edge("generate_uarch_spec", "review_uarch_spec")
     graph.add_conditional_edges("review_uarch_spec", route_after_uarch_review)
     graph.add_conditional_edges("generate_rtl", route_after_rtl)
@@ -5509,30 +5006,13 @@ def build_block_subgraph(two_pass: bool | None = None):
 # ---------------------------------------------------------------------------
 
 def _current_phase_completed(state: OrchestratorState) -> list[dict]:
-    """Completed blocks for the CURRENT pipeline_phase, deduped by name.
-
-    The ``completed_blocks`` reducer is ``operator.add`` and NEVER resets, so
-    after the two-pass flow it holds BOTH the pass-1 ``(name,"uarch")`` and the
-    pass-2 ``(name,"rtl")`` results. Consumers (integration_review,
-    pipeline_complete, integration_check) must look only at the current phase to
-    avoid cross-pass contamination (R1).
-
-    Filter rule: keep entries whose ``phase`` matches the current
-    ``pipeline_phase``; entries with NO ``phase`` key (legacy / flag-off
-    checkpoints) are always kept so single-pass behaviour is unchanged. Then
-    dedup by name keeping the LAST entry (so a later pass / a retry overrides an
-    earlier failure).
-    """
-    cur = state.get("pipeline_phase", "rtl")
+    """Completed blocks deduped by name, keeping the LAST entry so a retry overrides an earlier failure (``completed_blocks`` is append-only)."""
     seen: dict[str, dict] = {}
     for b in state.get("completed_blocks", []):
         if not isinstance(b, dict):
             continue
         name = b.get("name")
         if not name:
-            continue
-        bphase = b.get("phase")
-        if bphase is not None and bphase != cur:
             continue
         seen[name] = b
     return list(seen.values())
@@ -5623,7 +5103,7 @@ async def _retire_pin_mapped_blocks(
                 f"pin_map partially covers '{plan.block}' and the contradiction "
                 f"was not resolved after {_PINMAP_REPARK_CAP} re-parks "
                 f"(uncovered: {plan.uncovered}). Fix prd.pin_map or remove it.")
-        response = interrupt({
+        response = await _resolve_interrupt({
             "type": "pin_map_partial_coverage",
             "block": plan.block,
             "reason": plan.reason,
@@ -5673,6 +5153,134 @@ async def _retire_pin_mapped_blocks(
         # retry -> re-plan against the (hopefully amended) PRD and loop
 
 
+# Opening sentence of every feedback string init_tier writes (see
+# _gate_feedback_for_block) -- its provenance marker on disk.
+_GATE_FEEDBACK_HEADER = "The composed-chip integration gate FAILED"
+
+
+def _is_own_gate_feedback(path: Path) -> bool:
+    """True when ``gate_feedback.txt`` was written by init_tier itself.
+
+    Sibling nodes deliver their prescription through the SAME file (the
+    uarch_patch-on-retry auto-apply writes it moments before routing back
+    here), so the stale-feedback clearing below must not delete a message
+    generate_uarch_spec has not read yet.
+    """
+    try:
+        return path.read_text(
+            encoding="utf-8", errors="replace").lstrip().startswith(
+                _GATE_FEEDBACK_HEADER)
+    except OSError:
+        return False
+
+
+async def _single_context_uarch_stage(
+    pr: str, block_queue: list, tier_blocks: list, revise: dict | None,
+) -> dict | None:
+    """CORESMITH_UARCH_SINGLE_CONTEXT: one session authors every missing spec
+    of the design (first entry) or revises the blocks a targeted revise asked
+    to re-spec. Returns the updated revise plan (re-specced blocks flip to
+    ``reuse_spec``) or None when nothing changed. A spec the session did not
+    produce falls through to the per-block author as before."""
+    from orchestrator.langgraph.pipeline_helpers import (
+        generate_uarch_specs_single_context,
+    )
+    spec_dir = Path(pr) / "arch" / "uarch_specs"
+    if revise:
+        targets = [b for b in tier_blocks
+                   if b["name"] in revise and not revise[b["name"]]]
+    else:
+        targets = [b for b in block_queue
+                   if not (spec_dir / f"{b['name']}.md").exists()]
+    if not targets:
+        return None
+    feedback: dict[str, str] = {}
+    for b in targets:
+        fb = Path(pr) / ".coresmith" / "blocks" / b["name"] / "gate_feedback.txt"
+        if fb.exists():
+            try:
+                feedback[b["name"]] = fb.read_text(encoding="utf-8").strip()
+            except OSError:
+                pass
+    names = [b["name"] for b in targets]
+    log(f"  [UARCH] single-context uArch stage: {'revising' if revise else 'authoring'} "
+        f"{len(names)} spec(s) in one session ({', '.join(names)})", YELLOW)
+    write_graph_event(pr, "Generate Uarch Specs", "graph_node_enter", {
+        "blocks": names, "revise": bool(revise),
+    })
+    try:
+        result = await generate_uarch_specs_single_context(
+            targets, feedback_by_block=feedback)
+    except Exception as exc:  # noqa: BLE001 - fall through to per-block authors
+        log(f"  [UARCH] single-context uArch stage FAILED ({exc}) -- blocks "
+            "fall back to per-block spec generation", RED)
+        write_graph_event(pr, "Generate Uarch Specs", "graph_node_exit", {
+            "error": str(exc)[:500], "blocks": names,
+        })
+        return None
+    written = [n for n in result.get("written", []) if n in names]
+    missing = [n for n in names if n not in written]
+    write_graph_event(pr, "Generate Uarch Specs", "graph_node_exit", {
+        "written": written, "missing": missing,
+    })
+    log(f"  [UARCH] single-context uArch stage wrote {len(written)}/{len(names)} "
+        f"spec(s)" + (f"; per-block fallback for {', '.join(missing)}" if missing else ""),
+        GREEN if not missing else YELLOW)
+    for n in written:
+        fb = Path(pr) / ".coresmith" / "blocks" / n / "gate_feedback.txt"
+        fb.unlink(missing_ok=True)  # consumed by the single-context revision
+    if revise and written:
+        return {**revise, **{n: True for n in written}}
+    return None
+
+
+
+def _retire_derived_integration_artifacts(project_root: str) -> list[str]:
+    """Retire superseded assembler outputs when integration checking re-runs.
+
+    Only files the deterministic assembler writes are moved: the assembled
+    ``user_project_wrapper.v`` (when the persisted integration record says
+    ``caravel_wrapper_assembled``) and ``user_project_wrapper_pads.v``. An
+    LLM-authored or self-assembled top is left alone, as are all sources and
+    dependencies of the current validated candidate. Returns the file names
+    moved. Never raises.
+    """
+    import time as _time
+
+    from orchestrator.harness.top_module import CandidateError, validated_candidate
+
+    root = Path(project_root)
+    int_dir = root / "rtl" / "integration"
+    if not int_dir.is_dir():
+        return []
+    protected = set()
+    try:
+        candidate = validated_candidate(root)
+        protected = {Path(p).resolve() for p in
+                     [*candidate["sources"], *candidate["dependencies"]]}
+    except CandidateError:
+        pass
+    assembled = False
+    try:
+        rec = json.loads((root / ".coresmith" / "integration_result.json").read_text())
+        assembled = bool(rec.get("caravel_wrapper_assembled"))
+    except (OSError, ValueError):
+        assembled = False
+    names = ["user_project_wrapper_pads.v"] + (["user_project_wrapper.v"] if assembled else [])
+    moved: list[str] = []
+    dest = int_dir / "_stale" / _time.strftime("%Y%m%dT%H%M%S")
+    for n in names:
+        f = int_dir / n
+        if f.is_file() and f.resolve() not in protected:
+            try:
+                dest.mkdir(parents=True, exist_ok=True)
+                f.rename(dest / n)
+                moved.append(n)
+            except OSError:
+                pass
+    return moved
+
+
 async def init_tier_node(state: OrchestratorState) -> dict:
     """Compute the tier list (once) and log the current tier."""
     pr = state.get("project_root", str(PROJECT_ROOT))
@@ -5693,43 +5301,41 @@ async def init_tier_node(state: OrchestratorState) -> dict:
     )
     current_idx = state.get("current_tier_index", 0)
 
+    # Chip-lead trip re-arms on a FRESH run start (tier 0, nothing completed);
+    # mid-run tier re-entries keep a tripped lead parked.
+    global _CHIP_LEAD_TRIPPED
+    if current_idx == 0 and not state.get("completed_blocks"):
+        _CHIP_LEAD_TRIPPED = False
+
     tier = tier_list[current_idx]
     tier_blocks = [b for b in block_queue if b.get("tier", 1) == tier]
 
+    # Targeted revise plan ({block: reuse_spec}) from integration_review or a
+    # DV-failure revise. It may span tiers: skip the tiers with nothing to
+    # redo; a plan naming no queued block voids itself (normal full entry).
+    revise = state.get("revise_blocks") or None
+    tier_idx_update = None
+    plan_void = False
+    if revise:
+        _idx = current_idx
+        while _idx < len(tier_list) and not any(
+            b.get("name") in revise for b in block_queue
+            if b.get("tier", 1) == tier_list[_idx]
+        ):
+            _idx += 1
+        if _idx >= len(tier_list):
+            log("  Targeted revise plan names no queued block -- normal "
+                "tier entry", YELLOW)
+            revise, plan_void = None, True
+        elif _idx != current_idx:
+            log(f"  Targeted revise: tier {tier} has nothing to redo -- "
+                f"skipping to tier {tier_list[_idx]}", CYAN)
+            current_idx = tier_idx_update = _idx
+            tier = tier_list[current_idx]
+            tier_blocks = [b for b in block_queue if b.get("tier", 1) == tier]
     # Section 7a: stamp the engine git SHA at run start + WARN in the daemon log
     # if it changes mid-run (a hot-swap that flipped behavior under the run).
     _stamp_engine_sha(pr)
-
-    # Engine Fix #5: thread the µarch gate's divergence diagnosis to disk for the
-    # blocks it implicated, so a gate-triggered re-spec is INFORMED (otherwise
-    # the Fix #4 bounded re-spec loop just redraws identical blocks). Disk-first:
-    # generate_uarch_spec_node reads .coresmith/blocks/<b>/gate_feedback.txt.
-    # Written per tier as each tier re-fans-out; CLEARED for unaffected blocks so
-    # stale feedback never leaks into a later draw or a clean first pass (mir
-    # absent/passed -> no feedback anywhere).
-    mir = state.get("model_integration_result") or {}
-    gate_failed = bool(mir) and not mir.get("passed", True)
-    # Engine Fix #5b: when the gate precisely localized the failure (affected_
-    # blocks/edge), feed only those blocks; otherwise BROADCAST to all tier
-    # blocks (the first_divergence_block stub can't be trusted as a sole target).
-    precise = _gate_localization_precise(mir)
-    if precise:
-        targets = _gate_affected_blocks(mir)
-    else:
-        targets = {b["name"] for b in tier_blocks}
-    for b in tier_blocks:
-        fb = ""
-        if gate_failed and b["name"] in targets:
-            fb = _gate_feedback_for_block(mir, b["name"], localized=precise)
-        fbp = Path(pr) / ".coresmith" / "blocks" / b["name"] / "gate_feedback.txt"
-        try:
-            fbp.parent.mkdir(parents=True, exist_ok=True)
-            if fb:
-                fbp.write_text(fb, encoding="utf-8")
-            elif fbp.exists():
-                fbp.unlink()
-        except OSError:
-            pass
 
     write_graph_event(pr, "Init Tier", "graph_node_enter", {
         "tier": tier, "tier_index": current_idx,
@@ -5743,11 +5349,26 @@ async def init_tier_node(state: OrchestratorState) -> dict:
         f"Tier {current_idx + 1}/{len(tier_list)}", CYAN)
     log(f"{'='*60}", CYAN)
 
+    if revise:
+        _mine = [b['name'] for b in tier_blocks if b['name'] in revise]
+        log(f"  Targeted revise: re-entering {', '.join(_mine)} only", CYAN)
+    revise_update = None
+    if _uarch_single_context_enabled():
+        revise_update = await _single_context_uarch_stage(
+            pr, block_queue, tier_blocks, revise)
+
     write_graph_event(pr, "Init Tier", "graph_node_exit", {
         "tier": tier,
+        "revise_blocks": revise_update if revise_update is not None else revise,
     })
 
     out = {"tier_list": tier_list}
+    if revise_update is not None:
+        out["revise_blocks"] = revise_update
+    elif plan_void:
+        out["revise_blocks"] = None
+    if tier_idx_update is not None:
+        out["current_tier_index"] = tier_idx_update
     # Publish the reduced queue + the retirement record so EVERY downstream
     # consumer agrees the block is deliberately absent rather than missing:
     # pipeline_complete / integration_check size `expected` off block_queue,
@@ -5757,182 +5378,7 @@ async def init_tier_node(state: OrchestratorState) -> dict:
         out["block_queue"] = block_queue
     if _retired_records:
         out["retired_blocks"] = _retired_records
-    # Seed the two-pass phase on the FIRST entry only. fan_out_tier defaults an
-    # unset pipeline_phase to "rtl", so without this a block-goldens run would
-    # send every block straight down the single-pass RTL path and pass 1
-    # (spec+model) + the µarch integration gate would never run. begin_rtl_pass
-    # is the sole writer of "rtl"; once set (pass-2 re-entry) we must not clobber
-    # it back to "uarch". Flag off: add nothing -> byte-identical single-pass.
-    if not state.get("pipeline_phase"):
-        from orchestrator.architecture import composition as _composition
-        if _composition.block_goldens_enabled():
-            out["pipeline_phase"] = "uarch"
-            # Engine Fix #6: stimulus<->contract consistency guard. On the FIRST
-            # entry of a block-goldens run, before any block is built, check that
-            # the gate stimulus is something the declared design can actually
-            # accept (the oracle can process it; every stimulus config field has
-            # a boundary input port). Catches the codec-class failure (arch
-            # hardcoded 640x360 vs a 16x16 in-contract gate frame) in seconds
-            # instead of after a multi-hour arch+pass-1 run. Never let the guard
-            # itself break a run; default is warn+report, strict raises.
-            try:
-                from orchestrator.architecture import (
-                    stimulus_contract_guard as _scg,
-                )
-                _viol = _scg.run_stimulus_contract_guard(pr)
-            except Exception as _exc:  # noqa: BLE001
-                _viol = []
-                log(f"  [STIMULUS-GUARD] guard error (ignored): {_exc}", YELLOW)
-            if _viol:
-                import json as _json
-                _errs = [v for v in _viol if v.get("severity") == "error"]
-                _col = RED if _errs else YELLOW
-                try:
-                    (Path(pr) / ".coresmith" / _scg.REPORT_FILENAME).write_text(
-                        _json.dumps(_viol, indent=2), encoding="utf-8")
-                except OSError:
-                    pass
-                log(f"\n{'='*60}", _col)
-                log(f"  STIMULUS<->CONTRACT GUARD: {len(_viol)} finding(s), "
-                    f"{len(_errs)} error", _col)
-                log(_scg.format_violations(_viol), _col)
-                log("  (the gate stimulus may be inconsistent with the declared "
-                    "design contract -- fix before this run dead-ends at the "
-                    "µarch gate)", _col)
-                log(f"{'='*60}\n", _col)
-                if _scg.guard_strict():
-                    raise RuntimeError(
-                        "stimulus<->contract guard failed (strict mode):\n"
-                        + _scg.format_violations(_viol))
-
     return out
-
-
-def _gate_localization_precise(mir: dict) -> bool:
-    """True when the gate genuinely localized the failure to specific block(s).
-
-    The gate's ``first_divergence_block`` is a best-effort STUB
-    (model_integration._first_divergence_block returns the first diagram block
-    in declared order -- it cannot localize a wrong-bytes divergence). So a
-    result carrying ONLY first_divergence_block is NOT trustworthy localization;
-    only an explicit ``affected_blocks`` list or an ``affected_edge`` is. When
-    localization is imprecise the re-spec feedback is broadcast to ALL blocks
-    (Engine Fix #5b) rather than misdirected to the (wrong) first block.
-    """
-    return bool(mir.get("affected_blocks")) or bool(mir.get("affected_edge"))
-
-
-def _gate_affected_blocks(mir: dict) -> set[str]:
-    """Block names the µarch gate PRECISELY implicated (affected_blocks / edge).
-
-    Excludes the unreliable ``first_divergence_block`` stub on purpose -- callers
-    use :func:`_gate_localization_precise` to decide between this targeted set
-    and a broadcast to all tier blocks. Engine Fix #5/#5b.
-    """
-    names: set[str] = set()
-    for b in mir.get("affected_blocks") or []:
-        if b:
-            names.add(b)
-    edge = mir.get("affected_edge") or {}
-    for k in ("from", "to"):
-        if edge.get(k):
-            names.add(edge[k])
-    return names
-
-
-def _gate_feedback_for_block(mir: dict, block_name: str,
-                             localized: bool = True) -> str:
-    """Build the re-spec feedback string for one block from the gate result.
-
-    ``localized`` False means the gate could not pin the divergence to a specific
-    block, so this feedback is being broadcast to every block -- the wording asks
-    each block to self-check its math against the reference at the divergence
-    point. Engine Fix #5/#5b.
-    """
-    parts = [
-        "The composed-chip integration gate FAILED -- the wired block models do "
-        "not compose into a chip that matches the reference.",
-        f"gap_class={mir.get('gap_class', 'block_math')}.",
-    ]
-    edge = mir.get("affected_edge") or {}
-    if edge.get("from") or edge.get("to"):
-        parts.append(f"affected interface edge: {edge.get('from','?')} -> "
-                     f"{edge.get('to','?')}.")
-    # Carry every suggested_fix the gate emitted (most actionable signal).
-    fixes = []
-    for v in (mir.get("violations") or []):
-        if isinstance(v, dict) and v.get("suggested_fix"):
-            fixes.append(str(v["suggested_fix"]))
-    if mir.get("suggested_fix"):
-        fixes.append(str(mir["suggested_fix"]))
-    for f in dict.fromkeys(fixes):  # dedupe, preserve order
-        parts.append(f"suggested fix: {f}")
-    # Compact expected-vs-observed so the re-spec sees the behavioural gap (esp.
-    # the FIRST divergence position -- the most useful clue when unlocalized).
-    gap_class = mir.get("gap_class", "block_math")
-    div_off = -1
-    if "expected" in mir or "observed" in mir:
-        exp = repr(mir.get("expected"))[:200]
-        obs = repr(mir.get("observed"))[:200]
-        parts.append(f"reference expected {exp}; composed chip observed {obs}.")
-        try:
-            from orchestrator.architecture.model_integration import (
-                _is_byteseq as _ibs,
-            )
-            from orchestrator.architecture.model_integration import (
-                first_divergence_offset as _fdo,
-            )
-            e, o = mir.get("expected"), mir.get("observed")
-            if _ibs(e) and _ibs(o):
-                div_off = _fdo(e, o)
-                if div_off >= 0:
-                    parts.append(
-                        f"FIRST DIVERGENCE at byte offset {div_off} "
-                        f"(bytes 0..{div_off-1} are byte-EXACT -> the framing/"
-                        f"earlier stages composed correctly; the producer of byte "
-                        f"{div_off} is the culprit).")
-        except Exception:  # noqa: BLE001
-            pass
-    if localized:
-        parts.append("Revise THIS block's microarchitecture so the composition "
-                     "matches the reference; do NOT hardcode geometry/sizes that "
-                     "the stimulus contract supplies at runtime.")
-    elif gap_class == "block_math":
-        # Targeted-restart instruction (the chip-lead localizes + restarts ONLY
-        # the producing block, instead of broadcasting a full re-fan). The
-        # framing composed correctly -> exactly ONE block emits wrong/short
-        # content; re-fanning all blocks wastes the run (>55% of tokens once).
-        # Keep the "could NOT be localized" phrasing: this text is still
-        # broadcast to every block (each self-audits), while the CHIP-LEAD does
-        # the precise single-block restart.
-        _bisect = (
-            f"A first-divergence byte offset ({div_off}) WAS found -- use it: "
-            f"trace which block produces byte {div_off} through the serialization "
-            f"chain and restart THAT block only. "
-            if div_off >= 0 else
-            "The first-divergence offset could NOT be bisected automatically -- "
-            "before touching any block, do the CHEAP localization: snoop each "
-            "block's output bus against the reference's per-stage output to find "
-            "the single producer that diverges. If that localization ALSO fails, "
-            "ESCALATE to a human interrupt (ask_human) -- do NOT broadcast a "
-            "re-spec of all blocks (that wastes >55% of the run's tokens on "
-            "blocks that compose correctly). ")
-        parts.append(
-            "The divergence could NOT be localized to a specific block "
-            "automatically -- but the framing/earlier stages compose byte-exact, "
-            "so this is a SINGLE-BLOCK content divergence: exactly ONE downstream "
-            "block emits wrong/truncated content. CHIP-LEAD: " + _bisect +
-            "restart_block(from_node='generate_uarch_spec') for THAT block ONLY "
-            "-- do NOT re-fan all blocks. Each block: audit YOUR math/encoding "
-            "against the reference at the divergence point and fix it if it "
-            "diverges; do NOT hardcode geometry/sizes supplied at runtime.")
-    else:
-        parts.append("The divergence could NOT be localized to a specific block. "
-                     "Audit whether YOUR block's math/encoding exactly matches the "
-                     "reference at the first divergence point (compare against the "
-                     "reference's per-stage behaviour); fix it if it diverges, and "
-                     "do NOT hardcode geometry/sizes supplied at runtime.")
-    return " ".join(parts)
 
 
 def fan_out_tier(state: OrchestratorState) -> list[Send]:
@@ -5949,11 +5395,12 @@ def fan_out_tier(state: OrchestratorState) -> list[Send]:
 
     tier_blocks = [b for b in block_queue if b.get("tier", 1) == tier]
 
-    # Two-pass phase: default "rtl" so flag-off (single-pass) behaviour is
-    # unchanged. begin_rtl_pass is the sole writer of phase "rtl"; pass 1 sets
-    # "uarch" once block-goldens is on.
-    pipeline_phase = state.get("pipeline_phase", "rtl")
-    uarch_pass_done = bool(state.get("uarch_pass_done", False))
+    # Targeted revise: only the planned blocks re-enter; the rest keep the
+    # completed result they already have (completed_blocks dedups by name).
+    revise = state.get("revise_blocks") or None
+    if revise:
+        tier_blocks = [b for b in tier_blocks if b["name"] in revise]
+    single_context = _uarch_single_context_enabled()
 
     sends = []
     for block in tier_blocks:
@@ -5965,8 +5412,6 @@ def fan_out_tier(state: OrchestratorState) -> list[Send]:
             "current_block": block,
             "attempt": 1,
             "phase": "init",
-            "pipeline_phase": pipeline_phase,
-            "uarch_pass_done": uarch_pass_done,
             "constraints": [],
             "attempt_history": [],
             "previous_error": "",
@@ -5982,6 +5427,8 @@ def fan_out_tier(state: OrchestratorState) -> list[Send]:
             "human_response": None,
             "completed_blocks": [],
             "step_log_paths": {},
+            "reuse_spec": (bool(revise[block["name"]]) if revise
+                           else single_context),
         }))
 
     return sends
@@ -5990,6 +5437,112 @@ def fan_out_tier(state: OrchestratorState) -> list[Send]:
 fan_out_tier.__edge_labels__ = {
     "process_block": "FAN OUT",
 }
+
+
+def _uarch_single_context_enabled() -> bool:
+    """CORESMITH_UARCH_SINGLE_CONTEXT=1: the uArch stage runs in ONE agent
+    session -- at the first tier entry one author writes every missing spec of
+    the design (no per-block fan-out for the spec stage), and on a targeted
+    revise one session revises the blocks the chip lead named. Blocks then
+    implement the on-disk spec (``reuse_spec``); a block still re-specs on its
+    own when feedback is pending for it (mem-price gate, spec-review revise).
+    Default OFF = one author per block, as before."""
+    return _env_truthy("CORESMITH_UARCH_SINGLE_CONTEXT")
+
+
+def _revise_named_blocks(response: dict, candidates: list[str]) -> list[str]:
+    """Blocks a chip-level ``revise`` names explicitly: ``block_actions``
+    (dict / JSON string, any action other than approve/skip),
+    ``affected_blocks`` (list), else exact block names mentioned in the
+    ``feedback`` / ``reasoning`` text. Order follows ``candidates``."""
+    named: set[str] = set()
+    actions = response.get("block_actions")
+    if isinstance(actions, str) and actions.strip():
+        try:
+            actions = json.loads(actions)
+        except json.JSONDecodeError:
+            actions = None
+    if isinstance(actions, dict):
+        named |= {k for k, v in actions.items()
+                  if str(v or "").strip().lower() not in {"approve", "skip", "keep"}}
+    elif isinstance(actions, list):
+        named |= {str(a) for a in actions}
+    affected = response.get("affected_blocks") or []
+    if isinstance(affected, str):
+        affected = [a.strip() for a in affected.split(",")]
+    named |= {str(a) for a in affected}
+    text = " ".join(str(response.get(k) or "") for k in ("feedback", "reasoning"))
+    if text:
+        named |= {c for c in candidates
+                  if re.search(rf"(?<![A-Za-z0-9_]){re.escape(c)}(?![A-Za-z0-9_])", text)}
+    # WP-11: a structured keep/approve/skip is authoritative over a prose mention.
+    if isinstance(actions, dict):
+        named -= {k for k, v in actions.items()
+                  if str(v or "").strip().lower() in {"approve", "skip", "keep"}}
+    return [c for c in candidates if c in named]
+
+
+def _adopt_reviewed_specs(pr: str, edited_blocks, reviewed_specs):
+    """Adopt all reviewed files as one fail-closed operation."""
+    from orchestrator.state_store.spec_adoption import adopt_reviewed_specs
+    return adopt_reviewed_specs(_db(pr), edited_blocks, reviewed_specs)
+
+
+def _plan_targeted_revise(
+    pr: str,
+    response: dict,
+    block_names: list[str],
+    edited_blocks: list[str],
+    reviewed_specs: dict,
+    failed_blocks: list[str],
+    review_summary: str,
+    tier: int,
+) -> dict:
+    """Turn a chip-level ``revise`` into a per-block plan ``{block: reuse_spec}``.
+
+    Scope = blocks the reviewer edited + blocks the chip lead named + blocks
+    that failed their lifecycle; an unscoped revise keeps today's whole-tier
+    re-entry. Reviewer edits are ADOPTED (the reviewed copy becomes the
+    canonical spec, newer than the block's RTL/TB so those regenerate); named
+    blocks get the chip lead's findings as ``gate_feedback.txt`` and re-spec
+    from their current spec; everything in scope drops ``best_result`` so the
+    RTL skip-regen fast path cannot reuse a pass measured against the old spec.
+    Blocks outside the scope keep their completed result untouched.
+    """
+    named = _revise_named_blocks(response, block_names)
+    edited = [b for b in block_names if b in set(edited_blocks)]
+    scope = [b for b in block_names
+             if b in set(edited) | set(named) | set(failed_blocks)]
+    unscoped = not scope
+    if unscoped:
+        scope = list(block_names)
+    feedback = (str(response.get("feedback") or "").strip()
+                or str(response.get("reasoning") or "").strip()
+                or review_summary.strip())
+    spec_dir = Path(pr) / "arch" / "uarch_specs"
+    plan: dict[str, bool] = {}
+    adoption = _adopt_reviewed_specs(pr, edited, reviewed_specs)
+    adopt_failed = set(edited) if not adoption.ok else set()
+    for name in scope:
+        canonical = spec_dir / f"{name}.md"
+        # A named block (or an unscoped whole-tier revise) re-specs with the
+        # chip lead's findings; an edited-only block implements the reviewed
+        # spec as-is; a failed-only block retries its RTL against its spec.
+        needs_respec = unscoped or name in named
+        if needs_respec and feedback:
+            bdir = Path(pr) / ".coresmith" / "blocks" / name
+            bdir.mkdir(parents=True, exist_ok=True)
+            try:
+                with (bdir / "gate_feedback.txt").open("a", encoding="utf-8") as fh:
+                    fh.write(
+                        f"\n\n## INTEGRATION REVIEW REVISION (tier {tier}; MANDATORY)\n\n"
+                        f"{feedback}\n"
+                    )
+            except OSError:
+                pass
+        plan[name] = bool(canonical.exists()) and not needs_respec and name not in adopt_failed
+        _db(pr).clear_result(name, "best")
+    return plan
 
 
 async def integration_review_node(state: OrchestratorState) -> dict:
@@ -6021,55 +5574,33 @@ async def integration_review_node(state: OrchestratorState) -> dict:
         })
         return {}
 
-    # Under block-goldens the per-tier LLM integration review is REDUNDANT and
-    # actively harmful, so skip it in BOTH passes (defer all cross-block checking
-    # to the real gates):
-    #   - pass 1 ("uarch"): the uarch_integration_gate after all tiers validates
-    #     cross-block coherence on the composed Amaranth chip model (byte-exact vs
-    #     the reference) before any RTL.
-    #   - pass 2 ("rtl"): integration_check (chip_top assembly + lint/wiring),
-    #     integration_dv (RTL == composed chip model) and validation_dv (RTL ==
-    #     golden) are the authoritative RTL-level cross-block gates.
-    # Beyond redundancy, the reviewer EDITS uArch specs on every run; in pass 2
-    # that trips the "stale RTL after spec edit" guard below -> approve routes to
-    # advance_tier but the spec-edit/re-DV churn re-parks here -> an integration-
-    # review REVISE-LOOP that never reaches integration_dv. Skipping it removes
-    # the loop without weakening correctness (the gates above still run). Also
-    # avoids LangGraph re-running the reviewer LLM on every resume (slow / can
-    # hang). Flag off -> unchanged. CORESMITH_STRICT_INTEGRATION_REVIEW=1 forces
-    # the old per-tier review (and its auto-revise) back on for both passes.
-    import os as _os
-
-    from orchestrator.architecture import composition as _composition
-    if (
-        _composition.block_goldens_enabled()
-        and _os.environ.get("CORESMITH_STRICT_INTEGRATION_REVIEW") != "1"
-    ):
-        _phase = state.get("pipeline_phase", "rtl")
-        log("  [INTEGRATION REVIEW] block-goldens: deferring per-tier cross-block "
-            f"review (phase={_phase}) to the uarch gate + integration_dv/"
-            "validation_dv", GREEN)
-        # Even when the per-tier LLM review is skipped, still surface any
-        # mem-price DEFERs (over-budget storage) into the event stream so the
-        # deferred excess stays visible (Deliverable 3).
+    pending = {k: v for k, v in (state.get("integration_approved_specs") or {}).items()
+               if k in block_names}
+    if pending:
+        import hashlib
         try:
-            from orchestrator.langgraph import mem_price as _mprice
-            _deferred = _mprice.deferred_over_budget_blocks(pr, block_names)
-        except Exception:  # noqa: BLE001
-            _deferred = []
-        if _deferred:
-            log("  [INTEGRATION REVIEW] mem-price DEFERRED (over-budget accepted): "
-                + "; ".join(f"{d['block']} {d.get('total_area_mm2')} mm^2"
-                            for d in _deferred), RED)
-        write_graph_event(pr, "Integration Review", "graph_node_exit", {
-            "action": f"skip (block-goldens phase={_phase}; deferred to gate + "
-                      "integration_dv/validation_dv)",
-            "tier": tier,
-            "mem_price_deferred": _deferred,
+            verified = all(
+                hashlib.sha256((Path(pr) / "arch/uarch_specs" / f"{name}.md").read_bytes()).hexdigest() == digest
+                and (_db(pr).result(name, "best") or {}).get("spec_sha256") == digest
+                and (_db(pr).result(name, "best") or {}).get("sim_passed") is True
+                for name, digest in pending.items())
+        except OSError:
+            verified = False
+        if verified:
+            return {"integration_review_action": "approve", "integration_review_failed": False,
+                    "integration_approved_specs": None,
+                    "revise_blocks": {k: v for k, v in (state.get("revise_blocks") or {}).items()
+                                      if k not in block_names} or None}
+        response = await _resolve_interrupt({
+            "type": "uarch_spec_reverification_failed", "tier": tier,
+            "reason": "Approved spec hashes do not have matching successful verification results",
+            "affected_blocks": list(pending), "supported_actions": ["retry", "abort"],
         })
-        return {"integration_review_action": "approve",
-                "integration_review_failed": False}
+        return {"integration_review_action": "revise" if response.get("action") == "retry" else "abort",
+                "integration_review_failed": True, "integration_approved_specs": pending,
+                "revise_blocks": {name: True for name in pending}}
 
+    # Review once; approved edits re-enter verification using their adopted hashes.
     try:
         from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL
         from orchestrator.langchain.agents.integration_review_agent import (
@@ -6083,10 +5614,14 @@ async def integration_review_node(state: OrchestratorState) -> dict:
         review_summary = result.get("summary", "No issues found.")
         issues_found = result.get("issues_found", 0)
         issues_fixed = result.get("issues_fixed", 0)
+        edited_blocks = [b for b in (result.get("edited_blocks") or [])
+                         if b in block_names]
+        reviewed_specs = dict(result.get("reviewed_specs") or {})
     except Exception as exc:
         review_summary = f"Integration review failed: {exc}"
         issues_found = 1
         issues_fixed = 0
+        edited_blocks, reviewed_specs = [], {}
         review_failed = True
     else:
         review_failed = False
@@ -6110,17 +5645,6 @@ async def integration_review_node(state: OrchestratorState) -> dict:
         review_summary = f"{failure_note}\n\n{review_summary}"
         issues_found = int(issues_found or 0) + len(failed_tier_blocks)
         review_failed = True
-    if issues_fixed:
-        stale_artifact_note = (
-            "Blocking uArch edits: integration review modified current-tier "
-            "uArch specs after RTL/testbench artifacts were generated. The "
-            "affected blocks must be regenerated from uArch before this tier "
-            "can be approved; otherwise stale RTL can falsely pass against the "
-            "old contract."
-        )
-        review_summary = f"{stale_artifact_note}\n\n{review_summary}"
-        review_failed = True
-
     log(f"  [INTEGRATION REVIEW] {review_summary[:200]}", GREEN if issues_found == 0 else YELLOW)
 
     spec_paths = {
@@ -6159,6 +5683,7 @@ async def integration_review_node(state: OrchestratorState) -> dict:
         "review_summary": review_summary,
         "issues_found": issues_found,
         "issues_fixed": issues_fixed,
+        "edited_blocks": edited_blocks,
         "mem_price_deferred": mem_price_deferred,
         "review_failed": review_failed,
         "supported_actions": ["approve", "revise", "abort"],
@@ -6167,12 +5692,15 @@ async def integration_review_node(state: OrchestratorState) -> dict:
             "cross-block interface coherence. Present this as a CHIP-LEVEL "
             "review to the user. The user approves or rejects ALL specs at "
             "once. If the Integration Agent fixed mismatches, summarize "
-            "what was changed. If the user wants revisions, use "
-            "restart_block(from_node='generate_uarch_spec') for affected blocks."
+            "what was changed. A `revise` is TARGETED: only the blocks in "
+            "edited_blocks (the reviewed spec is adopted as-is) plus any "
+            "block you name in `affected_blocks` / `block_actions` (re-spec "
+            "with your `feedback`) re-enter the tier; the other blocks keep "
+            "their passing result. A revise naming nothing re-runs the tier."
         ),
     }
 
-    response = interrupt(payload)
+    response = await _resolve_interrupt(payload)
     action = response.get("action", "abort")
     if action == "approve" and failed_tier_blocks:
         log(
@@ -6181,53 +5709,73 @@ async def integration_review_node(state: OrchestratorState) -> dict:
             YELLOW,
         )
         action = "revise"
-    if action == "approve" and issues_fixed:
-        # NOTE: The integration_review agent edits specs on every run, even
-        # cosmetically, so this auto-revise creates an infinite loop:
-        # revise -> restart_block -> integration_review edits again -> revise...
-        # When the outer agent explicitly approves, trust that decision;
-        # the integration_check
-        # node at RTL level will catch any real cross-block lint/wiring
-        # mismatch and surface it as a normal failure. Setting
-        # CORESMITH_STRICT_INTEGRATION_REVIEW=1 restores the old auto-revise.
-        import os as _os
-        if _os.environ.get("CORESMITH_STRICT_INTEGRATION_REVIEW") == "1":
-            log(
-                "  [INTEGRATION REVIEW] Approval rejected because uArch specs "
-                "were edited after block artifacts were generated; treating as revise "
-                "(CORESMITH_STRICT_INTEGRATION_REVIEW=1)",
-                YELLOW,
-            )
-            action = "revise"
-        else:
-            log(
-                "  [INTEGRATION REVIEW] Spec edits were made; honoring explicit "
-                "approve (integration_check at RTL level will catch real mismatches). "
-                "Export CORESMITH_STRICT_INTEGRATION_REVIEW=1 to force revise.",
-                YELLOW,
-            )
-    if action == "revise" and issues_found == 0 and not review_failed:
+    if (action == "revise" and issues_found == 0 and not review_failed
+            and _is_content_free_revise(response)):
+        # Only downgrade CONTENT-FREE revises (the stale auto-revise churn
+        # class). A chip-lead/human revise carrying reasoning, feedback, or
+        # block_actions names real stale-RTL findings -- discarding one sent
+        # a known-bad chip straight into integration_dv (arm-U audit).
         log(
-            "  [INTEGRATION REVIEW] Clean review returned revise; "
-            "treating as approve",
+            "  [INTEGRATION REVIEW] Clean review returned content-free "
+            "revise; treating as approve",
             YELLOW,
         )
         action = "approve"
 
+    # Keep the entries of a plan that still names blocks in LATER tiers (a
+    # DV-failure revise spanning tiers); this tier's own entries are replaced.
+    _carry = {k: v for k, v in (state.get("revise_blocks") or {}).items()
+              if k not in block_names}
+    revise_blocks: dict | None = _carry or None
+    approved_specs = None
+    if action == "approve":
+        try:
+            if review_failed:
+                raise ValueError(review_summary)
+            adoption = _adopt_reviewed_specs(pr, edited_blocks, reviewed_specs)
+            if not adoption.ok:
+                raise ValueError(adoption.error)
+            revise_blocks = {**_carry, **{name: True for name in adoption.reverify}} or None
+            approved_specs = {name: adoption.hashes[name] for name in adoption.reverify} or None
+        except Exception as exc:
+            review_failed = True
+            response = await _resolve_interrupt({
+                "type": "uarch_spec_adoption_failed", "tier": tier,
+                "affected_blocks": edited_blocks, "reason": str(exc),
+                "supported_actions": ["retry", "abort"],
+            })
+            action = "retry" if response.get("action") == "retry" else "abort"
+            revise_blocks = _carry or None
+    if action == "revise":
+        try:
+            revise_blocks = {**_carry, **_plan_targeted_revise(
+                pr, response, block_names, edited_blocks, reviewed_specs,
+                failed_tier_blocks, review_summary, tier,
+            )}
+        except Exception as exc:
+            review_failed = True
+            response = await _resolve_interrupt({"type": "uarch_spec_adoption_failed",
+                "reason": str(exc), "supported_actions": ["retry", "abort"]})
+            action = "retry" if response.get("action") == "retry" else "abort"
     write_graph_event(pr, "Integration Review", "graph_node_exit", {
         "action": action, "issues_found": issues_found,
         "review_failed": review_failed,
+        "edited_blocks": edited_blocks,
+        "revise_blocks": revise_blocks,
     })
-
     if action == "abort":
         log("  [INTEGRATION REVIEW] Aborted by user/agent", RED)
     elif action == "revise":
-        log("  [INTEGRATION REVIEW] Revision requested — "
-            "use restart_block to re-generate affected specs", YELLOW)
-
+        _desc = ', '.join(
+            f"{b} ({'implement reviewed spec' if reuse else 're-spec with feedback'})"
+            for b, reuse in (revise_blocks or {}).items())
+        log(f"  [INTEGRATION REVIEW] Targeted revise -- re-entering: {_desc}",
+            YELLOW)
     return {
         "integration_review_action": action,
         "integration_review_failed": review_failed,
+        "integration_approved_specs": approved_specs,
+        "revise_blocks": revise_blocks,
     }
 
 
@@ -6245,7 +5793,30 @@ async def advance_tier_node(state: OrchestratorState) -> dict:
         "passed_so_far": passed,
     })
 
-    return {"current_tier_index": new_idx}
+    plan = state.get("revise_blocks") or None
+    tier_list = list(state.get("tier_list") or [])
+    queue = state.get("block_queue", [])
+    # A targeted re-entry must not re-run tiers that are already done:
+    # skip every following tier whose blocks all passed earlier and none of
+    # which the plan names (first pass: nothing is completed, nothing skips).
+    passed_names = {b.get("name") for b in _current_phase_completed(state)
+                    if b.get("success")}
+    while new_idx < len(tier_list):
+        names = [b["name"] for b in queue if b.get("tier", 1) == tier_list[new_idx]]
+        if names and all(n in passed_names for n in names) \
+                and not any(n in (plan or {}) for n in names):
+            log(f"  Tier {tier_list[new_idx]}: all {len(names)} blocks already "
+                "passed and none are planned -- skipping", CYAN)
+            new_idx += 1
+            continue
+        break
+    keep = None
+    if plan:
+        later = set(tier_list[new_idx:])
+        if any(b.get("name") in plan and b.get("tier", 1) in later
+               for b in queue):
+            keep = plan
+    return {"current_tier_index": new_idx, "revise_blocks": keep}
 
 
 # ---------------------------------------------------------------------------
@@ -6257,17 +5828,24 @@ def route_after_integration_review(state: OrchestratorState) -> str:
 
     approve → advance_tier (continue normally)
     abort   → END (terminate the pipeline)
-    revise  → init_tier (rerun the current tier from the revised uArch specs)
+    revise  → init_tier (re-enter ONLY the blocks in ``revise_blocks``; the
+              reviewed specs were adopted and the chip lead's findings
+              written as gate feedback by integration_review_node)
     """
     action = state.get("integration_review_action", "approve")
-    if action == "abort":
-        return END
+    if action == "retry":
+        return "integration_review"
     if action == "revise":
+        return "init_tier"
+    if action == "abort" or state.get("integration_review_failed"):
+        return END
+    if state.get("integration_approved_specs"):
         return "init_tier"
     return "advance_tier"
 
 
 route_after_integration_review.__edge_labels__ = {
+    "integration_review": "RETRY ADOPTION",
     "advance_tier": "APPROVED",
     "init_tier": "REVISE",
     END: "ABORT",
@@ -6275,15 +5853,7 @@ route_after_integration_review.__edge_labels__ = {
 
 
 def route_next_tier(state: OrchestratorState) -> str:
-    """Route after tier advancement.
-
-    More tiers -> ``init_tier``. Tiers exhausted:
-      - two-pass phase ``"uarch"`` (pass 1 done) -> ``uarch_integration_gate``
-        (validate the decomposition before any RTL).
-      - phase ``"rtl"`` / flag-off default -> ``pipeline_complete`` (unchanged).
-    ``uarch_integration_gate`` is only ever returned when phase is ``"uarch"``,
-    which only happens with block-goldens on (where that node exists).
-    """
+    """Route after advance_tier: next tier, or pipeline_complete when the tier list is exhausted or a block aborted."""
     completed = state.get("completed_blocks", [])
     if any(b.get("aborted") for b in completed):
         return "pipeline_complete"
@@ -6292,14 +5862,11 @@ def route_next_tier(state: OrchestratorState) -> str:
     current_idx = state.get("current_tier_index", 0)
     if current_idx < len(tier_list):
         return "init_tier"
-    if state.get("pipeline_phase", "rtl") == "uarch":
-        return "uarch_integration_gate"
     return "pipeline_complete"
 
 
 route_next_tier.__edge_labels__ = {
     "init_tier": "NEXT TIER",
-    "uarch_integration_gate": "µARCH GATE",
     "pipeline_complete": "ALL DONE",
 }
 
@@ -6403,7 +5970,7 @@ async def pipeline_complete_node(state: OrchestratorState) -> dict:
             "missing_blocks": missing_blocks,
         })
 
-        resume = interrupt(payload)
+        resume = await _resolve_interrupt(payload)
 
         action = resume.get("action") if isinstance(resume, dict) else "abort"
         rv_attempts = int(state.get("revalidate_attempts", 0) or 0)
@@ -6439,12 +6006,18 @@ async def pipeline_complete_node(state: OrchestratorState) -> dict:
                 write_graph_event(pr, "Pipeline Incomplete", "uarch_patch_on_retry", {
                     "blocks": _patched, "pass": rv_attempts + 1,
                 })
+            # WP-10b: re-enter ONLY the failed/missing blocks through the
+            # targeted plan (spec reused unless a uarch_patch re-specced it);
+            # init_tier skips tiers with nothing to redo.
+            _plan = {n: (n not in _patched)
+                     for n in list(failed_names) + list(missing_blocks)}
             return {
                 "pipeline_done": False,
                 "pipeline_aborted": False,
                 "revalidate_pending": True,
                 "revalidate_attempts": rv_attempts + 1,
                 "current_tier_index": 0,
+                "revise_blocks": _plan or None,
             }
 
         if action == "retry":
@@ -6575,6 +6148,117 @@ def _merge_mismatches(
     return merged
 
 
+async def _park_candidate_failure(pr: str, design_name: str, rtl_paths: dict,
+                                  reason: str, errors: list, top_rtl_path: str,
+                                  *, phase: str = "single_block", deterministic: bool = False) -> dict:
+    """Park a rejected candidate without claiming a chassis assembly failed."""
+    from orchestrator.harness.top_module import invalidate_candidate
+    invalidate_candidate(pr)
+    errors = [str(e) for e in (errors or [])][:24]
+    log(f"  [INTEGRATION] {reason} -- parking", RED)
+    for error in errors[:8]:
+        log(f"      - {error}", RED)
+    payload = {
+        "type": "integration_failure", "phase": phase,
+        "design_name": design_name, "top_rtl_path": top_rtl_path,
+        "block_count": len(rtl_paths), "block_rtl_paths": rtl_paths,
+        "error_count": max(1, len(errors)), "lint_clean": False,
+        "reason": reason, "errors": errors, "deterministic": deterministic,
+        "supported_actions": ["retry", "fix_rtl", "abort"],
+        "outer_agent_guidance": (
+            f"Candidate adoption failed ({reason}; see errors). Fix the task top "
+            "declaration or the block RTL identified by the errors before retrying. "
+            "A declared top must already exist in the selected RTL on the single-block path. "
+            "An unchanged deterministic mismatch will recur on retry."
+        ),
+        "reference_files": {"task": str(Path(pr) / "inputs/task.yaml"),
+                            "top_rtl": top_rtl_path},
+    }
+    write_graph_event(pr, "Integration Check", "candidate_adoption_failed", payload)
+    resp = await _resolve_interrupt(payload)
+    resp = resp if isinstance(resp, dict) else {}
+    action = resp.get("action", "abort")
+    result = {
+        "reason": reason, "candidate_adoption_failed": True,
+        "errors": errors, "lint_clean": False, "top_rtl_path": top_rtl_path,
+        "action_taken": action, "deterministic": deterministic,
+    }
+    if action in ("retry", "fix_rtl"):
+        result["retry_requested"] = True
+        result["fix_applied"] = str(resp.get("rtl_fix_description", ""))
+    else:
+        result.update(aborted=True, skipped=True)
+    write_graph_event(pr, "Integration Check", "graph_node_exit", {
+        "action": action, "phase": phase,
+    })
+    log(f"  [INTEGRATION] {phase} park -> {action}", YELLOW if result.get("retry_requested") else RED)
+    return result
+
+
+async def _park_caravel_assembly_failure(pr: str, design_name: str, rtl_paths: dict,
+                                         reason: str, errors: list, top_rtl_path: str) -> dict:
+    """WP-45: the deterministic Caravel assembly is the ONLY way to produce the
+    graded `user_project_wrapper`; when it is not clean, park instead of
+    falling back to an LLM-assembled top with a different module name."""
+    from orchestrator.chassis.profile import CARAVEL, declared_chassis
+    if declared_chassis(pr) != CARAVEL:
+        return await _park_candidate_failure(pr, design_name, rtl_paths, reason, errors,
+                                             top_rtl_path, phase="candidate_adoption")
+    errors = [str(e) for e in (errors or [])][:24]
+    log(f"  [INTEGRATION] deterministic Caravel assembly NOT clean ({reason}) -- "
+        "parking (no Integration Lead fallback for a locked Caravel boundary)", RED)
+    for _e in errors[:8]:
+        log(f"      - {_e}", RED)
+    write_graph_event(pr, "Integration Check", "caravel_assembly_failed", {
+        "reason": reason, "errors": errors, "top_rtl_path": top_rtl_path,
+    })
+    payload = {
+        "type": "integration_failure",
+        "phase": "caravel_assembly",
+        "design_name": design_name,
+        "top_rtl_path": top_rtl_path,
+        "block_count": len(rtl_paths or {}),
+        "error_count": max(1, len(errors)),
+        "lint_clean": False,
+        "assembly_reason": reason,
+        "assembly_errors": errors,
+        "block_rtl_paths": rtl_paths,
+        "supported_actions": ["retry", "fix_rtl", "abort"],
+        "outer_agent_guidance": (
+            "The ENGINE assembles the graded `user_project_wrapper` from the "
+            "blocks and the interface contract; that assembly did not come out "
+            f"clean ({reason}; see assembly_errors). There is NO LLM-integrator "
+            "fallback for a locked Caravel boundary: a differently named top "
+            "cannot be graded. Fix the block RTL or port declarations the "
+            "errors point at (fix_rtl), or retry after an engine/operator fix. "
+            "abort only if the block set itself is wrong."
+        ),
+        "reference_files": {"top_rtl": top_rtl_path},
+    }
+    resp = await _resolve_interrupt(payload)
+    action = (resp or {}).get("action", "abort") if isinstance(resp, dict) else "abort"
+    write_graph_event(pr, "Integration Check", "graph_node_exit", {
+        "action": action, "phase": "caravel_assembly",
+    })
+    result = {
+        "reason": f"caravel assembly {reason}",
+        "caravel_assembly_failed": True,
+        "assembly_errors": errors,
+        "top_rtl_path": top_rtl_path,
+        "action_taken": action,
+    }
+    if action in ("retry", "fix_rtl"):
+        result["retry_requested"] = True
+        result["fix_applied"] = str((resp or {}).get("rtl_fix_description", ""))
+        log(f"  [INTEGRATION] caravel assembly park -> {action}; re-running the "
+            "integration check", YELLOW)
+    else:
+        result["aborted"] = True
+        result["skipped"] = True
+        log("  [INTEGRATION] caravel assembly park -> abort", RED)
+    return result
+
+
 async def integration_check_node(state: OrchestratorState) -> dict:
     """Run the Integration Lead agent to check compatibility and generate top-level RTL.
 
@@ -6662,86 +6346,6 @@ async def integration_check_node(state: OrchestratorState) -> dict:
         # Default-on; opt out with CORESMITH_INTEGRATION_STALENESS_GATE=0.
         # Only blocks with a recorded contract stamp are checked, so runs
         # predating the stamp are unaffected.
-        _stale_gate_on = os.environ.get(
-            "CORESMITH_INTEGRATION_STALENESS_GATE", ""
-        ).strip().lower() not in {"0", "false", "no", "off"}
-        if _stale_gate_on:
-            from orchestrator.langgraph.pipeline_helpers import (
-                stale_uarch_spec_blocks,
-            )
-            _passed_names = [b.get("name", "") for b in passed_blocks
-                             if b.get("name")]
-            _stale = stale_uarch_spec_blocks(pr, _passed_names)
-            if _stale:
-                _stale_names = [s["block"] for s in _stale]
-                log(f"  [INTEGRATION] STALE uarch specs: {_stale_names} -- "
-                    f"the interface contract changed after these specs were "
-                    f"generated; refusing to assemble", RED)
-                write_graph_event(pr, "Integration Check",
-                                  "integration_staleness_blocked",
-                                  {"stale_blocks": _stale_names})
-                payload = {
-                    "type": "integration_failure",
-                    "error_kind": "stale_uarch_specs",
-                    "stale_blocks": _stale,
-                    "error_count": len(_stale),
-                    "supported_actions": ["retry", "override", "abort"],
-                    "outer_agent_guidance": (
-                        "Contract-staleness preflight: these blocks' uarch "
-                        "specs were generated against an OLDER interface "
-                        "contract than the live one, so their RTL carries "
-                        "stale widths/fields; assembling would force "
-                        "truncation adapters that destroy the amended "
-                        "semantics. For each stale block: invalidate its "
-                        "recorded sim-pass (set sim_passed=false in "
-                        ".coresmith/blocks/<b>/best_result.json) and drive a "
-                        "re-spec/regen of that block against the live "
-                        "contract, then resume `retry` to re-run this "
-                        "preflight. `override` proceeds anyway -- ONLY for a "
-                        "verified false alarm. `abort` ends integration."
-                    ),
-                }
-                response = interrupt(payload) or {}
-                _act = response.get("action", "retry")
-                write_graph_event(pr, "Integration Check",
-                                  "integration_staleness_resume",
-                                  {"action": _act})
-                if _act == "override":
-                    log("  [INTEGRATION] staleness OVERRIDE by chip-lead -- "
-                        "assembling despite stale specs", YELLOW)
-                elif _act == "abort":
-                    result = {
-                        "aborted": True, "skipped": True,
-                        "reason": ("stale uarch specs (aborted): "
-                                   f"{_stale_names}"),
-                        "error": "stale_uarch_specs",
-                        "error_count": len(_stale),
-                        "stale_blocks": _stale_names,
-                    }
-                    write_graph_event(pr, "Integration Check",
-                                      "graph_node_exit", result)
-                    return {"integration_result": result}
-                else:  # retry (after out-of-band re-spec) -> re-check NOW
-                    _stale2 = stale_uarch_spec_blocks(pr, _passed_names)
-                    if _stale2:
-                        _s2 = [s["block"] for s in _stale2]
-                        log(f"  [INTEGRATION] staleness persists after retry "
-                            f"({_s2}) -- ending integration (fail-closed, "
-                            f"re-drive the stale blocks first)", RED)
-                        result = {
-                            "aborted": True, "skipped": True,
-                            "reason": ("stale uarch specs persist after "
-                                       f"retry: {_s2}"),
-                            "error": "stale_uarch_specs",
-                            "error_count": len(_stale2),
-                            "stale_blocks": _s2,
-                        }
-                        write_graph_event(pr, "Integration Check",
-                                          "graph_node_exit", result)
-                        return {"integration_result": result}
-                    log("  [INTEGRATION] staleness cleared on retry -- "
-                        "proceeding to assembly", GREEN)
-
         connections, design_name = await asyncio.to_thread(
             load_architecture_connections, pr
         )
@@ -6761,6 +6365,15 @@ async def integration_check_node(state: OrchestratorState) -> dict:
         log(f"  [INTEGRATION] Found {len(connections)} connections, "
             f"design: {design_name}", CYAN)
         span.set_attribute("connection_count", len(connections))
+
+        # WP-31/68: retire only superseded assembly artifacts, at the point
+        # integration will rebuild them. Tier re-entry and reporting must
+        # preserve the current validated candidate for downstream consumers.
+        retired = _retire_derived_integration_artifacts(pr)
+        if retired:
+            log(f"  [INTEGRATION] Retired superseded derived artifact(s): {retired}", CYAN)
+            write_graph_event(pr, "Integration Check", "derived_artifacts_retired",
+                              {"files": retired})
 
         rtl_paths = await asyncio.to_thread(
             discover_block_rtl, pr, passed_blocks
@@ -6830,7 +6443,7 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                         "block_specs": ".coresmith/block_specs.json",
                     },
                 }
-                response = interrupt(payload) or {}
+                response = (await _resolve_interrupt(payload)) or {}
                 _act = response.get("action", "retry")
                 write_graph_event(pr, "Integration Check",
                                   "block_rtl_unresolved_resume",
@@ -6914,6 +6527,57 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                 "reason": "No block RTL could be parsed",
             }}
 
+        # A block whose RTL file RESOLVED but whose ports could NOT be parsed is
+        # dropped from `modules` -- the same silent-deletion defect the
+        # completeness gate above exists to stop, one step later (and with
+        # 1-of-2 parsed it would even take the single-block wrapper path below).
+        # Park in the same shape rather than assembling around it.
+        _unparsed = [n for n in rtl_paths if n not in modules]
+        if _unparsed and _block_rtl_complete_gate_enabled():
+            log(f"  [INTEGRATION] BLOCK PORTS UNPARSEABLE for {_unparsed} -- "
+                f"refusing to assemble a chip that is missing a block", RED)
+            write_graph_event(pr, "Integration Check", "block_rtl_unparsed",
+                              {"unparsed_blocks": _unparsed,
+                               "parsed_blocks": sorted(modules)})
+            response = (await _resolve_interrupt({
+                "type": "integration_failure",
+                "error_kind": "unparsed_block_rtl",
+                "unparsed_blocks": _unparsed,
+                "unparsed_block_rtl_paths": {n: rtl_paths[n] for n in _unparsed},
+                "error_count": len(_unparsed),
+                "supported_actions": ["override", "abort"],
+                "outer_agent_guidance": (
+                    "These blocks' RTL files exist but their module header "
+                    "could not be parsed, so assembling now would ship a chip "
+                    "with those blocks DELETED -- no instance, no ports. For "
+                    "each one: check that the file declares a module matching "
+                    "the block (see .coresmith/block_specs.json rtl_target) in "
+                    "a form the port parser accepts. `override` assembles "
+                    "WITHOUT those blocks -- only for a block that genuinely "
+                    "does not belong in the chip. `abort` ends integration."
+                ),
+            })) or {}
+            _act = response.get("action", "abort")
+            write_graph_event(pr, "Integration Check",
+                              "block_rtl_unparsed_resume", {"action": _act})
+            if _act == "override":
+                log("  [INTEGRATION] unparseable block RTL OVERRIDE -- "
+                    f"assembling WITHOUT {_unparsed}", YELLOW)
+                rtl_paths = {n: _rp for n, _rp in rtl_paths.items()
+                             if n in modules}
+            else:
+                result = {
+                    "aborted": True, "skipped": True,
+                    "reason": ("block RTL ports unparseable: "
+                               f"{_unparsed}"),
+                    "error": "unparsed_block_rtl",
+                    "error_count": len(_unparsed),
+                    "missing_blocks": _unparsed,
+                }
+                write_graph_event(pr, "Integration Check",
+                                  "graph_node_exit", result)
+                return {"integration_result": result}
+
         block_port_summaries = []
         for name, mod in sorted(modules.items()):
             block_port_summaries.append({
@@ -6952,36 +6616,61 @@ async def integration_check_node(state: OrchestratorState) -> dict:
             safe_name = f"top_{safe_name}"
         output_path = str(rtl_dir / f"{safe_name}.v")
 
-        # Single-block designs: generate a passthrough wrapper that
-        # instantiates the block and wires all ports to the top level.
-        # This ensures the backend always has an integration top-level
-        # module regardless of block count.
+        # A declared single-block top must already exist in the selected RTL.
+        # Only an undeclared top permits a generated passthrough wrapper.
         if len(modules) == 1:
+            from orchestrator.harness.top_module import (
+                declared_top,
+                module_declared_in,
+                write_candidate_receipt,
+            )
             solo_name, solo_mod = next(iter(modules.items()))
-            top_name = f"{safe_name}_top" if not safe_name.endswith("_top") else safe_name
-            lines = [f"module {top_name} ("]
-            port_decls = []
-            for p in solo_mod.ports:
-                width_str = f"[{p.msb}:{p.lsb}] " if p.width > 1 else ""
-                port_decls.append(f"    {p.direction} wire {width_str}{p.name}")
-            lines.append(",\n".join(port_decls))
-            lines.append(");")
-            lines.append("")
-            inst_conns = [f"        .{p.name}({p.name})" for p in solo_mod.ports]
-            lines.append(f"    {solo_mod.name} u_{solo_name} (")
-            lines.append(",\n".join(inst_conns))
-            lines.append("    );")
-            lines.append("")
-            lines.append("endmodule")
-            wrapper_src = "\n".join(lines) + "\n"
-            Path(output_path).write_text(wrapper_src, encoding="utf-8")
+            try:
+                top_name = declared_top(pr)
+            except (ValueError, OSError) as exc:
+                return {"integration_result": await _park_candidate_failure(
+                    pr, design_name, rtl_paths, "invalid top declaration on the single-block path",
+                    [str(exc)], "")}
+            single_block_wrapper = not top_name
+            top_mod = solo_mod
+            if top_name:
+                declaring_paths = list(dict.fromkeys(
+                    str(Path(path).resolve()) for path in rtl_paths.values()
+                    if module_declared_in(path, top_name)))
+                if len(declaring_paths) != 1:
+                    return {"integration_result": await _park_candidate_failure(
+                        pr, design_name, rtl_paths, "declared top mismatch on the single-block path",
+                        [f"The task declares top {top_name!r}; expected exactly one block RTL file "
+                         f"declaring it, found {len(declaring_paths)}. No wrapper was generated."],
+                        "", deterministic=True)}
+                output_path = declaring_paths[0]
+                top_mod = await asyncio.to_thread(parse_verilog_ports, output_path, top_name)
+                log(f"  [INTEGRATION] Single-block design: using declared top "
+                    f"{top_name} from {output_path}", GREEN)
+            else:
+                top_name = f"{safe_name}_top" if not safe_name.endswith("_top") else safe_name
+                lines = [f"module {top_name} ("]
+                port_decls = []
+                for p in solo_mod.ports:
+                    width_str = f"[{p.msb}:{p.lsb}] " if p.width > 1 else ""
+                    port_decls.append(f"    {p.direction} wire {width_str}{p.name}")
+                lines.append(",\n".join(port_decls))
+                lines.append(");")
+                lines.append("")
+                inst_conns = [f"        .{p.name}({p.name})" for p in solo_mod.ports]
+                lines.append(f"    {solo_mod.name} u_{solo_name} (")
+                lines.append(",\n".join(inst_conns))
+                lines.append("    );")
+                lines.append("")
+                lines.append("endmodule")
+                Path(output_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+                log(f"  [INTEGRATION] Single-block design: generated wrapper "
+                    f"{top_name} for {solo_name}", GREEN)
 
-            log(f"  [INTEGRATION] Single-block design: generated wrapper "
-                f"{top_name} for {solo_name}", GREEN)
-
-            solo_rtl_path = list(rtl_paths.values())[0]
             lint_result = await asyncio.to_thread(
-                lint_top_level, output_path, [solo_rtl_path], top_name
+                lint_top_level, output_path, list(rtl_paths.values()), top_name,
+                top_module=top_name,
+                project_root=_pr(state),
             )
             lint_clean = lint_result.get("clean", False)
             log(f"  [INTEGRATION] Lint: {'CLEAN' if lint_clean else 'ERRORS'}",
@@ -6992,7 +6681,7 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                 "top_module": top_name,
                 "top_rtl_path": output_path,
                 "block_count": 1,
-                "wire_count": len(solo_mod.ports),
+                "wire_count": len(top_mod.ports),
                 "skipped_connections": [],
                 "mismatches": [],
                 "error_count": 0,
@@ -7000,14 +6689,28 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                 "lint_clean": lint_clean,
                 "lint_errors": lint_result.get("errors", ""),
                 "block_rtl_paths": rtl_paths,
-                "single_block_wrapper": True,
+                "single_block_wrapper": single_block_wrapper,
             }
 
+            try:
+                if not lint_clean:
+                    raise ValueError(f"Single-block candidate did not lint cleanly: {lint_result.get('errors', '')}")
+                # The block can be the elaborated root itself. Every other
+                # expected block must still occur as a reachable child cell.
+                expected = [name for name in rtl_paths
+                            if not (name == solo_name and top_name == solo_mod.name
+                                    and not single_block_wrapper)]
+                write_candidate_receipt(pr, top_name, output_path, rtl_paths,
+                                        expected_blocks=expected,
+                                        note="single-block passthrough" if single_block_wrapper else "single-block declared top",
+                                        integration_result=integration_result)
+            except (ValueError, OSError) as exc:
+                return {"integration_result": await _park_candidate_failure(
+                    pr, design_name, rtl_paths, "candidate validation failed on the single-block path",
+                    [str(exc)], output_path)}
             write_graph_event(pr, "Integration Check", "graph_node_exit", {
-                "success": True,
-                "top_module": top_name,
-                "block_count": 1,
-                "single_block_wrapper": True,
+                "success": True, "top_module": top_name, "block_count": 1,
+                "single_block_wrapper": single_block_wrapper,
             })
             return {"integration_result": integration_result}
 
@@ -7018,12 +6721,19 @@ async def integration_check_node(state: OrchestratorState) -> dict:
         # Lead LLM, which named the top after the design and treated the pad
         # adapter as a peer block -- so the daemon never delivered a gradeable
         # wired top and every chip-lead hand-assembled one.
+        from orchestrator.chassis.profile import CARAVEL, declared_chassis
         from orchestrator.langgraph.integration_helpers import (
             detect_wrapper_block,
             generate_caravel_wrapper_top,
             load_interface_contract_edges,
         )
-        _wrapper_block = detect_wrapper_block(modules)
+        # WP-51: the wrapper block is the one named as the task's declared top.
+        _chassis = declared_chassis(pr)
+        _wrapper_block = detect_wrapper_block(modules, _chassis.top_module) if _chassis else None
+        # WP-24: the generator may have written the wrapper block as the
+        # COMPLETE graded top (pads + every core block instantiated). Re-wrapping
+        # it produces wiring hazards and a nested top the QSPI pin-boundary gate
+        # rejects; adopt it as the chip top instead.
         # The PRD's structured pin map, when present, lets the top route the pads
         # itself -- so the design needs no pin-adapter block and assembly no
         # longer depends on finding one.
@@ -7033,7 +6743,7 @@ async def integration_check_node(state: OrchestratorState) -> dict:
             for _e in _pin_map.errors:
                 log(f"  [INTEGRATION] pin_map: {_e}", RED)
             _pin_map = None
-        if ((_wrapper_block is not None or _pin_map is not None)
+        if (_chassis == CARAVEL and (_wrapper_block is not None or _pin_map is not None)
                 and _deterministic_caravel_top_enabled()):
             if _pin_map is not None:
                 log(f"  [INTEGRATION] pin map declared ({len(_pin_map.entries)} "
@@ -7080,13 +6790,21 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                     "wiring_errors": _wiring_errors[:16],
                     "wiring_errors_path": str(_haz_path),
                 })
+            if _wiring_errors:
+                # WP-45: fail closed -- never hand a locked boundary to the
+                # Integration Lead.
+                return {"integration_result": await _park_caravel_assembly_failure(
+                    pr, design_name, rtl_paths, "wiring hazards",
+                    list(_wiring_errors), "")}
             if not _wiring_errors:
                 top_rtl_path = asm["rtl_path"]
                 # Lint with the pad block's renamed copy swapped in (avoids a
                 # duplicate `module user_project_wrapper` definition at chip level).
                 _lint_paths = list(asm["lint_block_paths"].values())
                 lint_result = await asyncio.to_thread(
-                    lint_top_level, top_rtl_path, _lint_paths, "user_project_wrapper"
+                    lint_top_level, top_rtl_path, _lint_paths, "user_project_wrapper",
+                    top_module="user_project_wrapper",
+                    project_root=_pr(state),
                 )
                 lint_clean = lint_result.get("clean", False)
                 # Postcondition: every block is instantiated in the assembled top.
@@ -7134,11 +6852,26 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                 # Integration Lead + integration_failure interrupt, the same
                 # fail-closed retry path the generic branch uses.
                 if lint_clean and not missing:
+                    from orchestrator.harness.top_module import write_candidate_receipt
+                    try:   # WP-49/54: the receipt (declared-top check) BEFORE the record
+                        write_candidate_receipt(pr, "user_project_wrapper", top_rtl_path,
+                                                asm["lint_block_paths"], note="caravel assembly",
+                                                expected_blocks=set(modules) - {_dropped},
+                                                integration_result=integration_result)
+                    except (ValueError, OSError) as _exc:
+                        return {"integration_result": await _park_caravel_assembly_failure(
+                            pr, design_name, rtl_paths, "top module mismatch",
+                            [str(_exc)], top_rtl_path)}
                     return {"integration_result": integration_result}
-                log(f"  [INTEGRATION] deterministic Caravel assembly NOT clean "
-                    f"(lint_clean={lint_clean}, missing={missing}) -- "
-                    f"escalating to Integration Lead / fail-closed interrupt",
-                    YELLOW)
+                _errs = [ln for ln in str(lint_result.get("errors", "")).splitlines()
+                         if ln.strip()][:20]
+                if missing:
+                    _errs.append("blocks not instantiated by the assembled wrapper: "
+                                 + ", ".join(missing))
+                return {"integration_result": await _park_caravel_assembly_failure(
+                    pr, design_name, asm["lint_block_paths"],
+                    "lint errors" if not lint_clean else "missing instantiations",
+                    _errs, top_rtl_path)}
             # else: wiring hazards / not-clean assembly -> fall through to the
             # Integration Lead below (which raises the integration_failure
             # interrupt for retry).
@@ -7241,8 +6974,10 @@ async def integration_check_node(state: OrchestratorState) -> dict:
         from orchestrator.langchain.agents.integration_lead import (
             assert_blocks_instantiated,
         )
+        _hier_sources = [top_rtl_path, *rtl_paths.values()]
         postcond = assert_blocks_instantiated(
-            chip_top_text, set(block_rtl_sources.keys())
+            chip_top_text, set(block_rtl_sources.keys()), source_paths=_hier_sources,
+            top_module=module_name, project_root=pr,
         )
         if postcond:
             log(f"  [INTEGRATION] Postcondition failed: {postcond}", RED)
@@ -7250,13 +6985,51 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                 "error": "block_instantiation_postcondition_failed",
                 "missing_summary": postcond,
             })
-            return {"integration_result": {
-                "skipped": True,
+            # WP-22: park for the chip lead instead of ending the run (the
+            # fft256_qspi run went straight to status "done" here).
+            _pc_payload = {
+                "type": "integration_failure",
+                "phase": "postcondition",
+                "design_name": design_name,
+                "top_rtl_path": top_rtl_path,
+                "block_count": len(block_rtl_sources),
+                "error_count": 1,
+                "lint_clean": False,
+                "postcondition": postcond,
+                "block_rtl_paths": rtl_paths,
+                "agent_notes": str(agent_result.get("notes", ""))[:2000],
+                "supported_actions": ["retry", "fix_rtl", "abort"],
+                "outer_agent_guidance": (
+                    "The Integration Lead's chip top does not instantiate every "
+                    "block (postcondition). Either the top dropped blocks (retry "
+                    "re-runs the Integration Lead) or you can wire the missing "
+                    "blocks into the top on disk yourself (fix_rtl). abort only if "
+                    "the block set itself is wrong."
+                ),
+                "reference_files": {"top_rtl": top_rtl_path},
+            }
+            _pc_resp = await _resolve_interrupt(_pc_payload)
+            _pc_action = (_pc_resp or {}).get("action", "abort") if isinstance(_pc_resp, dict) else "abort"
+            write_graph_event(pr, "Integration Check", "graph_node_exit", {
+                "action": _pc_action, "phase": "postcondition",
+            })
+            _pc_result = {
                 "reason": postcond,
                 "postcondition_failed": True,
                 "agent_notes": agent_result.get("notes", ""),
                 "top_rtl_path": top_rtl_path,
-            }}
+                "action_taken": _pc_action,
+            }
+            if _pc_action in ("retry", "fix_rtl"):
+                _pc_result["retry_requested"] = True
+                _pc_result["fix_applied"] = str((_pc_resp or {}).get("rtl_fix_description", ""))
+                log(f"  [INTEGRATION] postcondition park -> {_pc_action}; "
+                    f"re-running the integration check", YELLOW)
+            else:
+                _pc_result["aborted"] = True
+                _pc_result["skipped"] = True
+                log("  [INTEGRATION] postcondition park -> abort", RED)
+            return {"integration_result": _pc_result}
 
         # Memory-primitive postcondition (fix #3): the integration LLM must
         # INSTANTIATE library memory cells (cs_mem/cs_sram/cs_fpmem), never
@@ -7281,41 +7054,6 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                 "top_rtl_path": top_rtl_path,
             }}
 
-        # FUNCTIONAL-IFDEF POSTCONDITION (rung3 split-brain ban) -- the same
-        # generation-time gate the per-block RTL gets, applied to chip_top. A
-        # design module with a two-implementation `ifdef split-brain is
-        # forbidden; the LEGITIMATE synth-blackbox / sim-behavioral pair of a
-        # macro-named memory module (the SRAM-model idiom the dedup preserves)
-        # is ALLOWED (find_functional_ifdef_regions carves it out). Force a
-        # retry so the Integration Lead writes ONE implementation.
-        # CORESMITH_IFDEF_LINT=0 bypasses.
-        try:
-            from orchestrator.langgraph.rtl_storage_lint import (
-                find_functional_ifdef_regions,
-                format_ifdef_lint_report,
-                ifdef_lint_enabled,
-            )
-            if ifdef_lint_enabled() and chip_top_text:
-                _ir = find_functional_ifdef_regions(chip_top_text)
-                if not _ir.ok:
-                    _imsg = format_ifdef_lint_report(_ir, block=module_name)
-                    log(f"  [INTEGRATION] Postcondition failed: split-brain "
-                        f"`ifdef in chip_top ({len(_ir.findings)} region(s))", RED)
-                    write_graph_event(pr, "Integration Check", "graph_node_exit", {
-                        "error": "functional_ifdef_postcondition_failed",
-                        "missing_summary": _imsg[:400],
-                    })
-                    return {"integration_result": {
-                        "skipped": True,
-                        "reason": _imsg,
-                        "postcondition_failed": True,
-                        "agent_notes": agent_result.get("notes", ""),
-                        "top_rtl_path": top_rtl_path,
-                    }}
-        except Exception as _e:  # never let the gate crash integration
-            log(f"  [INTEGRATION] functional-ifdef gate error (skipped): {_e}",
-                YELLOW)
-
         log(f"  [INTEGRATION] Agent generated {module_name}: "
             f"{len(modules)} blocks, "
             f"{agent_result.get('wire_count', 0)} wires", GREEN)
@@ -7324,7 +7062,7 @@ async def integration_check_node(state: OrchestratorState) -> dict:
         block_rtl_list = list(rtl_paths.values())
         lint_result = await asyncio.to_thread(
             lint_top_level, top_rtl_path, block_rtl_list,
-            design_name
+            design_name, project_root=_pr(state), top_module=module_name,
         )
 
         lint_clean = lint_result.get("clean", False)
@@ -7360,15 +7098,15 @@ async def integration_check_node(state: OrchestratorState) -> dict:
             },
         }
 
-        # B3: persist the assembled integration result so the harness
-        # (`coresmith verify chip`) can resolve top_rtl_path + block_rtl_paths
-        # after the daemon parks. Best-effort -- never fails the node.
-        try:
-            _ir_path = Path(pr) / ".coresmith" / "integration_result.json"
-            _ir_path.parent.mkdir(parents=True, exist_ok=True)
-            _ir_path.write_text(json.dumps(integration_result, indent=2, default=str))
-        except Exception:  # noqa: BLE001
-            pass
+        async def adopt_result():
+            from orchestrator.harness.top_module import write_candidate_receipt
+            try:
+                write_candidate_receipt(pr, module_name, top_rtl_path, rtl_paths,
+                                        note="integration lead", integration_result=integration_result)
+                return integration_result
+            except (ValueError, OSError) as exc:
+                return await _park_caravel_assembly_failure(
+                    pr, design_name, rtl_paths, "top module mismatch", [str(exc)], top_rtl_path)
 
         has_issues = len(errors) > 0 or not lint_clean
         if has_issues:
@@ -7422,7 +7160,7 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                 },
             }
 
-            response = interrupt(payload)
+            response = await _resolve_interrupt(payload)
 
             action = response.get("action", "abort")
             write_graph_event(pr, "Integration Check", "graph_node_exit", {
@@ -7536,7 +7274,7 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                             "lint_log": lint_result.get("log_path", ""),
                         },
                     }
-                    response = interrupt(repark_payload)
+                    response = await _resolve_interrupt(repark_payload)
                     action = (
                         response.get("action", "abort")
                         if isinstance(response, dict) else "abort"
@@ -7591,6 +7329,8 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                     integration_result["aborted"] = True
                     log("  [INTEGRATION] Aborted at re-park", RED)
 
+            if lint_clean and not integration_result.get("aborted") and not integration_result.get("skipped_by_user"):
+                integration_result = await adopt_result()
             return {"integration_result": integration_result}
 
         if (
@@ -7653,7 +7393,7 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                 },
             }
 
-            response = interrupt(warning_payload)
+            response = await _resolve_interrupt(warning_payload)
             action = (
                 response.get("action", "abort")
                 if isinstance(response, dict)
@@ -7689,8 +7429,13 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                     "  [INTEGRATION] Aborted on warning triage", RED
                 )
 
+            if lint_clean and not integration_result.get("aborted") and not integration_result.get("skipped_by_user"):
+                integration_result = await adopt_result()
             return {"integration_result": integration_result}
 
+        integration_result = await adopt_result()
+        if not integration_result.get("lint_clean") or integration_result.get("aborted"):
+            return {"integration_result": integration_result}
         log(f"\n{'='*60}", GREEN)
         log("  INTEGRATION CHECK PASSED", GREEN)
         log(f"  Top module: {module_name}", GREEN)
@@ -7712,23 +7457,13 @@ async def integration_check_node(state: OrchestratorState) -> dict:
 
 
 def route_after_integration(state: OrchestratorState) -> str:
-    """Route after integration check: proceed to DV or END.
-
-    Two-pass (block-goldens on): the µarch gate already ran BEFORE RTL, so this
-    routes straight to ``integration_dv`` (no post-integration_check
-    model_integration node). Single-pass (flag off): unchanged -- routes to the
-    ``model_integration`` node (a flag-gated no-op pass-through to DV), so the
-    topology is byte-identical to before the restructure.
-    """
-    from orchestrator.architecture import composition as _composition
-    next_node = (
-        "integration_dv"
-        if _composition.block_goldens_enabled()
-        else "model_integration"
-    )
+    """Route after integration check: proceed to DV or END."""
+    next_node = "integration_dv"
     result = state.get("integration_result") or {}
     if result.get("aborted"):
         return END
+    if result.get("retry_requested"):
+        return "integration_check"   # WP-22: re-run after a postcondition park
     if result.get("skipped") or result.get("skipped_by_user"):
         return END
     if result.get("lint_clean") is False:
@@ -7745,8 +7480,8 @@ def route_after_integration(state: OrchestratorState) -> str:
 
 route_after_integration.__edge_labels__ = {
     END: "DONE",
-    "model_integration": "Model Integration",
     "integration_dv": "DV",
+    "integration_check": "Retry",
 }
 
 
@@ -7754,7 +7489,6 @@ route_after_integration.__edge_labels__ = {
 # Node: model_integration  (LLM model-integration + deterministic Amaranth verify)
 # ---------------------------------------------------------------------------
 #
-# Behind CORESMITH_BLOCK_GOLDENS. When OFF (default) this node is a no-op
 # pass-through to integration_dv -- byte-identical routing to before the
 # feature existed. When ON it (a) calls the model-integration LLM agent to wire
 # every per-block Amaranth block model into a top-level Amaranth chip model
@@ -7766,426 +7500,7 @@ route_after_integration.__edge_labels__ = {
 # passes through to integration_dv.
 
 
-def _shape_of(value) -> str:
-    """Describe a value's CONTAINER (type + keys + element types), NEVER its
-    values -- a contract hint for the integrator, not the oracle."""
-    if isinstance(value, dict):
-        parts = []
-        for k, v in value.items():
-            parts.append(f"{k!r}: {_shape_of(v)}")
-        return "a dict with keys [" + ", ".join(repr(k) for k in value) + "] " \
-            "-> {" + ", ".join(parts) + "}"
-    if isinstance(value, (list, tuple)):
-        kind = "list" if isinstance(value, list) else "tuple"
-        if not value:
-            return f"an empty {kind}"
-        elem = _shape_of(value[0])
-        return f"a {kind}[{elem}] (len={len(value)})"
-    if isinstance(value, (bytes, bytearray)):
-        return f"bytes (len={len(value)})"
-    return type(value).__name__
-
-
-def _describe_reference_output_shape(pr: str, ref_entry_callable) -> str:
-    """Run the reference on the gate's actual stimulus and describe the SHAPE of
-    its return container (type/keys/element types -- never values). This tells the
-    integrator the EXACT container simulate() must return so a multi-output design
-    yields a dict-with-all-keys, not a flat list (gap_class=contract otherwise)."""
-    if ref_entry_callable is None:
-        return ""
-    from orchestrator.architecture import model_integration as _mi
-    # Reuse the gate's stimulus resolution (env file wins, else a small derived
-    # default) so the shape is exactly what the gate will expect.
-    stim, found = _mi._load_env_stimulus()
-    if not found:
-        stim = _mi._default_stimulus(ref_entry_callable)
-    if stim is None:
-        return ""
-    from orchestrator.architecture import composition as _composition
-    out = _composition._run_reference(ref_entry_callable, stim, reraise=False)
-    if out is None:
-        return ""
-    return _shape_of(out)
-
-
-async def _maybe_generate_chip_model(pr: str) -> None:
-    """LLM-generate arch/block_models/_chip_model.py if it is missing.
-
-    Best-effort: any failure is logged and swallowed -- the deterministic gate
-    then no-ops (no _chip_model.py) or flags the divergence.
-    """
-    from orchestrator.architecture import composition as _composition
-
-    root = Path(pr)
-    models_dir = root / "arch" / _composition.BLOCK_MODELS_DIRNAME
-    if not models_dir.is_dir() or not any(models_dir.glob("*.py")):
-        return
-    chip_model_path = models_dir / "_chip_model.py"
-    # Reuse the composed chip model ONLY if present and not stale. A revise_uarch
-    # re-generates the per-block models; blindly keeping the old _chip_model.py
-    # made the gate re-compose a STALE model and emit bit-identical (wrong) output
-    # on every revise, so the bounded revise loop could never converge.
-    if not _chip_model_needs_regen(models_dir, chip_model_path):
-        return
-    if chip_model_path.exists():
-        log("  [MODEL-INTEGRATION] block models changed since _chip_model.py "
-            "(stale); regenerating the composed chip model so revise actually "
-            "re-composes.", YELLOW)
-
-    # Generators need the FULL golden (per-block math), not the gate's bytes-only
-    # wrapper -- use the generator-specific reference.
-    ref_path = _composition.resolve_generator_reference(pr)
-    if not ref_path:
-        log("  [MODEL-INTEGRATION] no reference implementation; skipping "
-            "chip-model generation", YELLOW)
-        return
-    try:
-        reference_impl_source = Path(ref_path).read_text(encoding="utf-8")
-    except OSError as exc:
-        log(f"  [MODEL-INTEGRATION] cannot read {ref_path}: {exc}", YELLOW)
-        return
-
-    import json as _json
-    block_diagram: dict = {}
-    bd_path = root / ".coresmith" / "block_diagram.json"
-    if bd_path.exists():
-        try:
-            block_diagram = _json.loads(bd_path.read_text(encoding="utf-8"))
-        except (OSError, _json.JSONDecodeError):
-            block_diagram = {}
-
-    interface_contracts: dict = {}
-    ic_path = root / ".coresmith" / "interface_contracts.json"
-    if ic_path.exists():
-        try:
-            interface_contracts = _json.loads(ic_path.read_text(encoding="utf-8"))
-        except (OSError, _json.JSONDecodeError):
-            interface_contracts = {}
-
-    # Reference entry name for the agent (so simulate() matches its shape).
-    ref_entry_name = ""
-    ref_entry_callable = None
-    try:
-        from orchestrator.architecture.model_integration import (
-            _load_reference_module,
-        )
-        ref_module = _load_reference_module(ref_path)
-        ref_entry_callable, ref_entry_name = (
-            _composition.resolve_reference_entrypoint(pr, ref_module)
-        )
-    except Exception:  # noqa: BLE001
-        ref_entry_name = ""
-
-    # Derive the reference's OUTPUT CONTAINER shape so the integrator returns
-    # the SAME container (dict-with-all-keys vs flat list). The gate compares
-    # STRUCTURALLY -- a flat list when the reference returns a multi-key dict
-    # is a contract failure even when the streamed bytes are byte-exact. We
-    # describe the CONTAINER ONLY (type + keys + element types), never the
-    # values, so this is a contract hint, not the oracle.
-    ref_output_shape = ""
-    try:
-        ref_output_shape = _describe_reference_output_shape(pr, ref_entry_callable)
-    except Exception:  # noqa: BLE001
-        ref_output_shape = ""
-
-    try:
-        from orchestrator.langchain.agents.model_integration_generator import (
-            ModelIntegrationGenerator,
-        )
-        agent = ModelIntegrationGenerator(temperature=0.1)
-        log("  [MODEL-INTEGRATION] Generating integrated Amaranth chip model "
-            "(_chip_model.py)...", YELLOW)
-        if ref_output_shape:
-            log(f"  [MODEL-INTEGRATION] reference output shape: "
-                f"{ref_output_shape}", YELLOW)
-        await agent.generate(
-            project_root=pr,
-            block_models_dir=str(models_dir),
-            block_diagram=block_diagram,
-            interface_contracts=interface_contracts,
-            reference_impl_source=reference_impl_source,
-            reference_entry_name=ref_entry_name,
-            output_path=str(chip_model_path),
-            reference_output_shape=ref_output_shape,
-        )
-        log(f"  [MODEL-INTEGRATION] Wrote {chip_model_path}", GREEN)
-    except Exception as exc:  # noqa: BLE001 - best-effort; gate is the backstop
-        # A rejected chip model means the composition gate has nothing to
-        # compose: it NO-OPS, and the run proceeds with its strongest
-        # model-vs-golden check silently absent. On the two runs that hit this,
-        # the only trace was this one line, 400 lines up a daemon log. Carry it
-        # forward so the final report and the validation-DV context both say a
-        # gate did not run, and why.
-        log(f"  [MODEL-INTEGRATION] chip-model generation failed ({exc}); the "
-            f"COMPOSITION GATE will NO-OP (no _chip_model.py to compose) -- "
-            f"the run loses its model-vs-golden check", RED)
-        record_carried_forward_defect(pr, {
-            "gate": "model_integration",
-            "kind": "chip_model_generation_failed",
-            "advisory": True,
-            "first_divergence_block": "",
-            "violation_count": 0,
-            "unmodeled": (
-                "the integrated chip model (_chip_model.py) was not produced, "
-                "so the composition gate no-opped: NOTHING compared the wired "
-                "block models against the golden reference on this run"),
-            "detail": (
-                f"chip-model generation failed: {exc}. The composition gate is "
-                f"the run's model-vs-golden check; with no composed model it "
-                f"returns 'not applicable' and every downstream verdict rests "
-                f"on per-block DV alone."),
-            "note": "",
-        })
-
-
-async def model_integration_node(state: OrchestratorState) -> dict:
-    """Model-integration node: LLM integrate -> deterministic Amaranth verify.
-
-    Runs after the last tier + integration_check and BEFORE integration_dv.
-    """
-    from orchestrator.architecture import composition as _composition
-    from orchestrator.architecture import model_integration as _model_integration
-
-    pr = state.get("project_root", str(PROJECT_ROOT))
-
-    # Flag off -> pure no-op. No event, no state mutation: identical to today.
-    if not _composition.block_goldens_enabled():
-        return {}
-
-    write_graph_event(pr, "Model Integration", "graph_node_enter", {})
-
-    with _tracer.start_as_current_span("Model Integration") as span:
-        # (a) LLM model-integration: write _chip_model.py if missing.
-        try:
-            await _maybe_generate_chip_model(pr)
-        except Exception as exc:  # noqa: BLE001
-            log(f"  [MODEL-INTEGRATION] chip-model gen raised: {exc}", YELLOW)
-
-        # (b) deterministic Amaranth-simulation verify. A-Fix 2a: a gate that
-        # RAISES is NOT a pass -- fail-closed. Under CORESMITH_GATE_FAIL_OPEN it
-        # is tolerated (old fail-open behavior); otherwise a synthesized
-        # gate_error violation falls through to the existing interrupt.
-        from orchestrator.langgraph.gate_guard import gate_error_violation, gate_guard
-        _gr = await asyncio.to_thread(
-            gate_guard, "model_integration",
-            _model_integration.run_model_integration_gate, pr,
-        )
-        if _gr.errored and _gr.skipped:
-            # Global fail-open escape hatch engaged: tolerate the gate error.
-            log(f"  [MODEL-INTEGRATION] gate raised; FAIL-OPEN escape active, "
-                f"treating as pass: {_gr.reason}", YELLOW)
-            span.set_attribute("error", _gr.error)
-            write_graph_event(pr, "Model Integration", "graph_node_exit", {
-                "skipped": True, "reason": "gate_error_fail_open",
-            })
-            return {"model_integration_result": {"passed": True, "error": _gr.reason}}
-        if _gr.errored:
-            log(f"  [MODEL-INTEGRATION] gate ERRORED (fail-closed, NOT a pass): "
-                f"{_gr.reason}", RED)
-            span.set_attribute("error", _gr.error)
-            violations = [gate_error_violation(_gr.reason, _gr.error)]
-        else:
-            violations = _gr.value or []
-
-        span.set_attribute("violation_count", len(violations))
-
-        if not violations:
-            # rung2 defect 1: distinguish a real PASS (gate compared a composed
-            # chip model against a golden) from a no-op SKIP (goldenless /
-            # requirements-only run). A no-op must NOT report passed=True.
-            _status = _model_integration.describe_gate_status(pr)
-            if not _status["applicable"]:
-                span.set_attribute("skipped", True)
-                span.set_attribute("skip_reason", _status["reason"])
-                log("  [MODEL-INTEGRATION] SKIPPED (not applicable, NOT a "
-                    f"pass): {_status['reason']}", YELLOW)
-                _record_dv_row(
-                    pr, block="chip_model", scope="chip_model", source="gate",
-                    passed=False, skipped=True, detail=_status["reason"],
-                )
-                write_graph_event(pr, "Model Integration", "graph_node_exit", {
-                    "skipped": True,
-                    "reason": _status["reason"],
-                    "gate_status": _status,
-                })
-                return {"model_integration_result": {
-                    "skipped": True,
-                    "reason": "no golden reference; gate not applicable",
-                    "gate_status": _status,
-                }}
-            log("  [MODEL-INTEGRATION] PASSED (simulated chip model == reference)",
-                GREEN)
-            write_graph_event(pr, "Model Integration", "graph_node_exit", {
-                "passed": True, "violation_count": 0,
-            })
-            return {"model_integration_result": {"passed": True}}
-
-        # ADVISORY BYPASS (CORESMITH_DETERMINISTIC_BFM). The composition
-        # _chip_model.py pin driver is LLM-authored and stimulus/DUT-fragile (it
-        # can mis-decode the IN-window stimulus -> corrupt/all-zero composed
-        # output DESPITE byte-correct per-block models). When the deterministic
-        # integration DV is enabled it is the AUTHORITATIVE RTL-level contract
-        # check downstream on the real chip_top, so a model-level composition
-        # mismatch must NOT hard-block the run (nor trigger a full re-spec of all
-        # blocks). Log LOUDLY, name the mismatch, and PROCEED to integration_dv.
-        # Flag off -> this branch is never taken (byte-identical to before).
-        from orchestrator.langgraph import bfm_lib as _bfm_lib
-        if _bfm_lib.deterministic_bfm_enabled():
-            first = violations[0]
-            first_block = first.get("first_divergence_block", "")
-            log(f"\n{'='*60}", YELLOW)
-            log("  MODEL INTEGRATION GATE MISMATCH -- ADVISORY (non-blocking)",
-                YELLOW)
-            log("  CORESMITH_DETERMINISTIC_BFM=1: the deterministic integration "
-                "DV on the real chip_top RTL is the authoritative contract "
-                "check. The LLM-authored composition _chip_model.py harness is "
-                "stimulus/DUT-fragile; NOT hard-blocking and NOT re-speccing.",
-                YELLOW)
-            log(f"  First-divergence block: {first_block or '(unlocalized)'}",
-                YELLOW)
-            for v in violations[:5]:
-                log(f"    - expected {v.get('expected')!r} got "
-                    f"{v.get('observed')!r}", YELLOW)
-            # Section 3b: do NOT silently swallow a quantified mismatch. Record
-            # a carried-forward defect naming the SPECIFIC unmodeled thing so it
-            # surfaces in the final report + validation-DV context and is
-            # re-checked on the real chip_top rather than lost behind "advisory".
-            _defect = _advisory_composition_defect(pr, "model_integration", violations)
-            record_carried_forward_defect(pr, _defect)
-            if _defect.get("unmodeled"):
-                log(f"  UNMODELED: {_defect['unmodeled']}", YELLOW)
-            log(f"  PROCEEDING to integration_dv (advisory; carried forward).\n"
-                f"{'='*60}\n", YELLOW)
-            write_graph_event(pr, "Model Integration", "graph_node_exit", {
-                "passed": False,
-                "advisory_bypass": True,
-                "violation_count": len(violations),
-                "first_divergence_block": first_block,
-                "carried_forward_defect": True,
-                "unmodeled": _defect.get("unmodeled", ""),
-            })
-            return {"model_integration_result": {
-                "passed": False,
-                "advisory_bypass": True,
-                "first_divergence_block": first_block,
-                "violations": violations[:20],
-                "carried_forward_defect": _defect,
-            }}
-
-        first = violations[0]
-        first_block = first.get("first_divergence_block", "")
-        # Per-field localization (model_integration sets affected_blocks when only
-        # SOME output fields diverged). Carrying it into mir makes init_tier_node
-        # re-spec ONLY those blocks (targeted) instead of broadcasting to all --
-        # the convergence fix for framework-HDL composition runs.
-        affected_blocks: list[str] = []
-        for v in violations:
-            for b in v.get("affected_blocks") or []:
-                if b and b not in affected_blocks:
-                    affected_blocks.append(b)
-        log(f"\n{'='*60}", RED)
-        log("  MODEL INTEGRATION GATE FAILED", RED)
-        log(f"  First-divergence block: {first_block or '(unlocalized)'}", RED)
-        if affected_blocks:
-            log(f"  TARGETED re-spec blocks (field-localized): {affected_blocks}",
-                RED)
-        else:
-            log("  Localization: unlocalized -> broadcast re-spec to all blocks",
-                RED)
-        for v in violations[:5]:
-            log(f"    - expected {v.get('expected')!r} got "
-                f"{v.get('observed')!r}", RED)
-        log(f"{'='*60}\n", RED)
-
-        write_graph_event(pr, "Model Integration", "graph_node_exit", {
-            "passed": False,
-            "violation_count": len(violations),
-            "first_divergence_block": first_block,
-        })
-
-        payload = {
-            "type": "model_integration_failure",
-            "first_divergence_block": first_block,
-            "affected_blocks": affected_blocks,
-            "violations": violations[:20],
-            "suggested_fix": first.get("suggested_fix", ""),
-            "supported_actions": [
-                "revise_uarch",  # regenerate the named block's uArch + model
-                "fix_rtl",       # outer agent patched the block model / chip model on disk
-                "retry",         # re-run the gate (after an on-disk fix)
-                "abort",         # stop the pipeline
-            ],
-            "outer_agent_guidance": (
-                "The model-integration agent wired every per-block Amaranth block "
-                "model into a top-level Amaranth chip model; the deterministic gate "
-                "simulated it and its output diverged from the reference "
-                "implementation. The first-divergence block is "
-                f"'{first_block or 'unlocalized'}'. As the outer-loop agent:\n"
-                "1. Inspect arch/block_models/<block>.py for the named block and "
-                "compare its transcribed math to the reference implementation; "
-                "also inspect arch/block_models/_chip_model.py wiring / "
-                "handshake / feedback.\n"
-                "2. If you fixed the block model or chip model on disk, resume "
-                "with action='retry'.\n"
-                "3. To regenerate the uArch spec + block model via the LLM, "
-                "resume with action='revise_uarch'.\n"
-                "4. Only abort for a genuine architecture-level contradiction."
-            ),
-        }
-
-        response = interrupt(payload)
-        action = response.get("action", "abort")
-
-        result = {
-            "passed": False,
-            "violations": violations[:20],
-            "first_divergence_block": first_block,
-            "affected_blocks": affected_blocks,
-            "action_taken": action,
-        }
-        if action == "abort":
-            result["aborted"] = True
-            log("  [MODEL-INTEGRATION] Aborted", RED)
-        else:
-            log(f"  [MODEL-INTEGRATION] Action: {action}", YELLOW)
-
-        return {
-            "model_integration_result": result,
-            "pipeline_aborted": action == "abort",
-        }
-
-
-def route_after_model_integration(state: OrchestratorState) -> str:
-    """Route after the model-integration node.
-
-    Pass (or flag off) -> integration_dv. A parked failure resolved with
-    'retry' re-runs the node; 'abort' ends the pipeline. 'revise_uarch' and
-    'fix_rtl' both imply the operator patched disk, so re-run to confirm the fix.
-    """
-    result = state.get("model_integration_result") or {}
-    if result.get("aborted"):
-        return END
-    # A SKIPPED-HONEST gate (goldenless run; rung2 defect 1) is non-blocking ->
-    # proceed to integration_dv exactly like a pass. An ADVISORY BYPASS
-    # (CORESMITH_DETERMINISTIC_BFM: the deterministic integration DV is the
-    # authoritative contract check) is likewise non-blocking -> proceed.
-    if result.get("skipped") or result.get("advisory_bypass"):
-        return "integration_dv"
-    action = result.get("action_taken", "")
-    if action in ("retry", "revise_uarch", "fix_rtl"):
-        return "model_integration"
-    return "integration_dv"
-
-
-route_after_model_integration.__edge_labels__ = {
-    "model_integration": "Retry",
-    "integration_dv": "DV",
-    END: "DONE",
-}
-
-
 # ---------------------------------------------------------------------------
-# Two-pass: uarch_integration_gate + begin_rtl_pass (CORESMITH_BLOCK_GOLDENS)
 # ---------------------------------------------------------------------------
 #
 # The µARCH GATE runs BETWEEN the two fan-outs: after pass 1 (all blocks emit
@@ -8193,483 +7508,6 @@ route_after_model_integration.__edge_labels__ = {
 # the model_integration_node logic (LLM stitch _chip_model.py + deterministic
 # Amaranth verify + park-on-fail) to its shift-left position so a bad decomposition
 # is caught in fast Python sims before any expensive RTL work.
-
-
-def _affected_edge_for_block(pr: str, block_name: str) -> dict:
-    """Best-effort: find a block-diagram edge touching ``block_name``.
-
-    Returns ``{"from","to"}`` for the first connection that references the
-    block, or ``{}``. Used to enrich a contract-gap interrupt so the outer
-    agent can re-open the right interface definition.
-    """
-    if not block_name:
-        return {}
-    bd_path = Path(pr) / ".coresmith" / "block_diagram.json"
-    if not bd_path.exists():
-        return {}
-    try:
-        bd = json.loads(bd_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    for c in bd.get("connections", []) or []:
-        src = c.get("from", c.get("from_block", ""))
-        dst = c.get("to", c.get("to_block", ""))
-        if block_name in (src, dst):
-            return {"from": src, "to": dst}
-    return {}
-
-
-async def uarch_integration_gate_node(state: OrchestratorState) -> dict:
-    """µARCH GATE (two-pass): LLM stitch chip model -> deterministic Amaranth verify.
-
-    Runs after pass 1 (uArch specs + block models) and BEFORE pass 2 (RTL). It
-    is the relocated ``model_integration_node`` logic plus section-D gap
-    classification. On a clean gate it returns ``{"passed": True}`` and routing
-    proceeds to ``begin_rtl_pass``. On divergence it PARKS an interrupt enriched
-    with ``gap_class`` / ``affected_edge`` and (for contract gaps) a
-    ``revise_contract`` action; ``pipeline_phase`` stays ``"uarch"`` so a retry
-    re-enters the gate -- the flip to ``"rtl"`` only happens in begin_rtl_pass.
-    """
-    from orchestrator.architecture import model_integration as _model_integration
-
-    pr = state.get("project_root", str(PROJECT_ROOT))
-
-    write_graph_event(pr, "uArch Integration Gate", "graph_node_enter", {})
-
-    # Composition-time honesty note for the deterministic-BFM flag. The
-    # composition _chip_model.py pin driver is LLM-authored (it drives the Amaranth
-    # block models over the same pins and can co-tune to their quirks). The
-    # CONTRACT-ENFORCING deterministic BFM runs downstream at integration_dv on
-    # the real chip_top RTL (the gate that matches the fixed external host); a
-    # deterministic Amaranth-substrate composition driver is the follow-on.
-    try:
-        from orchestrator.langgraph import bfm_lib as _bfm_lib
-        if _bfm_lib.deterministic_bfm_enabled() and _bfm_lib.arch_indicates_qspi_slave(pr):
-            log(
-                "  [µARCH-GATE] ADVISORY: CORESMITH_DETERMINISTIC_BFM=1 on a "
-                "QSPI-slave design. The composition _chip_model.py pin driver is "
-                "LLM-authored (co-tuning risk); the contract-enforcing "
-                "deterministic BFM runs at integration_dv on the real chip_top.",
-                YELLOW,
-            )
-    except Exception:  # noqa: BLE001
-        pass
-
-    with _tracer.start_as_current_span("uArch Integration Gate") as span:
-        # (a) LLM model-integration: write _chip_model.py if missing.
-        try:
-            await _maybe_generate_chip_model(pr)
-        except Exception as exc:  # noqa: BLE001
-            log(f"  [µARCH-GATE] chip-model gen raised: {exc}", YELLOW)
-
-        # (b) deterministic Amaranth-simulation verify. A-Fix 2a: fail-closed -- a
-        # gate that RAISES is NOT a pass. CORESMITH_GATE_FAIL_OPEN tolerates it;
-        # otherwise a synthesized gate_error violation falls through to the
-        # existing failure/interrupt handling below.
-        from orchestrator.langgraph.gate_guard import gate_error_violation, gate_guard
-        _gr = await asyncio.to_thread(
-            gate_guard, "uarch_integration",
-            _model_integration.run_model_integration_gate, pr,
-        )
-        if _gr.errored and _gr.skipped:
-            log(f"  [µARCH-GATE] gate raised; FAIL-OPEN escape active, treating "
-                f"as pass: {_gr.reason}", YELLOW)
-            span.set_attribute("error", _gr.error)
-            write_graph_event(pr, "uArch Integration Gate", "graph_node_exit", {
-                "skipped": True, "reason": "gate_error_fail_open",
-            })
-            return {"model_integration_result": {"passed": True, "error": _gr.reason}}
-        if _gr.errored:
-            log(f"  [µARCH-GATE] gate ERRORED (fail-closed, NOT a pass): "
-                f"{_gr.reason}", RED)
-            span.set_attribute("error", _gr.error)
-            violations = [gate_error_violation(_gr.reason, _gr.error)]
-        else:
-            violations = _gr.value or []
-
-        span.set_attribute("violation_count", len(violations))
-
-        if not violations:
-            # rung2 defect 1: an empty violation list is a real PASS only when
-            # the gate ACTUALLY compared a composed chip model against a golden
-            # reference. For a goldenless / requirements-only run (no golden,
-            # no block models -> gate no-op) it must record SKIPPED-HONEST and
-            # NOT report passed=True. Routing treats skipped like pass
-            # (non-blocking) but the state/events/scoreboard say SKIPPED.
-            _status = _model_integration.describe_gate_status(pr)
-            if not _status["applicable"]:
-                span.set_attribute("skipped", True)
-                span.set_attribute("skip_reason", _status["reason"])
-                log("  [µARCH-GATE] SKIPPED (not applicable, NOT a pass): "
-                    f"{_status['reason']}", YELLOW)
-                _record_dv_row(
-                    pr, block="chip_model", scope="chip_model", source="gate",
-                    passed=False, skipped=True, detail=_status["reason"],
-                )
-                write_graph_event(pr, "uArch Integration Gate",
-                                  "graph_node_exit", {
-                                      "skipped": True,
-                                      "reason": _status["reason"],
-                                      "gate_status": _status,
-                                  })
-                return {"model_integration_result": {
-                    "skipped": True,
-                    "reason": "no golden reference; gate not applicable",
-                    "gate_status": _status,
-                }}
-            # Real PASS: clear the no-progress signature so (a) the next
-            # failure is never mis-read as "no progress" against a stale
-            # verdict and (b) gate_scoped_reuse_reason() stops scoping regen
-            # (its "failure iteration in progress" signal is this file).
-            try:
-                (Path(pr) / ".coresmith" / "_last_gate_signature.txt").unlink(
-                    missing_ok=True
-                )
-            except OSError:
-                pass
-
-            # Derate sign-off (microarch step 3): the functional/fidelity gate
-            # PASSED, but if the fidelity tier recorded a within-budget derate
-            # large enough to need chip-lead sign-off (above escalate_floor),
-            # PARK for approval instead of silently shipping the derate. The
-            # chip-lead OWNS the be-exact / derate / escalate decision.
-            from orchestrator.architecture import fidelity as _fidelity
-            esc = _fidelity.read_derate_escalation(pr)
-            if esc is not None:
-                log("  [µARCH-GATE] within-budget DERATE needs chip-lead sign-off",
-                    YELLOW)
-                response = interrupt({
-                    "type": "derate_signoff",
-                    "fidelity": esc,
-                    "supported_actions": ["approve", "revise_uarch", "abort"],
-                    "outer_agent_guidance": (
-                        "The integrated chip model PASSED functionally but at a "
-                        "DERATED fidelity that is WITHIN budget yet above the "
-                        "escalate threshold (measured "
-                        f"{esc.get('measured')} vs floor {esc.get('floor')} / "
-                        f"escalate_floor {esc.get('escalate_floor')}, "
-                        f"{esc.get('direction')}-is-better; derate "
-                        f"{esc.get('derate_pct')}% vs ideal). As chip-lead you OWN "
-                        "this trade: resume 'approve' to accept the derate and "
-                        "proceed to the RTL pass (recorded in "
-                        ".coresmith/derate_ledger.json), 'revise_uarch' to re-spec "
-                        "the block(s) toward higher fidelity, or 'abort'."
-                    ),
-                })
-                action = response.get("action", "approve")
-                if action == "abort":
-                    log("  [µARCH-GATE] Derate sign-off: ABORTED", RED)
-                    write_graph_event(pr, "uArch Integration Gate",
-                                      "graph_node_exit",
-                                      {"passed": False, "derate_aborted": True})
-                    return {
-                        "model_integration_result": {
-                            "passed": False, "aborted": True,
-                            "derate_signoff": esc,
-                        },
-                        "pipeline_aborted": True,
-                    }
-                if action == "revise_uarch":
-                    log("  [µARCH-GATE] Derate sign-off: chip-lead chose to re-spec "
-                        "for higher fidelity", YELLOW)
-                    out = {
-                        "model_integration_result": {
-                            "passed": False, "derate_revise": True,
-                            "derate_signoff": esc,
-                        },
-                        "uarch_revise_attempts": (
-                            int(state.get("uarch_revise_attempts", 0)) + 1
-                        ),
-                    }
-                    if route_after_uarch_gate({**state, **out}) == "init_tier":
-                        out["current_tier_index"] = 0
-                    return out
-                # approve -> record sign-off so we don't re-prompt, then proceed
-                _fidelity.mark_derate_signed_off(pr)
-                log("  [µARCH-GATE] Derate sign-off: APPROVED (within budget, "
-                    "recorded)", GREEN)
-            log("  [µARCH-GATE] PASSED (simulated chip model == reference)", GREEN)
-            write_graph_event(pr, "uArch Integration Gate", "graph_node_exit", {
-                "passed": True, "violation_count": 0,
-                "derate_signed_off": esc is not None,
-            })
-            return {"model_integration_result": {
-                "passed": True, "derate_signed_off": esc is not None}}
-
-        # ADVISORY BYPASS (CORESMITH_DETERMINISTIC_BFM). This gate runs BEFORE
-        # any RTL exists; the composition _chip_model.py pin driver is
-        # LLM-authored and stimulus/DUT-fragile (it can mis-decode the IN-window
-        # stimulus -> corrupt/all-zero composed output DESPITE byte-correct
-        # per-block models), and every mismatch here triggers a full re-spec of
-        # all blocks. When the deterministic integration DV is enabled it is the
-        # AUTHORITATIVE RTL-level contract check downstream on the real chip_top,
-        # so this model-level composition mismatch must NOT hard-block the run
-        # (nor re-spec). Log LOUDLY, name the mismatch, and PROCEED to the RTL
-        # pass. Flag off -> never taken (byte-identical to before).
-        from orchestrator.langgraph import bfm_lib as _bfm_lib
-        if _bfm_lib.deterministic_bfm_enabled():
-            first = violations[0]
-            first_block = first.get("first_divergence_block", "")
-            log(f"\n{'='*60}", YELLOW)
-            log("  µARCH INTEGRATION GATE MISMATCH -- ADVISORY (non-blocking)",
-                YELLOW)
-            log("  CORESMITH_DETERMINISTIC_BFM=1: the deterministic integration "
-                "DV on the real chip_top RTL is the authoritative contract "
-                "check. The LLM-authored composition _chip_model.py harness is "
-                "stimulus/DUT-fragile; NOT hard-blocking and NOT re-speccing "
-                "all blocks.", YELLOW)
-            log(f"  First-divergence block: {first_block or '(unlocalized)'}",
-                YELLOW)
-            for v in violations[:5]:
-                log(f"    - expected {v.get('expected')!r} got "
-                    f"{v.get('observed')!r}", YELLOW)
-            # Section 3b: record the quantified mismatch as a carried-forward
-            # defect (specific unmodeled role named) instead of swallowing it.
-            _defect = _advisory_composition_defect(pr, "uarch_integration", violations)
-            record_carried_forward_defect(pr, _defect)
-            if _defect.get("unmodeled"):
-                log(f"  UNMODELED: {_defect['unmodeled']}", YELLOW)
-            log(f"  PROCEEDING to RTL pass (advisory; carried forward).\n"
-                f"{'='*60}\n", YELLOW)
-            write_graph_event(pr, "uArch Integration Gate", "graph_node_exit", {
-                "passed": False,
-                "advisory_bypass": True,
-                "violation_count": len(violations),
-                "first_divergence_block": first_block,
-                "carried_forward_defect": True,
-                "unmodeled": _defect.get("unmodeled", ""),
-            })
-            return {"model_integration_result": {
-                "passed": False,
-                "advisory_bypass": True,
-                "first_divergence_block": first_block,
-                "violations": violations[:20],
-                "carried_forward_defect": _defect,
-            }}
-
-        first = violations[0]
-        first_block = first.get("first_divergence_block", "")
-        # gap_class: contract gap wins if ANY violation is a contract gap (a
-        # composition / throughput contract failure dominates per-block math).
-        gap_class = "block_math"
-        if any(v.get("gap_class") == "contract" for v in violations):
-            gap_class = "contract"
-        affected_edge = _affected_edge_for_block(pr, first_block)
-        # Per-field localization: model_integration sets affected_blocks when only
-        # SOME output fields diverged -> targeted re-spec (init_tier_node) instead
-        # of broadcast to all blocks. The convergence fix for composition runs.
-        affected_blocks: list[str] = []
-        for v in violations:
-            for b in v.get("affected_blocks") or []:
-                if b and b not in affected_blocks:
-                    affected_blocks.append(b)
-
-        log(f"\n{'='*60}", RED)
-        log("  µARCH INTEGRATION GATE FAILED", RED)
-        log(f"  First-divergence block: {first_block or '(unlocalized)'}", RED)
-        if affected_blocks:
-            log(f"  TARGETED re-spec blocks (field-localized): {affected_blocks}",
-                RED)
-        else:
-            log("  Localization: unlocalized -> broadcast re-spec to all blocks",
-                RED)
-        log(f"  gap_class: {gap_class}", RED)
-        for v in violations[:5]:
-            log(f"    - expected {v.get('expected')!r} got "
-                f"{v.get('observed')!r}", RED)
-        log(f"{'='*60}\n", RED)
-
-        write_graph_event(pr, "uArch Integration Gate", "graph_node_exit", {
-            "passed": False,
-            "violation_count": len(violations),
-            "first_divergence_block": first_block,
-            "gap_class": gap_class,
-        })
-
-        supported_actions = [
-            "revise_uarch",  # re-spec the offending block/tier (block_math)
-            "fix_rtl",       # outer agent patched block/chip model on disk
-            "retry",         # re-run the gate after an on-disk fix
-            "abort",
-        ]
-        if gap_class == "contract":
-            # Frozen interface contracts live in the (separate) architecture
-            # graph; the frontend cannot mutate them. Offer revise_contract so
-            # the outer agent re-runs the architecture interface specialist.
-            supported_actions.insert(1, "revise_contract")
-
-        # NO-PROGRESS GUARD. If this revise produced a BYTE-IDENTICAL composed
-        # output to the previous attempt (same observed + gap_class), the
-        # whole-chip re-fan is NOT converging -- steer the outer agent toward a
-        # targeted single-block fix instead of burning more re-fans (the Opus
-        # codec run re-fanned identical 50B output until it hit the quota).
-        no_progress = False
-        if os.environ.get("CORESMITH_GATE_NO_PROGRESS_GUARD", "1").strip() != "0":
-            try:
-                import hashlib
-                sig = hashlib.sha1(
-                    (repr(first.get("observed")) + "|" + gap_class)
-                    .encode("utf-8", "replace")
-                ).hexdigest()
-                sig_path = Path(pr) / ".coresmith" / "_last_gate_signature.txt"
-                prev = sig_path.read_text().strip() if sig_path.exists() else ""
-                no_progress = bool(prev) and prev == sig
-                sig_path.parent.mkdir(parents=True, exist_ok=True)
-                sig_path.write_text(sig)
-            except Exception:  # noqa: BLE001
-                pass
-        if no_progress:
-            log("  [µARCH-GATE] NO PROGRESS -- composed output is BYTE-IDENTICAL "
-                "to the previous attempt; re-fan is not converging", RED)
-
-        payload = {
-            "type": "model_integration_failure",
-            "first_divergence_block": first_block,
-            "gap_class": gap_class,
-            "affected_edge": affected_edge,
-            "affected_blocks": affected_blocks,
-            "no_progress": no_progress,
-            "violations": violations[:20],
-            "suggested_fix": first.get("suggested_fix", ""),
-            "supported_actions": supported_actions,
-            "outer_agent_guidance": (
-                "The µarch gate stitched every per-block Amaranth block model into "
-                "a chip model and its simulated output diverged from the "
-                "reference. gap_class="
-                f"'{gap_class}'. block_math => the named block's transcribed "
-                "math is wrong: resume 'revise_uarch' (re-specs the block/tier) "
-                "or fix arch/block_models/<block>.py then 'retry'. contract => "
-                "the per-block models are each self-consistent but their declared "
-                "handshake/width contract cannot compose: this needs an "
-                "architecture-level interface-definition change. Resume "
-                "'revise_contract' (writes a structured request to "
-                ".coresmith/interface_contract_revision_request.json and ends the "
-                "frontend run so the architecture interface specialist can "
-                f"re-open edge {affected_edge or '(see block_diagram.json)'})."
-            ),
-        }
-
-        if no_progress:
-            payload["outer_agent_guidance"] = (
-                "NO PROGRESS -- the last revise produced a BYTE-IDENTICAL composed "
-                "output, so re-fanning all blocks is NOT working. Do NOT "
-                "revise_uarch again. Localize the SINGLE diverging block (trace the "
-                "first-divergence byte offset through the serialization chain) and "
-                "restart_block it, or fix arch/block_models/<block>.py directly "
-                "then 'retry'. " + payload["outer_agent_guidance"]
-            )
-
-        response = interrupt(payload)
-        action = response.get("action", "abort")
-
-        result = {
-            "passed": False,
-            "violations": violations[:20],
-            "first_divergence_block": first_block,
-            "gap_class": gap_class,
-            "affected_edge": affected_edge,
-            "affected_blocks": affected_blocks,
-            "action_taken": action,
-        }
-        if action == "abort":
-            result["aborted"] = True
-            log("  [µARCH-GATE] Aborted", RED)
-        else:
-            log(f"  [µARCH-GATE] Action: {action} (gap_class={gap_class})", YELLOW)
-
-        out: dict = {
-            "model_integration_result": result,
-            "pipeline_aborted": action == "abort",
-        }
-        # Count each non-abort revise/retry so the in-loop re-spec is bounded
-        # (CORESMITH_UARCH_REVISE_MAX). This lets a non-composing decomposition
-        # iterate a few variance draws (block_math AND contract gaps) instead of
-        # dead-ending after one, while guaranteeing termination.
-        if action != "abort":
-            out["uarch_revise_attempts"] = (
-                int(state.get("uarch_revise_attempts", 0)) + 1
-            )
-        # When this gate routes back to init_tier for a block_math re-spec, the
-        # tier index sits at len(tier_list) (exhausted -- that's how we reached
-        # the gate). Reset it to 0 so the uarch pass re-fans-out from the first
-        # tier; phase stays "uarch" (begin_rtl_pass is the sole phase flipper).
-        # (The contract path resets the index in write_contract_request_node.)
-        if route_after_uarch_gate({**state, **out}) == "init_tier":
-            out["current_tier_index"] = 0
-        return out
-
-
-async def begin_rtl_pass_node(state: OrchestratorState) -> dict:
-    """Transition pass 1 -> pass 2: reset tier index, flip phase to "rtl".
-
-    The SOLE writer of ``pipeline_phase: "rtl"`` (R3). Runs only after a clean
-    µarch gate. Writes ONLY index + phase + flag -- ``tier_list`` is untouched
-    so ``init_tier_node``'s idempotent ``state.get("tier_list") or ...`` reuses
-    the already-computed list (R8).
-    """
-    pr = state.get("project_root", str(PROJECT_ROOT))
-    # run3-followups: the banner reflects the ACTUAL gate outcome -- a green
-    # CLEAN was printed four lines after an advisory-dismissed model mismatch,
-    # suppressing a true early detection for ~2.5 h of downstream work.
-    from orchestrator.langgraph.pipeline_helpers import uarch_gate_banner
-    _banner, _colour = uarch_gate_banner(state.get("model_integration_result"))
-    log(f"\n{'='*60}", _colour)
-    log(f"  {_banner}", _colour)
-    log(f"{'='*60}", _colour)
-    write_graph_event(pr, "Begin RTL Pass", "graph_node_exit", {
-        "pipeline_phase": "rtl",
-    })
-    return {
-        "current_tier_index": 0,
-        "pipeline_phase": "rtl",
-        "uarch_pass_done": True,
-    }
-
-
-def _uarch_revise_cap() -> int:
-    """Max in-loop µarch-gate re-spec iterations before giving up (END with a
-    contract-revision marker for the outer agent). CORESMITH_UARCH_REVISE_MAX,
-    default 4."""
-    try:
-        return int(os.environ.get("CORESMITH_UARCH_REVISE_MAX", "4") or 4)
-    except ValueError:
-        return 4
-
-
-def _regen_stale_chip_model() -> bool:
-    """Regenerate the composed _chip_model.py when block models changed after it
-    (so revise_uarch actually re-composes instead of re-checking a stale model).
-    Default ON; CORESMITH_REGEN_STALE_CHIP_MODEL=0 restores the old always-reuse."""
-    return os.environ.get(
-        "CORESMITH_REGEN_STALE_CHIP_MODEL", "1"
-    ).strip().lower() not in {"0", "false", "no", "off"}
-
-
-def _chip_model_needs_regen(models_dir, chip_model_path) -> bool:
-    """True if the composed ``_chip_model.py`` must be (re)generated: it is
-    missing, OR (stale-regen enabled) any block model is newer than it. This is
-    what lets ``revise_uarch`` actually re-compose after it regenerates the
-    per-block models — otherwise the gate re-checks a stale chip model and emits
-    bit-identical output every revise, so the bounded revise loop never
-    converges. With ``CORESMITH_REGEN_STALE_CHIP_MODEL=0`` only a missing chip
-    model triggers regen (old behavior)."""
-    from pathlib import Path as _P
-    chip_model_path = _P(chip_model_path)
-    models_dir = _P(models_dir)
-    if not chip_model_path.exists():
-        return True
-    if not _regen_stale_chip_model():
-        return False
-    try:
-        chip_mtime = chip_model_path.stat().st_mtime
-        newest_block = max(
-            (p.stat().st_mtime for p in models_dir.glob("*.py")
-             if p.name != "_chip_model.py"),
-            default=0.0,
-        )
-    except OSError:
-        return False
-    return newest_block > chip_mtime
 
 
 def _revalidate_enabled() -> bool:
@@ -8764,10 +7602,9 @@ def _route_uarch_patch_on_retry(project_root: str, block_names: list[str]) -> li
     for name in block_names:
         try:
             block_dir = Path(project_root) / ".coresmith" / "blocks" / name
-            diag_path = block_dir / "diagnosis.json"
-            if not diag_path.exists():
+            diag = _db(project_root).diagnosis(name)
+            if not diag:
                 continue
-            diag = json.loads(diag_path.read_text())
             uarch_patch = diag.get("uarch_patch")
             if not isinstance(uarch_patch, dict) or not uarch_patch.get(
                     "sections_to_replace"):
@@ -8810,15 +7647,11 @@ def _route_uarch_patch_on_retry(project_root: str, block_names: list[str]) -> li
             # the skip-regen fast path would reuse the now-stale RTL against the
             # revised µarch. Invalidate the recorded sim-pass so the re-validate
             # pass REGENERATES the RTL from the revised spec.
-            best_path = block_dir / "best_result.json"
             try:
-                if best_path.exists():
-                    _best = json.loads(best_path.read_text())
-                    if isinstance(_best, dict):
-                        _best["sim_passed"] = False
-                        _best["uarch_patch_invalidated"] = True
-                        best_path.write_text(json.dumps(_best, indent=2))
-            except (json.JSONDecodeError, OSError):
+                if _db(project_root).result(name, "best"):
+                    _db(project_root).update_result(
+                        name, "best", sim_passed=False, uarch_patch_invalidated=True)
+            except Exception:  # noqa: BLE001
                 pass
             marker.write_text(f"confidence={conf:g}; sections_applied={n_applied}\n")
             patched.append(name)
@@ -8836,8 +7669,8 @@ def _pipeline_complete_route(state: OrchestratorState) -> str:
     it is unit-testable; the graph maps ``"end"`` -> ``END``):
       - ``pipeline_aborted`` -> ``"end"``
       - ``revalidate_pending`` (a bounded incomplete-gate retry) -> ``"init_tier"``
-        (re-run the rtl-phase tiers; failed blocks re-validate their fixed RTL,
-        passers reuse via skip-regen) then back to ``pipeline_complete`` to recount
+        (only the failed/missing blocks re-enter, through the targeted plan)
+        then back to ``pipeline_complete`` to recount
       - otherwise (clean) -> ``"integration_check"``.
     """
     if state.get("pipeline_aborted"):
@@ -8845,141 +7678,6 @@ def _pipeline_complete_route(state: OrchestratorState) -> str:
     if state.get("revalidate_pending"):
         return "init_tier"
     return "integration_check"
-
-
-def route_after_uarch_gate(state: OrchestratorState) -> str:
-    """Route after the µarch gate.
-
-    Clean gate -> ``begin_rtl_pass`` (start pass 2). A parked failure:
-      - ``abort`` -> END.
-      - ``contract`` gap with ``revise_contract`` / ``revise_uarch`` -> END
-        (the frontend cannot mutate frozen contracts; a request marker is
-        written by the writer node before END).
-      - ``block_math`` gap with ``revise_uarch`` (or ``retry`` / ``fix_rtl``)
-        -> ``init_tier`` to re-spec the offending block/tier in phase "uarch".
-    """
-    result = state.get("model_integration_result") or {}
-    # A SKIPPED-HONEST gate (goldenless / requirements-only run; rung2 defect 1)
-    # is non-blocking -- route it exactly like a pass into the RTL pass. An
-    # ADVISORY BYPASS (CORESMITH_DETERMINISTIC_BFM: the deterministic
-    # integration DV on the real chip_top is the authoritative contract check)
-    # is likewise non-blocking -- proceed to the RTL pass rather than re-spec.
-    if (not result or result.get("passed") or result.get("skipped")
-            or result.get("advisory_bypass")):
-        return "begin_rtl_pass"
-    if result.get("aborted"):
-        return END
-    action = result.get("action_taken", "")
-    gap_class = result.get("gap_class", "block_math")
-    if action not in ("retry", "revise_uarch", "fix_rtl", "revise_contract"):
-        # Unknown action: fail safe to END rather than silently proceeding.
-        return END
-    # Bound the in-loop re-spec. Over the cap, route through
-    # write_contract_request so it writes the machine-readable revision marker
-    # for the outer agent, then ENDs (it detects the cap and aborts). Under the
-    # cap, contract gaps go through write_contract_request (marker + re-spec) and
-    # block_math gaps re-spec directly via init_tier.
-    cap = _uarch_revise_cap()
-    attempts = int(state.get("uarch_revise_attempts", 0))
-    if attempts > cap:
-        return "write_contract_request"
-    if gap_class == "contract":
-        return "write_contract_request"
-    return "init_tier"
-
-
-route_after_uarch_gate.__edge_labels__ = {
-    "begin_rtl_pass": "GATE CLEAN",
-    "init_tier": "RE-SPEC (block_math)",
-    "write_contract_request": "CONTRACT GAP",
-    END: "ABORT",
-}
-
-
-async def write_contract_request_node(state: OrchestratorState) -> dict:
-    """Write a structured interface-contract revision request.
-
-    Section D: a ``contract`` gap means the per-block models are each
-    self-consistent but their declared handshake/width contract cannot compose.
-    The frontend graph cannot mutate frozen contracts (architecture is a
-    separate graph), so we surface a machine-readable request for the outer
-    agent to re-run the architecture interface-definition specialist.
-
-    To avoid the historical dead-end (write marker -> END after a single gate
-    failure), this node is now part of a *bounded re-spec loop*. The marker is
-    always written for forensics / the outer agent. Then:
-      - Under the revise cap: loop back to ``init_tier`` (reset tier index) so
-        the µarch pass re-fans-out and draws a fresh decomposition; a variance
-        draw may compose where the prior one couldn't.
-      - At/over the cap: set ``pipeline_aborted`` so we END, handing off the
-        marker to the outer agent for architecture-level interface revision.
-    """
-    pr = state.get("project_root", str(PROJECT_ROOT))
-    result = state.get("model_integration_result") or {}
-    cap = _uarch_revise_cap()
-    attempts = int(state.get("uarch_revise_attempts", 0))
-    exhausted = attempts > cap
-    gap_class = result.get("gap_class", "contract")
-    if gap_class == "contract":
-        reason = "uarch_integration_gate contract gap (models cannot compose)"
-    else:
-        reason = (
-            f"uarch_integration_gate {gap_class} gap unresolved after "
-            f"{attempts} revise attempt(s)"
-        )
-    request = {
-        "type": "interface_contract_revision_request",
-        "gap_class": gap_class,
-        "reason": reason,
-        "first_divergence_block": result.get("first_divergence_block", ""),
-        "affected_edge": result.get("affected_edge", {}),
-        "violations": result.get("violations", [])[:20],
-        "revise_attempts": attempts,
-        "revise_cap": cap,
-        "exhausted": exhausted,
-        "suggested_action": (
-            "Re-run the architecture interface-definition specialist for the "
-            "affected edge; the per-block math is self-consistent but the "
-            "declared handshake/width contract cannot compose."
-        ),
-    }
-    try:
-        out = Path(pr) / ".coresmith" / "interface_contract_revision_request.json"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps(request, indent=2), encoding="utf-8")
-        log(f"  [µARCH-GATE] Wrote contract-revision request to {out}", YELLOW)
-    except OSError as exc:
-        log(f"  [µARCH-GATE] Could not write contract-revision request: {exc}",
-            RED)
-    write_graph_event(pr, "Write Contract Request", "graph_node_exit", {
-        "affected_edge": request["affected_edge"],
-        "revise_attempts": attempts,
-        "exhausted": exhausted,
-    })
-    if exhausted:
-        log(f"  [µARCH-GATE] Contract gap persists after {attempts} revise "
-            f"attempt(s) (cap={cap}); ending for outer-agent interface revision.",
-            RED)
-        return {"pipeline_aborted": True}
-    log(f"  [µARCH-GATE] Contract gap: re-fanning-out µarch pass "
-        f"(attempt {attempts}/{cap}) to draw a composing decomposition.",
-        YELLOW)
-    # Re-spec: reset the tier index so init_tier re-fans-out the uarch pass.
-    # phase stays "uarch" (begin_rtl_pass is the sole phase flipper).
-    return {"current_tier_index": 0}
-
-
-def route_after_write_contract_request(state: OrchestratorState) -> str:
-    """END once the contract gap is exhausted; otherwise re-spec via init_tier."""
-    if state.get("pipeline_aborted"):
-        return END
-    return "init_tier"
-
-
-route_after_write_contract_request.__edge_labels__ = {
-    "init_tier": "RE-SPEC (contract)",
-    END: "EXHAUSTED -> outer agent",
-}
 
 
 def _format_dv_retry_context(previous_result: dict | None) -> str:
@@ -9033,107 +7731,6 @@ def _format_dv_retry_context(previous_result: dict | None) -> str:
 # Node: integration_dv  (Lead DV -- generates + runs integration testbench)
 # ---------------------------------------------------------------------------
 
-def _chip_equiv_enabled() -> bool:
-    """A-Fix 5(d): after a green integration sim, re-drive chip_top + the
-    composed Amaranth chip model on the same seeded stimulus and assert byte
-    equivalence. Default ON (only active when block-goldens is on and a
-    _chip_model.py exists). Set ``CORESMITH_CHIP_EQUIV=0`` to disable."""
-    return (os.environ.get("CORESMITH_CHIP_EQUIV", "1") or "1") != "0"
-
-
-def _resolve_equiv_seed() -> int:
-    """Fresh seed for the chip-top equivalence stimulus (pinned via
-    ``CORESMITH_DV_SEED_PIN`` for reproducible debugging)."""
-    from orchestrator.harness.seed_provider import gate_seed
-    return gate_seed()
-
-
-def _maybe_run_chip_equiv(
-    pr: str, design_name: str, top_rtl_path: str, block_rtl_paths: dict,
-) -> dict | None:
-    """Run the chip-top RTL-vs-model equivalence gate when applicable.
-
-    Returns ``None`` when the gate does not apply (disabled, block-goldens off,
-    no chip model, RTL-model-equiv globally off). Otherwise returns the equiv
-    result dict. A harness-error skip is retried once at 2x timeout (A-Fix 2c);
-    a persistent harness error is turned into a fail-closed result (so the DV is
-    flipped to failed) unless ``CORESMITH_GATE_FAIL_OPEN`` is set. An honest skip
-    (non-AXIS top / no verilator / non-comparable model output) is returned
-    as-is and keeps the sim pass.
-    """
-    if not _chip_equiv_enabled():
-        return None
-    try:
-        from orchestrator.architecture import composition as _composition
-        if not _composition.block_goldens_enabled():
-            return None
-        chip_model = (
-            Path(pr) / "arch" / _composition.BLOCK_MODELS_DIRNAME / "_chip_model.py"
-        )
-        if not chip_model.exists():
-            return None
-    except Exception:  # noqa: BLE001
-        return None
-
-    from orchestrator.langgraph.gate_guard import gate_fail_open_enabled, gate_guard
-    from orchestrator.langgraph.rtl_model_equiv import (
-        check_chip_model_equivalence,
-        rtl_model_equiv_enabled,
-    )
-    if not rtl_model_equiv_enabled():
-        return None
-
-    seed = _resolve_equiv_seed()
-
-    # rung3-fixes-2 (c): when the design declares dimensional maxima, size the
-    # seeded RTL-vs-model stream long enough to reach the max index magnitude
-    # (so a geometry-dependent index/address-width truncation diverges here too)
-    # instead of the token default. Bounded to keep the sim tractable. No dims
-    # declared -> default 64 (byte-identical to before).
-    n_vectors = 64
-    try:
-        _dims = _declared_dimensions(pr)
-        if _dims:
-            n_vectors = max(64, min(_MAXGEO_EQUIV_NVEC_CAP, max(_dims.values())))
-    except Exception:  # noqa: BLE001
-        n_vectors = 64
-
-    def _run(scale: float):
-        return gate_guard(
-            "chip_model_equiv",
-            check_chip_model_equivalence,
-            design_name, top_rtl_path, block_rtl_paths, str(chip_model),
-            project_root=pr, seed=seed, n_vectors=n_vectors, timeout_scale=scale,
-        )
-
-    gr = _run(1.0)
-    if gr.errored:
-        if gate_fail_open_enabled():
-            return {"passed": True, "skipped": True,
-                    "reason": f"chip equiv gate errored (fail-open): {gr.reason}"}
-        return {"passed": False, "skipped": False,
-                "reason": f"chip equiv gate ERRORED (fail-closed): {gr.reason}"}
-    eq = gr.value or {}
-    # Harness-error skip -> retry once at 2x, then fail closed (A-Fix 2c).
-    if eq.get("skipped") and eq.get("harness_error"):
-        gr2 = _run(2.0)
-        if gr2.errored:
-            if gate_fail_open_enabled():
-                return {"passed": True, "skipped": True,
-                        "reason": f"chip equiv retry errored (fail-open): {gr2.reason}"}
-            return {"passed": False, "skipped": False,
-                    "reason": f"chip equiv retry ERRORED (fail-closed): {gr2.reason}"}
-        eq2 = gr2.value or {}
-        if eq2.get("skipped") and eq2.get("harness_error"):
-            if gate_fail_open_enabled():
-                return {"passed": True, "skipped": True,
-                        "reason": f"chip equiv harness error (fail-open): {eq2.get('reason','')}"}
-            return {"passed": False, "skipped": False,
-                    "reason": ("chip equiv harness error persisted after retry "
-                               f"(fail-closed): {eq2.get('reason', '')}")}
-        return eq2
-    return eq
-
 
 # ---------------------------------------------------------------------------
 # MAX-GEOMETRY DV stimulus gate (rung3-fixes-2, defect 1)
@@ -9143,9 +7740,9 @@ def _maybe_run_chip_equiv(
 # index/address/counter widths were never exercised at the declared maximum, so
 # a wrap at the 2^n boundary BELOW the max (e.g. a 7-bit column index wrapping
 # at 512 on a 640-wide frame) sailed through integration + validation DV. This
-# gate forces at least one MAX-GEOMETRY test case whenever the design declares
-# any dimensional maximum, and requires the generated testbench to advertise it
-# with a machine-checkable marker.
+# gate requires executed maximum cases only when the owner declares them in
+# inputs/task.yaml. Policy dimensions and testbench markers alone describe
+# scope; without owner cases they are explicitly not owner-certified.
 #
 # DOMAIN-GENERIC by construction: dimension NAMES are DATA read from the
 # design's own machine-readable declarations -- the engine NEVER greps for
@@ -9172,8 +7769,8 @@ _MAXGEO_EQUIV_NVEC_CAP = 4096    # bound the seeded chip-equiv stream length
 
 
 def _maxgeo_gate_enabled() -> bool:
-    """Require a MAX-GEOMETRY DV test when the design declares dimensional
-    maxima. Default ON; ``CORESMITH_MAXGEO_GATE=0`` disables (both branches
+    """Evaluate owner certification of the design's dimensional maxima.
+    Default ON; ``CORESMITH_MAXGEO_GATE=0`` disables (both branches
     tested). Env-gate convention (like :func:`_chip_equiv_enabled`)."""
     return (os.environ.get("CORESMITH_MAXGEO_GATE", "1") or "1") != "0"
 
@@ -9246,8 +7843,11 @@ def _declared_dimensions(project_root: str) -> dict:
     except Exception:  # noqa: BLE001
         pass
     try:
-        for fname in ("ers_spec.json", "prd_spec.json", "block_specs.json",
-                      "block_queue.json"):
+        try:
+            _collect_declared_dims(_db(project_root).block_specs(), dims)
+        except Exception:  # noqa: BLE001
+            pass
+        for fname in ("ers_spec.json", "prd_spec.json"):
             p = root / ".coresmith" / fname
             if p.exists():
                 try:
@@ -9336,6 +7936,38 @@ def _maxgeo_conformance_scope_enabled() -> bool:
     return (
         os.environ.get("CORESMITH_MAXGEO_CONFORMANCE_SCOPE", "1") or "1"
     ) != "0"
+
+
+def _file_sha256(path: str) -> str:
+    """sha256 of a file's bytes, or "" when it cannot be read (WP-40)."""
+    import hashlib as _hashlib
+    try:
+        return _hashlib.sha256(Path(path).read_bytes()).hexdigest() if path else ""
+    except OSError:
+        return ""
+
+
+def _tb_writer_flags(tb_result: dict | None) -> dict:
+    """The engine-writer flags a reused testbench must carry forward.
+
+    ``_maxgeo_conformance_scope`` keys off flags ONLY the engine's own bfm_lib
+    writer sets, and they live in the writer's in-memory return -- so a
+    fix_rtl/fix_tb resume that rebuilds tb_result from the persisted DV result
+    has to restore them, or the identical TB that earned an advisory verdict
+    one cycle earlier hard-fails the scope gate."""
+    tbr = tb_result or {}
+    flags = {k: tbr[k] for k in ("deterministic_bfm", "conformance_only",
+                                 "contract")
+             if tbr.get(k) is not None}
+    # WP-40: the deterministic TB's content identity, taken when the engine
+    # wrote it. A later cycle reuses the file only while it still hashes to
+    # this; an edited copy is regenerated from the contract.
+    if flags.get("deterministic_bfm"):
+        sha = tbr.get("tb_sha256") or _file_sha256(
+            tbr.get("testbench_path") or tbr.get("tb_path") or "")
+        if sha:
+            flags["tb_sha256"] = sha
+    return flags
 
 
 def _maxgeo_conformance_scope(
@@ -9430,113 +8062,102 @@ def _maxgeo_conformance_scope(
     }
 
 
-def _maxgeo_gate_verdict(
-    project_root: str, tb_path: str, tb_result: dict | None = None
-) -> dict | None:
-    """``None`` -> gate disabled or no declared dims (a true no-op).
-    ``{"verdict": "pass", ...}`` -> evaluated and fully covered (callers LOG
-    it). ``{"advisory": True, ...}`` -> covered in scope with a loud recorded
-    gap. Anything else -> violation dict: the design declares dimensional
-    maxima but the testbench's ``# MAXGEO`` marker does not prove a
-    max-geometry case for every declared dimension.
+def _tb_maxgeo_mentions(tb_path: str, dims: dict) -> dict:
+    """Cocotb cases mentioning each dimension, as scope only, never proof.
 
-    NAME-AGNOSTIC: each declared dimension's max VALUE must appear as a marker
-    ``key=value`` pair (the key name is free-form data). Testing at the declared
-    maximum inherently crosses every 2^n index boundary below it -- exactly
-    where a truncated index/address width wraps. NEVER raises (a parse hiccup is
-    non-blocking; the prompt requirement is the primary defense).
+    Inspect source without importing the testbench. Comments, strings and
+    identifiers inside a case can describe scope without exercising it.
+    """
+    import ast
 
-    ``tb_result`` is the generator's own record for this testbench. When it
-    identifies the ENGINE'S deterministic, compute-lane-independent QSPI
-    conformance TB, :func:`_maxgeo_conformance_scope` may return an ADVISORY
-    verdict (``advisory: True``) instead of a failure -- see that function for
-    why that is a scope, not a weakening. Callers MUST treat ``advisory`` as
-    "passed, with a loud recorded gap", and anything else as a failure."""
     try:
-        if not _maxgeo_gate_enabled():
-            return None
-        # run3-followups: single-sourced declared table (byte-equality with
-        # the legacy _declared_dimensions is pinned by test).
-        from orchestrator.langgraph.bfm_lib import maxgeo as _maxgeo_lib
-        dims = _maxgeo_lib.declared_dimensional_maxima(project_root)
+        source = Path(tb_path).read_text(encoding="utf-8", errors="replace")
+        tree = ast.parse(source)
+    except (OSError, SyntaxError, ValueError):
+        return {}
+    lines = source.splitlines()
+    mentions = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        decorators = [d.func if isinstance(d, ast.Call) else d for d in node.decorator_list]
+        if not any((isinstance(d, ast.Attribute) and d.attr == "test")
+                   or (isinstance(d, ast.Name) and d.id == "test") for d in decorators):
+            continue
+        body = "\n".join(lines[node.lineno - 1:node.end_lineno])
+        found = [name for name in dims if re.search(r"(?<![\w./-])" + re.escape(name) + r"(?![\w./-])", body)]
+        if found:
+            mentions[node.name] = found
+    return mentions
+
+
+def _maxgeo_gate_verdict(
+    project_root: str, tb_path: str, tb_result: dict | None = None,
+    *, sim_result: dict | None = None,
+) -> dict | None:
+    """Markers describe scope. Only an executed owner-declared case proves it.
+
+    Owner task.yaml declares ``max_geometry_cases: {case_name: {dimension: max}}``.
+    ``executed_cases`` comes from the simulator's fresh successful XML test rows,
+    never from the generated testbench's own metadata or comments.
+    An absent declaration (or empty mapping) is non-blocking ``not_declared``;
+    policy-authored dimensions cannot impose an owner certification obligation.
+    """
+    if not _maxgeo_gate_enabled():
+        return None
+    try:
+        import yaml
+
+        from orchestrator.langgraph.bfm_lib.maxgeo import declared_dimensional_maxima
+        dims = declared_dimensional_maxima(project_root)
+        task_path = Path(project_root) / "inputs/task.yaml"
+        task = yaml.safe_load(task_path.read_text()) if task_path.exists() else None
+        if task is None:
+            task = {}
+        if not isinstance(task, dict):
+            raise ValueError("inputs/task.yaml must be a mapping")
+        declared = task.get("max_geometry_cases", {})
+        if not isinstance(declared, dict):
+            raise ValueError("max_geometry_cases must map case names to dimension maxima")
+        for name, maxima in declared.items():
+            if (not isinstance(name, str) or not name.strip()
+                    or not isinstance(maxima, dict) or not maxima
+                    or any(not isinstance(key, str) or not key.strip()
+                           or type(value) is not int or value <= 0
+                           for key, value in maxima.items())):
+                raise ValueError(f"Malformed max_geometry_cases entry: {name!r}")
         if not dims:
             return None
-        marker = _tb_maxgeo_pairs(tb_path)
-        # run3-followups: single-sourced demand partition (bfm_lib.maxgeo).
-        # `missing` is provably identical to the old value-set computation;
-        # `value_only` newly NAMES the dims whose only evidence is a value
-        # collision with another marker pair, so the gate's number and the
-        # TB's confession finally agree.
-        _demand = _maxgeo_lib.maxgeo_demand(dims, marker)
-        missing = _demand.missing
-        value_only = _demand.value_only
-        if not missing:
-            # run3-followups: an evaluated PASS is a verdict, not a silence --
-            # the caller logs it so a suppressed gate can never read as green.
-            return {"verdict": "pass", "declared_dims": dims,
-                    "marker_pairs": marker,
-                    "value_only_dims": value_only}
-        scoped = _maxgeo_conformance_scope(
-            project_root, tb_path, tb_result, dims, marker, missing)
-        if scoped is not None:
-            return scoped
-        # run3-followups: a functional MAXIMUM-CONFIGURATION case (baked by the
-        # deterministic codegen, advertised via # MAXGEO_CASE) drives the max
-        # config register value and the full IN/OUT payload extents end-to-end
-        # against the golden -- the 2^n index/address wrap class this gate
-        # exists to catch IS exercised. Remaining per-dimension attainment is
-        # downgraded to a LOUD advisory gap (carried-forward defect), the same
-        # treatment as the bus-scoped conformance path. The gate stays HARD
-        # when no such case exists or its extents miss the declared maxima.
-        case = _tb_maxgeo_case(tb_path)
-        if case:
-            dim_values = set(dims.values())
-            attained = all(
-                isinstance(case.get(k), int) and case[k] in dim_values
-                for k in ("cfg0", "in_bytes", "out_bytes")
-            )
+        scope = {"declared_dims": dims, "marker_pairs": _tb_maxgeo_pairs(tb_path),
+                 "testbench_case_mentions": _tb_maxgeo_mentions(tb_path, dims)}
+        if not declared:
+            return {**scope, "verdict": "not_declared",
+                    "reason": "maximum geometry not owner-certified (no max_geometry_cases declared)",
+                    "uncovered_dims": dims, "executed_maximum_cases": []}
+        executed = (sim_result or {}).get("executed_cases") or []
+        if not isinstance(executed, list) or any(not isinstance(name, str) for name in executed):
+            raise ValueError("Executed case evidence must be a list of exact case names")
+        if (sim_result or {}).get("passed") is not True:
+            executed = []
+        covered = {}
+        qualifying = []
+        for name, maxima in declared.items():
+            if name not in executed:
+                continue
+            attained = {key: value for key, value in dims.items()
+                        if type(maxima.get(key)) is int and maxima[key] == value}
             if attained:
-                return {
-                    "advisory": True,
-                    "scope": "functional-max-case",
-                    "uncovered_dims": missing,
-                    "value_only_dims": value_only,
-                    "declared_dims": dims,
-                    "marker_pairs": marker,
-                    "functional_max_case": case,
-                    "reason": (
-                        "MAX-GEOMETRY gate: functional max-configuration case "
-                        f"{case} drives the maximum configuration and full "
-                        "payload extents end-to-end against the golden "
-                        "reference, exercising the 2^n index/address wrap "
-                        "class. Per-dimension attainment for "
-                        f"{sorted(missing)} is not individually proven -- "
-                        "recorded as a loud advisory gap, not a hard failure."
-                    ),
-                }
-        reason = (
-            "MAX-GEOMETRY DV GATE FAILED: the design declares dimensional "
-            "maxima but the testbench does not exercise them. A chip can pass "
-            "every fixed-small-geometry test yet ship a truncated index/address/"
-            "counter width that wraps at a 2^n boundary BELOW the declared "
-            "maximum (the class killer). The testbench MUST include at least one "
-            "MAX-GEOMETRY test case and advertise it with a "
-            "`# MAXGEO: <dim_name>=<value>` marker covering EVERY declared "
-            "dimension at its maximum.\n"
-            f"  declared maxima : {dims}\n"
-            f"  marker pairs    : {marker or '(no # MAXGEO marker found)'}\n"
-            f"  uncovered dims  : {missing}\n"
-            f"  value-collision-only (not individually proven): {value_only}\n"
-            "Fix: regenerate/edit the testbench to drive a max-geometry case "
-            "(sparse/short content at the maximum dimensions is acceptable if a "
-            "full workload is too slow -- the point is to exercise the index/"
-            "address widths at maximum extent) and emit the marker."
-        )
-        return {"reason": reason, "declared_dims": dims,
-                "marker_pairs": marker, "uncovered_dims": missing,
-                "value_only_dims": value_only}
-    except Exception:  # noqa: BLE001
-        return None
+                qualifying.append(name)
+                covered.update(attained)
+        missing = {key: value for key, value in dims.items() if key not in covered}
+        return {"verdict": "unknown" if missing else "pass",
+                "reason": ("MAX-GEOMETRY unknown: no successful executed owner-declared maximum case covers "
+                           f"{missing}; markers describe declared scope only") if missing else
+                          "Executed owner-declared maximum cases cover every declared dimension",
+                **scope,
+                "uncovered_dims": missing, "executed_maximum_cases": qualifying}
+    except Exception as exc:  # malformed declaration/evidence cannot disable the gate
+        return {"verdict": "unknown", "reason": f"Maximum-case evidence unavailable: {exc}"}
 
 
 async def integration_dv_node(state: OrchestratorState) -> dict:
@@ -9636,6 +8257,31 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
             and previous_tb_path
             and Path(previous_tb_path).exists()
         )
+        # WP-29/WP-40: the engine's deterministic BFM testbench is derived
+        # from the bus contract and DUT-blind. It is engine-owned: reused only
+        # while its content still hashes to what the engine wrote, regenerated
+        # (edit discarded) otherwise (observed: a chip lead rewrote its
+        # sampling point and SCK period to make a failing chip pass).
+        _prev_flags = previous_dv.get("tb_writer_flags") or {}
+        if reuse_existing_tb and _prev_flags.get("deterministic_bfm"):
+            _now_sha = _file_sha256(previous_tb_path)
+            if _prev_flags.get("tb_sha256") and _now_sha == _prev_flags.get("tb_sha256"):
+                log("  [INTEG-DV] previous testbench is the deterministic BFM and "
+                    "is unmodified (sha256 match) -- reusing", YELLOW)
+                write_graph_event(pr, "Integration DV", "deterministic_tb_reused", {
+                    "after_action": previous_action, "path": previous_tb_path,
+                    "tb_sha256": _now_sha,
+                })
+            else:
+                log("  [INTEG-DV] previous deterministic BFM testbench was MODIFIED "
+                    "(or carries no recorded hash) -- regenerating from the "
+                    f"contract (after {previous_action}); the edit is discarded", YELLOW)
+                write_graph_event(pr, "Integration DV", "deterministic_tb_modified", {
+                    "after_action": previous_action, "discarded_path": previous_tb_path,
+                    "recorded_sha256": _prev_flags.get("tb_sha256", ""),
+                    "found_sha256": _now_sha,
+                })
+                reuse_existing_tb = False
 
         generation_error: Exception | None = None
         if reuse_existing_tb:
@@ -9648,6 +8294,7 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
                 "testbench_path": previous_tb_path,
                 "tb_path": previous_tb_path,
                 "test_count": previous_dv.get("test_count", 0),
+                **(previous_dv.get("tb_writer_flags") or {}),
             }
         else:
             # 1. Generate integration testbench
@@ -9728,9 +8375,9 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
                             )
                             if tb_result.get("maxgeo_covered"):
                                 log(
-                                    "  [INTEG-DV] MAX-EXTENT bus coverage: "
-                                    f"{tb_result['maxgeo_covered']} driven at "
-                                    "maximum; NOT covered (no compute oracle): "
+                                    "  [INTEG-DV] Declared MAX-EXTENT bus stimulus scope: "
+                                    f"{tb_result['maxgeo_covered']}; "
+                                    "outside scope (no compute oracle): "
                                     f"{tb_result.get('maxgeo_uncovered', {})}",
                                     YELLOW,
                                 )
@@ -9876,18 +8523,8 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
                 # so the prompt + generated TB are byte-identical to before.
                 chip_model_path = ""
                 try:
-                    from orchestrator.architecture import composition as _composition
-                    if _composition.block_goldens_enabled():
-                        _cm = (
-                            Path(pr) / "arch" / _composition.BLOCK_MODELS_DIRNAME
-                            / "_chip_model.py"
-                        )
-                        if _cm.exists():
-                            chip_model_path = str(_cm)
-                except Exception:  # noqa: BLE001
-                    chip_model_path = ""
-                try:
                     tb_result = await generate_integration_testbench(
+                        project_root=_pr(state),
                         design_name=design_name,
                         top_rtl_path=top_rtl_path,
                         modules=modules,
@@ -9917,7 +8554,8 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
                 sim_log=error_msg,
                 sim_log_path="",
                 block_rtl_paths=block_rtl_paths,
-                            supported_actions=["retry", "fix_rtl", "fix_tb", "abort"],
+                            supported_actions=["retry", "fix_rtl", "fix_tb",
+                                               "revise", "abort"],
             )
             payload = {
                 "type": "integration_dv_failure",
@@ -9935,6 +8573,11 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
                     "retry",
                     "fix_rtl",
                     "fix_tb",
+                    # Same lawful escape as the DV-failed park: a TB that
+                    # cannot be generated is often a SPEC-level defect (the
+                    # top contract the uArch specs describe is un-testable),
+                    # and without this the chip-lead's only exit was abort.
+                    "revise",
                     "abort",
                 ],
                 "outer_agent_guidance": (
@@ -9944,6 +8587,9 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
                     "and any partially written testbench. Use action='fix_tb' "
                     "when the testbench generator or prompt needs repair, "
                     "action='fix_rtl' when the top-level contract is invalid, "
+                    "action='revise' when the defect is in the uArch specs "
+                    "themselves (appends your feedback to the affected specs "
+                    "and re-runs the tiers), "
                     "or action='retry' after an external fix. Do not mark the "
                     "pipeline complete until Integration DV runs.\n\n"
                     "Contract audit result: "
@@ -9989,109 +8635,53 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
         sim_result = await asyncio.to_thread(
             run_integration_simulation,
             design_name, top_rtl_path, block_rtl_paths, tb_path,
+            project_root=_pr(state),
         )
+        if _stale_candidate(sim_result):
+            log("  [INTEG-DV] candidate manifest is STALE (RTL changed after "
+                "adoption) -- re-running the integration check to re-adopt "
+                "before simulating", YELLOW)
+            write_graph_event(pr, "Integration DV", "candidate_stale", {
+                "log": str(sim_result.get("log", ""))[:300]})
+            return {"integration_dv_result": _reintegrate_result("integration_dv", sim_result),
+                    "pipeline_done": False}
 
         passed = sim_result.get("passed", False)
         sim_log = sim_result.get("log", "")
 
-        chip_equiv_result: dict | None = None
-        if passed:
-            # A-Fix 5(d): a green integration sim (esp. with a loosened or
-            # operator-edited TB) is NOT sufficient. The ENGINE re-drives
-            # chip_top + the composed Amaranth chip model on the same seeded
-            # stimulus and asserts byte equivalence. A real divergence flips the
-            # DV to failed -> the existing failure interrupt; an honest skip
-            # keeps the pass; a harness error is retried then fails closed.
-            chip_equiv_result = await asyncio.to_thread(
-                _maybe_run_chip_equiv,
-                pr, design_name, top_rtl_path, block_rtl_paths,
-            )
-            if (
-                chip_equiv_result is not None
-                and not chip_equiv_result.get("passed")
-                and not chip_equiv_result.get("skipped")
-            ):
-                passed = False
-                equiv_reason = chip_equiv_result.get("reason", "")
-                sim_log = (
-                    (sim_log + "\n\n") if sim_log else ""
-                ) + (
-                    "CHIP-TOP RTL-vs-MODEL EQUIVALENCE FAILED (the integration "
-                    "sim passed but chip_top does not byte-match the composed "
-                    "Amaranth chip model on a fresh seeded stimulus):\n"
-                    + equiv_reason
-                )
-                span.set_attribute("chip_equiv_failed", True)
-                log("  [INTEG-DV] chip-top equivalence FAILED -- flipping DV "
-                    f"to failed: {equiv_reason}", RED)
-            elif chip_equiv_result is not None and chip_equiv_result.get("passed"):
-                log("  [INTEG-DV] chip-top equivalence PASSED", GREEN)
-            elif chip_equiv_result is not None and chip_equiv_result.get("skipped"):
-                log("  [INTEG-DV] chip-top equivalence skipped "
-                    f"(non-blocking): {chip_equiv_result.get('reason','')}", YELLOW)
-
-        # MAX-GEOMETRY gate (rung3-fixes-2): a green sim is NOT sufficient when
-        # the design declares dimensional maxima but the TB never exercised
-        # them -- that is how a truncated index-width bug ships in a "verified"
-        # chip. Flip the DV to failed -> existing failure interrupt.
+        # Maximum certification is mandatory only for owner-declared cases.
+        # Policy-only dimensions remain explicitly not_declared and non-blocking.
         # run3-followups: the gate runs on EVERY passing cycle, including
         # operator-reused TBs (fix_tb/fix_rtl). "Trusted as-is" silently
         # DISARMED the gate on exactly the cycles that deserve more scrutiny --
         # proven live when a clobbered 2-test TB passed DV with no MAXGEO line
         # at all. Every evaluated outcome logs a verdict; silence now means
         # only "gate disabled or no declared dims".
+        _mg = None
         if passed:
-            _mg = _maxgeo_gate_verdict(pr, tb_path, tb_result)
+            _mg = _maxgeo_gate_verdict(pr, tb_path, tb_result, sim_result=sim_result)
+            if _mg is not None:
+                write_graph_event(pr, "Maximum Geometry", "maxgeo_verdict", _mg)
             if reuse_existing_tb and _mg is not None:
                 log("  [INTEG-DV] MAX-GEOMETRY gate: evaluating an OPERATOR-"
                     "REUSED testbench (fix_tb/fix_rtl) -- operator edits get "
                     "more scrutiny, not less.", YELLOW)
             if _mg is not None and _mg.get("verdict") == "pass":
                 log("  [INTEG-DV] MAX-GEOMETRY gate PASS -- every declared "
-                    f"maximum appears in the TB markers: "
-                    f"{_mg.get('marker_pairs', {})}", GREEN)
+                    f"maximum was covered by executed owner cases: "
+                    f"{_mg.get('executed_maximum_cases', [])}", GREEN)
                 write_graph_event(pr, "Integration DV", "maxgeo_gate_pass", {
                     "gate": "maxgeo",
-                    "marker_pairs": _mg.get("marker_pairs", {}),
+                    "executed_maximum_cases": _mg.get("executed_maximum_cases", []),
                 })
-            elif _mg is not None and _mg.get("advisory"):
-                # SCOPED, not silent. Either the engine's compute-lane-
-                # independent conformance TB drove every BUS maximum and cannot
-                # drive the compute lane, or a functional max-configuration
-                # case covered the wrap class without per-dimension proof; the
-                # gap is logged RED, written to the event stream, and carried
-                # forward as a defect so the final report and validation DV
-                # both see it.
-                _mg_scope = _mg.get("scope", "bus-contract-only")
-                log("  [INTEG-DV] MAX-GEOMETRY gate ADVISORY "
-                    f"(scope={_mg_scope}) -- this is NOT full max-geometry "
-                    f"coverage. NOT COVERED: {_mg['uncovered_dims']}", RED)
-                write_graph_event(pr, "Integration DV", "maxgeo_gate_scoped", {
-                    "gate": "maxgeo",
-                    "scope": _mg_scope,
-                    "bus_covered": _mg.get("bus_covered", {}),
-                    "functional_max_case": _mg.get("functional_max_case", {}),
-                    "uncovered_dims": _mg.get("uncovered_dims", {}),
-                })
-                record_carried_forward_defect(pr, {
-                    "gate": "maxgeo",
-                    "kind": "max_geometry_not_covered",
-                    "advisory": True,
-                    "unmodeled": (
-                        "dimensional maxima never individually driven at "
-                        f"maximum extent: {_mg.get('uncovered_dims', {})} "
-                        f"(scope={_mg_scope})"
-                    ),
-                    "first_divergence_block": "",
-                    "note": _mg["reason"],
-                })
-                sim_log = ((sim_log + "\n\n") if sim_log else "") + _mg["reason"]
+            elif _mg is not None and _mg.get("verdict") == "not_declared":
+                log(f"  [INTEG-DV] MAX-GEOMETRY not_declared -- {_mg['reason']}", YELLOW)
             elif _mg is not None:
                 passed = False
                 sim_log = ((sim_log + "\n\n") if sim_log else "") + _mg["reason"]
                 span.set_attribute("maxgeo_gate_failed", True)
                 log("  [INTEG-DV] MAX-GEOMETRY gate FAILED -- flipping DV to "
-                    f"failed: uncovered={_mg['uncovered_dims']}", RED)
+                    f"failed: uncovered={_mg.get('uncovered_dims', {})}", RED)
 
         # v3 Section 2: CHIP-LEVEL measured throughput. The deterministic-BFM TB
         # wrote integration_throughput.json (op window START-committed -> DONE
@@ -10112,12 +8702,13 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
                     f"({chip_tput.get('budget_source', 'none')} budget)", CYAN)
             if (passed and chip_tput.get("applicable")
                     and chip_tput.get("passed") is False):
-                passed = False
+                # WP-11: advisory -- recorded and appended, never a DV failure.
                 sim_log = ((sim_log + "\n\n") if sim_log else "") + (
-                    chip_tput.get("report", "") or chip_tput.get("reason", ""))
-                span.set_attribute("chip_throughput_gate_failed", True)
-                log("  [INTEG-DV] chip MEASURED-THROUGHPUT gate FAILED -- "
-                    f"flipping DV to failed: {chip_tput.get('reason', '')}", RED)
+                    "CHIP THROUGHPUT ADVISORY (not a DV failure):\n"
+                    + (chip_tput.get("report", "") or chip_tput.get("reason", "")))
+                span.set_attribute("chip_throughput_advisory", True)
+                log("  [INTEG-DV] chip measured throughput below budget -- "
+                    f"advisory only: {chip_tput.get('reason', '')}", YELLOW)
         except Exception as _ce:  # noqa: BLE001 - never crash the DV node
             log(f"  [INTEG-DV] chip throughput eval skipped ({_ce})", YELLOW)
 
@@ -10132,7 +8723,6 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
                 "passed": True,
                 "test_count": test_count,
                 "log_path": sim_result.get("log_path", ""),
-                "chip_equiv": (chip_equiv_result or {}).get("reason", ""),
             })
 
             _record_dv_row(
@@ -10147,8 +8737,8 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
                     "test_count": test_count,
                     "testbench_path": tb_path,
                     "sim_log_path": sim_result.get("log_path", ""),
+                    "max_geometry": _mg,
                     "design_name": design_name,
-                    "chip_equiv_result": chip_equiv_result,
                     "measured_cyc_per_op_chip": (chip_tput or {}).get(
                         "measured_cyc_per_op_chip"),
                 },
@@ -10190,17 +8780,36 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
             "test_count": test_count,
             "sim_log": sim_log[-3000:],
             "sim_log_path": sim_result.get("log_path", ""),
+            "max_geometry": _mg,
             "block_rtl_paths": block_rtl_paths,
             "contract_audit": contract_audit,
             "contract_audit_path": contract_audit.get("audit_path", ""),
-            "supported_actions": [
-                "retry",        # regenerate testbench + re-simulate
-                "fix_rtl",      # outer agent fixed RTL, re-run sim only
-                "fix_tb",       # outer agent fixed testbench, re-run sim only
-                "abort",        # stop the pipeline
-            ],
+            "supported_actions": (
+                # WP-29: the deterministic BFM is contract-derived and
+                # DUT-blind -- there is no testbench to fix.
+                ["retry", "fix_rtl", "revise", "abort"]
+                if (tb_result or {}).get("deterministic_bfm")
+                else [
+                    "retry",        # regenerate testbench + re-simulate
+                    "fix_rtl",      # outer agent fixed RTL, re-run sim only
+                    "fix_tb",       # outer agent fixed testbench, re-run sim only
+                    "revise",       # feedback -> affected uArch specs + tier regen
+                    "abort",        # stop the pipeline
+                ]
+            ),
+            "deterministic_bfm": bool((tb_result or {}).get("deterministic_bfm")),
             "outer_agent_guidance": (
-                "Integration DV (top-level simulation) failed. As the outer-loop "
+                ("THIS TESTBENCH IS THE ENGINE'S DETERMINISTIC, CONTRACT-DERIVED, "
+                 "DUT-BLIND BUS-PROTOCOL BFM (the same protocol the published "
+                 "grader drives). It is engine-OWNED: fix_tb is not offered and "
+                 "an edited copy is discarded (content hash). A failure here is "
+                 "normally an RTL defect (fix_rtl) or a contract defect (revise). "
+                 "If you believe the BFM itself is wrong, say so in `reasoning` "
+                 "with a concrete counterexample (signal, cycle, expected vs "
+                 "observed) and choose retry or abort; the operator owns the "
+                 "BFM and versions any fix.\n\n"
+                 if (tb_result or {}).get("deterministic_bfm") else "")
+                + "Integration DV (top-level simulation) failed. As the outer-loop "
                 "diagnostic agent, read the sim log and testbench to diagnose:\n"
                 "1. TESTBENCH BUG: If the testbench has incorrect port names, "
                 "wrong timing, or bad assumptions, edit the testbench at "
@@ -10255,11 +8864,12 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
                 "interrupt_payload": payload,
                 "test_count": test_count,
                 "testbench_path": tb_path,
+                "tb_writer_flags": _tb_writer_flags(tb_result),
                 "sim_log_path": sim_result.get("log_path", ""),
+                "max_geometry": _mg,
                 "design_name": design_name,
                 "contract_audit": contract_audit,
                 "contract_audit_path": contract_audit.get("audit_path", ""),
-                "chip_equiv_result": chip_equiv_result,
             },
             "pipeline_done": False,
         }
@@ -10279,9 +8889,9 @@ async def integration_dv_decision_node(state: OrchestratorState) -> dict:
     dv = dict(state.get("integration_dv_result") or {})
     payload = dv.get("interrupt_payload") or {
         "type": "integration_dv_failure",
-        "supported_actions": ["retry", "fix_rtl", "fix_tb", "abort"],
+        "supported_actions": ["retry", "fix_rtl", "fix_tb", "revise", "abort"],
     }
-    response = interrupt(payload) or {}
+    response = (await _resolve_interrupt(payload)) or {}
     action = response.get("action", "abort")
     test_count = dv.get("test_count", 0)
     write_graph_event(pr, "Integration DV", "graph_node_exit", {
@@ -10302,6 +8912,16 @@ async def integration_dv_decision_node(state: OrchestratorState) -> dict:
     elif action == "abort":
         dv_result["aborted"] = True
         log("  [INTEG-DV] Aborted", RED)
+    elif action == "revise":
+        revised = _apply_revise_uarch(
+            pr, response, dict(payload.get("contract_audit") or {}),
+            "integration_dv")
+        dv_result["revised_blocks"] = revised
+        log(f"  [INTEG-DV] Revise: uArch feedback appended to "
+            f"{revised or '[] (no specs matched)'}; "
+            + ("re-entering only those blocks" if revised
+               else "re-running every tier"),
+            YELLOW)
     elif action in ("retry", "fix_rtl", "fix_tb"):
         fix_desc = response.get("rtl_fix_description", "")
         log(
@@ -10329,19 +8949,49 @@ async def integration_dv_decision_node(state: OrchestratorState) -> dict:
         "integration_dv_result": dv_result,
         "pipeline_done": False,
         "pipeline_aborted": action == "abort",
+        **({"current_tier_index": 0,
+            "revise_blocks": ({n: False for n in revised} or None)}
+           if action == "revise" else {}),
+    }
+
+
+def _stale_candidate(sim_result: dict) -> bool:
+    """WP-76: the authoritative simulation refused a stale candidate manifest
+    (someone edited the RTL after adoption -- typically a chip-lead fix_rtl).
+    That is not a functional failure: the design must be re-integrated and
+    re-adopted, then simulated."""
+    if not isinstance(sim_result, dict) or sim_result.get("passed"):
+        return False
+    return (sim_result.get("kind") == "candidate_mismatch"
+            and "stale" in str(sim_result.get("log", "")).lower())
+
+
+def _reintegrate_result(stage: str, sim_result: dict) -> dict:
+    return {
+        "passed": False, "candidate_stale": True, "action_taken": "reintegrate",
+        "pending_decision": False, "phase": stage,
+        "reason": ("the candidate manifest is stale (RTL changed after adoption); "
+                   "re-running the integration check to re-adopt the design"),
+        "error": str(sim_result.get("log", ""))[:500],
     }
 
 
 def route_after_integration_dv_decision(state: OrchestratorState) -> str:
     """Route the operator's decision back into integration DV or terminate."""
     result = state.get("integration_dv_result") or {}
-    if result.get("action_taken") in ("retry", "fix_rtl", "fix_tb"):
+    if result.get("action_taken") == "revise":
+        return "init_tier"
+    if result.get("action_taken") == "fix_rtl":
+        return "integration_check"   # WP-76: edited RTL must be re-adopted first
+    if result.get("action_taken") in ("retry", "fix_tb"):
         return "integration_dv"
     return END
 
 
 route_after_integration_dv_decision.__edge_labels__ = {
-    "integration_dv": "RETRY / FIX",
+    "integration_dv": "RETRY / FIX TB",
+    "integration_check": "FIX RTL (re-adopt)",
+    "init_tier": "REVISE",
     END: "DONE",
 }
 
@@ -10464,6 +9114,45 @@ def contract_audit_staleness(audit: dict | None, context_path: str = "") -> str:
     return ""
 
 
+_HARNESS_FAILURE_FINGERPRINTS = (
+    ("syntax error near unexpected token",
+     "shell syntax error in a make recipe -- the harness/Makefile is broken; "
+     "no design signal was ever evaluated"),
+    ("bash: -c: line",
+     "shell error while composing the sim command -- harness/Makefile bug"),
+    ("No module named test_",
+     "cocotb TB module failed to import at 0 ns (TB copy/stem regression)"),
+    ("ModuleNotFoundError",
+     "TB import failure at load time -- harness environment bug"),
+    ("cocotb-config: command not found",
+     "cocotb toolchain missing from PATH -- environment bug"),
+    ("verilator: command not found",
+     "verilator missing from PATH -- environment bug"),
+)
+
+
+def _harness_failure_fingerprint(sim_log: str) -> str | None:
+    """Match a DV sim log against unambiguous HARNESS-class failure
+    fingerprints (sim never produced a design-level verdict). Returns the
+    explanation string, or None when the failure could be design-related."""
+    text = sim_log or ""
+    for needle, why in _HARNESS_FAILURE_FINGERPRINTS:
+        if needle in text:
+            return why
+    return None
+
+
+def _harness_audit_fastpath_enabled() -> bool:
+    """CORESMITH_HARNESS_AUDIT_FASTPATH (default ON): skip the LLM contract
+    audit when the sim log carries an unambiguous harness-class fingerprint.
+    Runtime profile 2026-08-26: 4 of arm U's 6 validation audits (138-252s
+    each) and one 900s audit timeout re-diagnosed shell errors, not RTL --
+    the audit adds latency and a stale-verdict risk while the right action
+    (fix the harness) is already determined. Set =0 to restore an
+    unconditional audit."""
+    return (os.environ.get("CORESMITH_HARNESS_AUDIT_FASTPATH", "1") or "1") != "0"
+
+
 async def _run_top_level_contract_audit(
     *,
     stage: str,
@@ -10508,9 +9197,6 @@ async def _run_top_level_contract_audit(
             "prd_json": str(root / ".coresmith" / "prd_spec.json"),
             "block_diagram": str(root / ".coresmith" / "block_diagram.json"),
             "integration_vcd": str(root / "sim_build" / "integration" / "dump.vcd"),
-            "integration_wavekit_audit": str(
-                root / "sim_build" / "integration" / "wavekit_audit.json"
-            ),
         },
     }
     context_path.write_text(json.dumps(context, indent=2), encoding="utf-8")
@@ -10519,6 +9205,60 @@ async def _run_top_level_contract_audit(
     # in front of it is about the failure in front of it.
     context_stamp = _context_fingerprint(str(context_path))
     call_start = _time.time()
+
+    # Per-attempt audit history (arm S/M retro: contract_audit/ kept ONE
+    # file, overwritten every attempt -- operators could not see that early
+    # audits said "CAVLC order" while late ones said "read rendezvous"
+    # without excavating codex_turns.jsonl). Archive the previous audit
+    # before this attempt writes.
+    if output_path.exists():
+        try:
+            _stamp = int(output_path.stat().st_mtime)
+            output_path.rename(
+                audit_dir / f"{safe_stage}_contract_audit_{_stamp}.json")
+        except OSError:
+            output_path.unlink(missing_ok=True)
+
+    # Harness-class fast-path (CORESMITH_HARNESS_AUDIT_FASTPATH, default ON):
+    # an unambiguous harness failure (shell error in a make recipe, TB import
+    # failure at 0 ns, missing toolchain binary) cannot be design-related --
+    # the LLM audit there costs 138-900s and re-derives "fix the harness".
+    _fp = _harness_failure_fingerprint(sim_log)
+    if _fp and _harness_audit_fastpath_enabled():
+        result = ContractAuditAgent._default_result(stage, str(context_path))
+        result.update({
+            "category": "DV_PROCESS_ERROR",
+            "contract_failure": False,
+            "local_fix_possible": True,
+            "confidence": 0.9,
+            "recommended_action": "fix_tb",
+            "suggested_fix": _fp,
+            "outer_agent_summary": (
+                "HARNESS-CLASS failure (LLM audit skipped by fast-path): "
+                f"{_fp}. The simulation never produced a design-level "
+                f"verdict; fix the harness and re-run. Sim log: "
+                f"{sim_log_path or '(inline tail in failure context)'}"
+            ),
+        })
+        result["first_divergence"]["summary"] = _fp
+        result[CONTRACT_AUDIT_STAMP_KEY] = context_stamp
+        result["audited_at"] = round(call_start, 3)
+        output_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
+        write_graph_event(project_root, "Contract Audit", "graph_node_exit", {
+            "stage": stage,
+            "category": "DV_PROCESS_ERROR",
+            "contract_failure": False,
+            "recommended_action": "fix_tb",
+            "confidence": 0.9,
+            "audit_path": str(output_path),
+            "audit_fastpath": True,
+        })
+        log(f"  [CONTRACT-AUDIT] {stage}: harness-class failure -- "
+            "fast-path verdict, LLM audit skipped "
+            "(CORESMITH_HARNESS_AUDIT_FASTPATH=0 restores it)", YELLOW)
+        result["audit_path"] = str(output_path)
+        result["context_path"] = str(context_path)
+        return result
 
     log(f"  [CONTRACT-AUDIT] Auditing {stage} failure...", YELLOW)
     agent = ContractAuditAgent(temperature=0.1)
@@ -10591,9 +9331,11 @@ def route_after_integration_dv(state: OrchestratorState) -> str:
     result = state.get("integration_dv_result") or {}
     if result.get("passed") is True:
         return "validation_dv"
+    if result.get("candidate_stale") or result.get("action_taken") == "fix_rtl":
+        return "integration_check"   # WP-76
     if result.get("pending_decision"):
         return "integration_dv_decision"
-    if result.get("action_taken") in ("retry", "fix_rtl", "fix_tb"):
+    if result.get("action_taken") in ("retry", "fix_tb"):
         return "integration_dv"
     return END
 
@@ -10601,6 +9343,7 @@ def route_after_integration_dv(state: OrchestratorState) -> str:
 route_after_integration_dv.__edge_labels__ = {
     "validation_dv": "Validation DV",
     "integration_dv_decision": "Park for decision",
+    "integration_check": "Re-adopt (RTL changed)",
     "integration_dv": "Retry",
     END: "DONE",
 }
@@ -10640,11 +9383,20 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
         # Honest-skip (recorded, non-blocking) when no artifact/tooling; a
         # divergence/fidelity break FAILS validation_dv with the case evidence.
         try:
+            from orchestrator.harness.task_adapter import run_task_adapter
             from orchestrator.langgraph.acceptance_dv import run_acceptance_dv
 
+            # WP-41: a task ADAPTER (inputs/task_adapter.py) runs the task's
+            # own driver/checker on the candidate and is the acceptance
+            # authority when present; the engine's native stream harness is
+            # the fallback for tasks without one.
             _acc = await asyncio.to_thread(
-                run_acceptance_dv, pr, top_rtl_path, block_rtl_paths,
+                run_task_adapter, pr, top_rtl_path, block_rtl_paths,
             )
+            if _acc is None:
+                _acc = await asyncio.to_thread(
+                    run_acceptance_dv, pr, top_rtl_path, block_rtl_paths,
+                )
             span.set_attribute("acceptance_dv_passed", bool(_acc.get("passed")))
             span.set_attribute("acceptance_dv_skipped", bool(_acc.get("skipped")))
             write_graph_event(pr, "Validation DV", "acceptance_dv", {
@@ -10658,17 +9410,164 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
                 log(f"  [ACCEPTANCE-DV] PASSED: {_acc.get('reason')}", GREEN)
             else:
                 log(f"  [ACCEPTANCE-DV] FAILED: {_acc.get('reason')}", RED)
+                # WP-19: park for the chip lead exactly like a simulation
+                # failure. Falling through returned a FAIL signoff with no
+                # decision and no fix loop (Arm F-3 re-drive).
+                _acc_cases = _acc.get("cases") or []
+                _acc_lines = [
+                    f"  {c.get('name')}: ok={c.get('ok')} cycles={c.get('cycles')} "
+                    f"rtl_bytes={c.get('rtl_bytes')} "
+                    f"{c.get('note') or c.get('criterion') or ''}"
+                    for c in _acc_cases
+                ]
+                _acc_log = (
+                    "TASK ACCEPTANCE FAILED (the task's declared oracle on the "
+                    "assembled candidate):\n" + "\n".join(_acc_lines)
+                    + "\nCaptured oracle artifacts: "
+                    + (_acc.get("captured_dir") or str(Path(pr) / ".coresmith" / "acceptance_dv"))
+                    + "\nViolations: " + json.dumps(
+                        _acc.get("violations", []), default=str)[:1500]
+                )
+                _acc_oracle = bool(_acc.get("oracle_incomplete"))
+                _acc_audit = {
+                    "category": ("ACCEPTANCE_ORACLE_INCOMPLETE" if _acc_oracle
+                                 else "ACCEPTANCE_DV_FAILURE"),
+                    "local_fix_possible": None,
+                    "recommended_action": "retry" if _acc_oracle else "fix_rtl",
+                    "affected_blocks": [],
+                    "outer_agent_summary": (
+                        f"{sum(1 for c in _acc_cases if c.get('ok') is False)}/"
+                        f"{len(_acc_cases)} acceptance case(s) fail the task's "
+                        "declared oracle (per-case kind/detail above). Earlier "
+                        "block-level checks passed, so the defect is in what they "
+                        "did not measure end-to-end: run the task's checker on the "
+                        "captured artifacts to localise it."
+                    ),
+                    "suggested_fix": (
+                        "Run the task's checker offline on the captured "
+                        "artifacts, read its error (which unit / sample / field), "
+                        "map that to the responsible block, "
+                        "fix the RTL (fix_rtl) or the block's spec (revise)."
+                    ),
+                }
+                _acc_payload = {
+                    "type": "validation_dv_failure",
+                    "phase": "acceptance_dv",
+                    "design_name": design_name,
+                    "top_rtl_path": top_rtl_path,
+                    "testbench_path": "",
+                    "test_count": len(_acc_cases),
+                    "requirement_count": 0,
+                    "sim_log": _acc_log[-3000:],
+                    "sim_log_path": str(Path(pr) / ".coresmith" / "acceptance_dv.json"),
+                    "block_rtl_paths": block_rtl_paths,
+                    "contract_audit": _acc_audit,
+                    "contract_audit_path": "",
+                    "acceptance_dv": {k: v for k, v in _acc.items()},
+                    # WP-38: no fix_tb -- the acceptance oracle is task-owned;
+                    # an oracle problem offers only retry/abort.
+                    "supported_actions": (["retry", "abort"] if _acc_oracle
+                                          else ["retry", "fix_rtl", "revise", "abort"]),
+                    "outer_agent_guidance": (
+                        ("The acceptance ORACLE did not complete (kind="
+                         f"{_acc.get('kind')}): {_acc.get('reason')}. This is NOT "
+                         "an RTL verdict. Do not change RTL for it; the operator "
+                         "fixes the adapter / toolchain, then retry.")
+                        if _acc_oracle else
+                        ("The task's acceptance oracle rejected the chip. Per "
+                         "case: status=1 (watchdog) means the case never "
+                         "completed within its cycle budget; criterion="
+                         "acceptance_predicate / task_adapter_functional means "
+                         "the output was wrong; kind=budget_fail means the "
+                         "output was right but over the task's cycle budget "
+                         "(throughput) -- a real failure of the published "
+                         "grader, fixed in the RTL's architecture, not by "
+                         "changing the budget (and if an internal ERS/KPI "
+                         "requirement demands the slower cadence, THAT "
+                         "requirement is wrong: revise it); kind=boundary_mismatch means "
+                         "the candidate's top module is not the task's graded "
+                         "boundary (fix the integration, never the adapter). This "
+                         "is the published grader's verdict class -- there is no "
+                         "testbench to relax and fix_tb is not offered. Grade the "
+                         "captured output offline, localise the block, fix it "
+                         "(fix_rtl / revise), then retry.")
+                    ),
+                    "reference_files": {
+                        "top_rtl": top_rtl_path,
+                        "acceptance_dv": str(Path(pr) / ".coresmith" / "acceptance_dv.json"),
+                        "captured_streams": (_acc.get("captured_dir") or str(Path(pr) / ".coresmith" / "acceptance_dv")),
+                        "ers": str(Path(pr) / ".coresmith" / "ers_spec.json"),
+                    },
+                }
+                write_graph_event(pr, "Validation DV", "graph_node_exit", {
+                    "action": "pending_decision", "passed": False,
+                    "phase": "acceptance_dv", "test_count": len(_acc_cases),
+                })
                 return {"validation_dv_result": {
                     "passed": False,
+                    "pending_decision": True,
+                    "interrupt_payload": _acc_payload,
                     "error": "RTL Acceptance DV failed: "
                              + str(_acc.get("reason")),
                     "phase": "acceptance_dv",
+                    "test_count": len(_acc_cases),
+                    "requirement_count": 0,
+                    "testbench_path": "",
+                    "design_name": design_name,
+                    "contract_audit": _acc_audit,
+                    "contract_audit_path": "",
                     "acceptance_dv": {k: v for k, v in _acc.items()
                                       if k != "cases"},
                     "violations": _acc.get("violations", []),
-                }}
-        except Exception as _exc:  # noqa: BLE001 - never crash the node
-            log(f"  [ACCEPTANCE-DV] gate error (skipped): {_exc}", YELLOW)
+                }, "pipeline_done": False}
+        except Exception as _exc:  # noqa: BLE001
+            # WP-52: a required oracle that RAISES parks as oracle_incomplete;
+            # it never "skips" into the rest of signoff.
+            log(f"  [ACCEPTANCE-DV] gate raised: {_exc!r} -- parking", RED)
+            _exc_acc = {
+                "passed": False, "skipped": False, "oracle_incomplete": True,
+                "kind": "infrastructure_error",
+                "reason": f"acceptance gate raised: {_exc!r}", "cases": [],
+                "violations": [{"type": "acceptance_dv_failure",
+                                "criterion": "acceptance_dv_oracle_incomplete",
+                                "kind": "infrastructure_error",
+                                "suggested_fix": "Not an RTL verdict: the acceptance gate "
+                                                 "itself failed. Fix the adapter / engine, "
+                                                 "then retry."}],
+            }
+            _exc_audit = {
+                "category": "ACCEPTANCE_ORACLE_INCOMPLETE", "local_fix_possible": None,
+                "recommended_action": "retry", "affected_blocks": [],
+                "outer_agent_summary": f"the acceptance gate raised: {str(_exc)[:400]}",
+                "suggested_fix": "retry after the operator fixes the adapter / engine",
+            }
+            write_graph_event(pr, "Validation DV", "graph_node_exit", {
+                "action": "pending_decision", "passed": False,
+                "phase": "acceptance_dv", "error": str(_exc)[:300],
+            })
+            return {"validation_dv_result": {
+                "passed": False, "pending_decision": True,
+                "interrupt_payload": {
+                    "type": "validation_dv_failure", "phase": "acceptance_dv",
+                    "design_name": design_name, "top_rtl_path": top_rtl_path,
+                    "testbench_path": "", "test_count": 0, "requirement_count": 0,
+                    "sim_log": f"acceptance gate raised: {_exc!r}"[-3000:],
+                    "sim_log_path": "", "block_rtl_paths": block_rtl_paths,
+                    "contract_audit": _exc_audit, "contract_audit_path": "",
+                    "acceptance_dv": _exc_acc,
+                    "supported_actions": ["retry", "abort"],
+                    "outer_agent_guidance": (
+                        "The acceptance ORACLE raised an exception (see sim_log). "
+                        "This is NOT an RTL verdict: do not change RTL for it; the "
+                        "operator fixes the adapter / engine, then retry."),
+                    "reference_files": {"top_rtl": top_rtl_path},
+                },
+                "error": f"acceptance gate raised: {_exc!r}",
+                "phase": "acceptance_dv", "test_count": 0, "requirement_count": 0,
+                "testbench_path": "", "design_name": design_name,
+                "contract_audit": _exc_audit, "contract_audit_path": "",
+                "acceptance_dv": _exc_acc, "violations": _exc_acc["violations"],
+            }, "pipeline_done": False}
 
         if not top_rtl_path or not Path(top_rtl_path).exists():
             msg = "No top-level RTL available for Validation DV"
@@ -10761,6 +9660,7 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
                 "testbench_path": previous_tb_path,
                 "tb_path": previous_tb_path,
                 "test_count": previous_dv.get("test_count", 0),
+                **(previous_dv.get("tb_writer_flags") or {}),
             }
         else:
             log("  [VALIDATION-DV] Generating ERS/KPI validation testbench...", YELLOW)
@@ -10771,28 +9671,8 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
             reference_path = ""
             reference_entry = ""
             try:
-                from orchestrator.architecture import composition as _composition
-                if _composition.block_goldens_enabled():
-                    _ref = _composition.resolve_reference_implementation(pr)
-                    if _ref:
-                        reference_path = _ref
-                        try:
-                            from orchestrator.architecture.model_integration import (
-                                _load_reference_module,
-                            )
-                            _ref_mod = _load_reference_module(_ref)
-                            _fn, reference_entry = (
-                                _composition.resolve_reference_entrypoint(
-                                    pr, _ref_mod
-                                )
-                            )
-                        except Exception:  # noqa: BLE001
-                            reference_entry = ""
-            except Exception:  # noqa: BLE001
-                reference_path = ""
-                reference_entry = ""
-            try:
                 tb_result = await generate_validation_testbench(
+                    project_root=_pr(state),
                     design_name=design_name,
                     top_rtl_path=top_rtl_path,
                     modules=modules,
@@ -10824,7 +9704,8 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
                 sim_log=error_msg,
                 sim_log_path="",
                 block_rtl_paths=block_rtl_paths,
-                            supported_actions=["retry", "fix_rtl", "fix_tb", "abort"],
+                            supported_actions=["retry", "fix_rtl", "fix_tb",
+                                               "revise", "abort"],
             )
             payload = {
                 "type": "validation_dv_failure",
@@ -10843,6 +9724,9 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
                     "retry",
                     "fix_rtl",
                     "fix_tb",
+                    # See the integration_dv tb_generation park: tier
+                    # regeneration must be reachable from here too.
+                    "revise",
                     "abort",
                 ],
                 "outer_agent_guidance": (
@@ -10852,7 +9736,10 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
                     "an invalid top-level contract, or a validation testbench "
                     "generation bug. Use action='fix_tb' when the validation "
                     "testbench prompt/generator needs repair, action='fix_rtl' "
-                    "when RTL/top contracts must change, or action='retry' "
+                    "when RTL/top contracts must change, action='revise' when "
+                    "the uArch specs themselves must change (appends your "
+                    "feedback to the affected specs and re-runs the tiers), "
+                    "or action='retry' "
                     "after applying an external fix. Do not mark the pipeline "
                     "complete until Validation DV runs and verifies every ERS "
                     "requirement.\n\nContract audit result: "
@@ -10881,7 +9768,9 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
                     "phase": "tb_generation",
                     "requirement_count": requirement_count,
                     "test_count": 0,
-                    "testbench_path": "",
+                    # WP-14b: keep the canonical TB path so a chip-lead fix_tb
+                    # re-admits the edited file instead of regenerating.
+                    "testbench_path": (str(_canon_tb) if (_canon_tb := Path(pr) / "tb" / "validation" / "test_chip_top_validation.py").exists() else ""),
                     "design_name": design_name,
                     "contract_audit": contract_audit,
                     "contract_audit_path": contract_audit.get("audit_path", ""),
@@ -10899,25 +9788,50 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
         sim_result = await asyncio.to_thread(
             run_integration_simulation,
             design_name, top_rtl_path, block_rtl_paths, tb_path,
-            sim_scope="validation",
+            sim_scope="validation", project_root=_pr(state),
         )
+        if _stale_candidate(sim_result):
+            log("  [VALIDATION-DV] candidate manifest is STALE (RTL changed after "
+                "adoption) -- re-running the integration check to re-adopt "
+                "before simulating", YELLOW)
+            write_graph_event(pr, "Validation DV", "candidate_stale", {
+                "log": str(sim_result.get("log", ""))[:300]})
+            return {"validation_dv_result": _reintegrate_result("validation_dv", sim_result),
+                    "pipeline_done": False}
 
         passed = sim_result.get("passed", False)
         sim_log = sim_result.get("log", "")
 
-        # MAX-GEOMETRY gate (rung3-fixes-2): validation DV must exercise the
-        # declared dimensional maxima, not just a directed small-geometry prefix
-        # -- otherwise a geometry-dependent index/address-width truncation ships
-        # verified. Flip to failed -> existing failure interrupt. Operator-reused
-        # TBs are trusted.
-        if passed and not reuse_existing_tb:
-            _mg = _maxgeo_gate_verdict(pr, tb_path)
+        # Same owner-certification contract as integration DV: not_declared is
+        # scope evidence only and never flips a passing simulation to failed.
+        # run3-followups: same contract as integration_dv -- the gate runs on
+        # EVERY passing cycle (operator-reused TBs get MORE scrutiny) and every
+        # evaluated outcome logs a verdict; a pass returns a dict, never None.
+        _mg = None
+        if passed:
+            _mg = _maxgeo_gate_verdict(pr, tb_path, tb_result, sim_result=sim_result)
             if _mg is not None:
+                write_graph_event(pr, "Maximum Geometry", "maxgeo_verdict", _mg)
+            if reuse_existing_tb and _mg is not None:
+                log("  [VALIDATION-DV] MAX-GEOMETRY gate: evaluating an "
+                    "OPERATOR-REUSED testbench (fix_tb/fix_rtl) -- operator "
+                    "edits get more scrutiny, not less.", YELLOW)
+            if _mg is not None and _mg.get("verdict") == "pass":
+                log("  [VALIDATION-DV] MAX-GEOMETRY gate PASS -- every "
+                    f"declared maximum was covered by executed owner cases: "
+                    f"{_mg.get('executed_maximum_cases', [])}", GREEN)
+                write_graph_event(pr, "Validation DV", "maxgeo_gate_pass", {
+                    "gate": "maxgeo",
+                    "executed_maximum_cases": _mg.get("executed_maximum_cases", []),
+                })
+            elif _mg is not None and _mg.get("verdict") == "not_declared":
+                log(f"  [VALIDATION-DV] MAX-GEOMETRY not_declared -- {_mg['reason']}", YELLOW)
+            elif _mg is not None:
                 passed = False
                 sim_log = ((sim_log + "\n\n") if sim_log else "") + _mg["reason"]
                 span.set_attribute("maxgeo_gate_failed", True)
                 log("  [VALIDATION-DV] MAX-GEOMETRY gate FAILED -- flipping DV "
-                    f"to failed: uncovered={_mg['uncovered_dims']}", RED)
+                    f"to failed: uncovered={_mg.get('uncovered_dims', {})}", RED)
 
         if passed:
             # Chip-top synthesizability gate (fix #5 + #2): pipeline_done is
@@ -10944,6 +9858,7 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
                         "passed": True,
                         "chip_top_synthesizable": False,
                         "synth_fail_reason": _synth_reason,
+                        "max_geometry": _mg,
                         "test_count": test_count,
                         "design_name": design_name,
                     },
@@ -10982,6 +9897,7 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
                         "passed": True,
                         "die_budget_ok": False,
                         "die_rollup_reason": _roll.reason,
+                        "max_geometry": _mg,
                         "die_total_mm2": round(_roll.total_um2 / 1e6, 4),
                         "die_budget_mm2": _roll.die_budget_mm2,
                         "test_count": test_count,
@@ -11014,6 +9930,7 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
                     "requirement_count": requirement_count,
                     "testbench_path": tb_path,
                     "sim_log_path": sim_result.get("log_path", ""),
+                    "max_geometry": _mg,
                     "design_name": design_name,
                     "chip_top_synthesizable": True,
                 },
@@ -11054,6 +9971,7 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
             "requirement_count": requirement_count,
             "sim_log": sim_log[-3000:],
             "sim_log_path": sim_result.get("log_path", ""),
+            "max_geometry": _mg,
             "block_rtl_paths": block_rtl_paths,
             "contract_audit": contract_audit,
             "contract_audit_path": contract_audit.get("audit_path", ""),
@@ -11061,6 +9979,7 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
                 "retry",
                 "fix_rtl",
                 "fix_tb",
+                "revise",
                 "abort",
             ],
             "outer_agent_guidance": (
@@ -11106,7 +10025,9 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
                 "test_count": test_count,
                 "requirement_count": requirement_count,
                 "testbench_path": tb_path,
+                "tb_writer_flags": _tb_writer_flags(tb_result),
                 "sim_log_path": sim_result.get("log_path", ""),
+                "max_geometry": _mg,
                 "design_name": design_name,
                 "contract_audit": contract_audit,
                 "contract_audit_path": contract_audit.get("audit_path", ""),
@@ -11125,9 +10046,9 @@ async def validation_dv_decision_node(state: OrchestratorState) -> dict:
     dv = dict(state.get("validation_dv_result") or {})
     payload = dv.get("interrupt_payload") or {
         "type": "validation_dv_failure",
-        "supported_actions": ["retry", "fix_rtl", "fix_tb", "abort"],
+        "supported_actions": ["retry", "fix_rtl", "fix_tb", "revise", "abort"],
     }
-    response = interrupt(payload) or {}
+    response = (await _resolve_interrupt(payload)) or {}
     action = response.get("action", "abort")
     write_graph_event(pr, "Validation DV", "graph_node_exit", {
         "action": action,
@@ -11148,6 +10069,16 @@ async def validation_dv_decision_node(state: OrchestratorState) -> dict:
     elif action == "abort":
         dv_result["aborted"] = True
         log("  [VALIDATION-DV] Aborted", RED)
+    elif action == "revise":
+        revised = _apply_revise_uarch(
+            pr, response, dict(payload.get("contract_audit") or {}),
+            "validation_dv")
+        dv_result["revised_blocks"] = revised
+        log(f"  [VALIDATION-DV] Revise: uArch feedback appended to "
+            f"{revised or '[] (no specs matched)'}; "
+            + ("re-entering only those blocks" if revised
+               else "re-running every tier"),
+            YELLOW)
     elif action in ("retry", "fix_rtl", "fix_tb"):
         fix_desc = response.get("rtl_fix_description", "")
         log(
@@ -11161,19 +10092,28 @@ async def validation_dv_decision_node(state: OrchestratorState) -> dict:
         "validation_dv_result": dv_result,
         "pipeline_done": False,
         "pipeline_aborted": action == "abort",
+        **({"current_tier_index": 0,
+            "revise_blocks": ({n: False for n in revised} or None)}
+           if action == "revise" else {}),
     }
 
 
 def route_after_validation_dv_decision(state: OrchestratorState) -> str:
     """Route the operator's decision back into validation DV or terminate."""
     result = state.get("validation_dv_result") or {}
-    if result.get("action_taken") in ("retry", "fix_rtl", "fix_tb"):
+    if result.get("action_taken") == "revise":
+        return "init_tier"
+    if result.get("action_taken") == "fix_rtl":
+        return "integration_check"   # WP-76: edited RTL must be re-adopted first
+    if result.get("action_taken") in ("retry", "fix_tb"):
         return "validation_dv"
     return END
 
 
 route_after_validation_dv_decision.__edge_labels__ = {
-    "validation_dv": "RETRY / FIX",
+    "validation_dv": "RETRY / FIX TB",
+    "integration_check": "FIX RTL (re-adopt)",
+    "init_tier": "REVISE",
     END: "DONE",
 }
 
@@ -11181,15 +10121,18 @@ route_after_validation_dv_decision.__edge_labels__ = {
 def route_after_validation_dv(state: OrchestratorState) -> str:
     """Route after validation DV: terminal frontend pipeline."""
     result = state.get("validation_dv_result") or {}
+    if result.get("candidate_stale") or result.get("action_taken") == "fix_rtl":
+        return "integration_check"   # WP-76
     if result.get("pending_decision"):
         return "validation_dv_decision"
-    if result.get("action_taken") in ("retry", "fix_rtl", "fix_tb"):
+    if result.get("action_taken") in ("retry", "fix_tb"):
         return "validation_dv"
     return END
 
 
 route_after_validation_dv.__edge_labels__ = {
     "validation_dv_decision": "Park for decision",
+    "integration_check": "Re-adopt (RTL changed)",
     "validation_dv": "Retry",
     END: "DONE",
 }
@@ -11212,6 +10155,8 @@ async def final_report_node(state: OrchestratorState) -> dict:
     artifact. Never raises: a report failure must not fail the pipeline.
     """
     pr = _pr(state)
+    # Candidate records belong to adoption/invalidation, and must survive
+    # reporting so both automatic and later explicit backend starts can read them.
     try:
         from orchestrator.langgraph.final_report import (
             build_final_report,
@@ -11231,6 +10176,23 @@ async def final_report_node(state: OrchestratorState) -> dict:
             f"cov(min) {sign.get('coverage_min_pct')}%, "
             f"Fmax {sign.get('top_fmax_mhz')} MHz", CYAN)
         log(f"  wrote {root / 'final_report.md'}", CYAN)
+        # Opt-in labeled SFT dataset (CORESMITH_EMIT_SFT=1): publish
+        # <run>/sft/ from the verified artifacts. Never fails the report.
+        try:
+            from orchestrator.langgraph.sft_export import (
+                emit_sft_dataset,
+                sft_enabled,
+            )
+            if sft_enabled():
+                _sft = emit_sft_dataset(pr)
+                if _sft:
+                    _cnt = ", ".join(
+                        f"{k}={v}" for k, v in _sft["counts"].items())
+                    log(f"  [SFT] labeled dataset: {_sft['total_pairs']} "
+                        f"pairs ({_cnt}) -> {root / 'sft'}", GREEN)
+        except Exception as _sft_exc:  # noqa: BLE001
+            log(f"  [SFT] dataset emission failed (non-fatal): {_sft_exc}",
+                YELLOW)
         log(f"{'='*60}\n", CYAN)
         write_graph_event(pr, "Final Report", "graph_node_exit", {
             "status": sign.get("status"),
@@ -11276,17 +10238,8 @@ def build_pipeline_graph(checkpointer=None):
     Returns:
         Compiled StateGraph ready for ``ainvoke`` / ``astream``.
 
-    Topology is gated by ``CORESMITH_BLOCK_GOLDENS``. When OFF (default) the
-    historical SINGLE-PASS graph is built, byte-identical node/edge set to
-    before the two-pass restructure (the ``model_integration`` no-op node still
-    sits after ``integration_check``; no ``uarch_integration_gate`` /
-    ``begin_rtl_pass`` / ``write_contract_request`` nodes). When ON the TWO-PASS
-    graph is built: pass 1 (spec+model) -> µarch gate -> pass 2 (RTL+DV+synth).
     """
-    from orchestrator.architecture import composition as _composition
-    two_pass = _composition.block_goldens_enabled()
-
-    block_subgraph = build_block_subgraph(two_pass=two_pass).compile()
+    block_subgraph = build_block_subgraph().compile()
 
     orchestrator = StateGraph(OrchestratorState)
 
@@ -11338,6 +10291,7 @@ def build_pipeline_graph(checkpointer=None):
             "validation_dv": "validation_dv",
             "integration_dv": "integration_dv",
             "integration_dv_decision": "integration_dv_decision",
+            "integration_check": "integration_check",
             END: "final_report",
         },
     )
@@ -11345,6 +10299,8 @@ def build_pipeline_graph(checkpointer=None):
         "integration_dv_decision", route_after_integration_dv_decision,
         {
             "integration_dv": "integration_dv",
+            "integration_check": "integration_check",
+            "init_tier": "init_tier",
             END: "final_report",
         },
     )
@@ -11353,6 +10309,7 @@ def build_pipeline_graph(checkpointer=None):
         {
             "validation_dv": "validation_dv",
             "validation_dv_decision": "validation_dv_decision",
+            "integration_check": "integration_check",
             END: "final_report",
         },
     )
@@ -11360,63 +10317,13 @@ def build_pipeline_graph(checkpointer=None):
         "validation_dv_decision", route_after_validation_dv_decision,
         {
             "validation_dv": "validation_dv",
+            "integration_check": "integration_check",
+            "init_tier": "init_tier",
             END: "final_report",
         },
     )
 
-    if not two_pass:
-        # ---- SINGLE-PASS (flag off): byte-identical to before -------------
-        orchestrator.add_node("model_integration", model_integration_node)
-        orchestrator.add_conditional_edges("advance_tier", route_next_tier)
-        orchestrator.add_conditional_edges("integration_check", route_after_integration)
-        orchestrator.add_conditional_edges(
-            "model_integration", route_after_model_integration
-        )
-    else:
-        # ---- TWO-PASS (flag on): µarch gate between the two fan-outs -------
-        orchestrator.add_node(
-            "uarch_integration_gate", uarch_integration_gate_node
-        )
-        orchestrator.add_node("begin_rtl_pass", begin_rtl_pass_node)
-        orchestrator.add_node(
-            "write_contract_request", write_contract_request_node
-        )
-        # advance_tier -> {init_tier | uarch_integration_gate | pipeline_complete}
-        orchestrator.add_conditional_edges(
-            "advance_tier",
-            route_next_tier,
-            {
-                "init_tier": "init_tier",
-                "uarch_integration_gate": "uarch_integration_gate",
-                "pipeline_complete": "pipeline_complete",
-            },
-        )
-        # µarch gate -> {begin_rtl_pass | init_tier | write_contract_request | END}
-        orchestrator.add_conditional_edges(
-            "uarch_integration_gate",
-            route_after_uarch_gate,
-            {
-                "begin_rtl_pass": "begin_rtl_pass",
-                "init_tier": "init_tier",
-                "write_contract_request": "write_contract_request",
-                END: END,
-            },
-        )
-        orchestrator.add_edge("begin_rtl_pass", "init_tier")
-        # write_contract_request -> {init_tier (bounded re-spec) | END (exhausted)}
-        orchestrator.add_conditional_edges(
-            "write_contract_request",
-            route_after_write_contract_request,
-            {
-                "init_tier": "init_tier",
-                END: END,
-            },
-        )
-        # Pass 2 post-integration_check goes straight to DV (gate already ran).
-        orchestrator.add_conditional_edges(
-            "integration_check",
-            route_after_integration,
-            {END: END, "integration_dv": "integration_dv"},
-        )
+    orchestrator.add_conditional_edges("advance_tier", route_next_tier)
+    orchestrator.add_conditional_edges("integration_check", route_after_integration)
 
     return orchestrator.compile(checkpointer=checkpointer)

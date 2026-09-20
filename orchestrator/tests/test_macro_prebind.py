@@ -14,8 +14,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-import pytest
-
 from orchestrator.langgraph.macro_prebind import (
     UNBOUND_SENTINEL,
     PrebindResult,
@@ -137,8 +135,8 @@ class TestGeometryDispatch:
 
 def _maskless_env(tmp_path, monkeypatch, width, nb_expected):
     """Wire resolve_prebindings to a maskless macro for the given RTL width."""
-    from orchestrator.langgraph import macro_prebind as mp
     import orchestrator.langgraph.macro_registry as reg
+    from orchestrator.langgraph import macro_prebind as mp
 
     rtl = tmp_path / "blk.v"
     rtl.write_text(
@@ -458,3 +456,23 @@ class TestMacroPortsNeverFailsByOmission:
         got = macro_ports(f)
         assert "addr0" in got and "din0" in got
         assert "wmask0" not in got
+
+
+class TestWholeWordMaskReachesEveryLane:
+    """NMASK==1 driving a MULTI-LANE macro port zero-extends in Verilog, so
+    lanes 1..N-1 are permanently write-disabled and only byte 0 of each word is
+    ever written -- the same corruption class the lane-count check refuses,
+    arriving through the "whole-word mask" arm instead."""
+
+    def test_single_bit_mask_is_replicated_across_the_macro_lanes(self, tmp_path):
+        m = tmp_path / "m4.v"
+        m.write_text(
+            "module m(clk0, csb0, web0, wmask0, addr0, din0, dout0);\n"
+            "  input clk0; input csb0; input web0; input [3:0] wmask0;\n"
+            "  input [8:0] addr0; input [31:0] din0; output [31:0] dout0;\n"
+            "endmodule\n")
+        res = _bound((FakeSpec(32, 512, nport=1), FakeMacro("m", str(m))))
+        res.mask_lanes[(32, 512, 1)] = 1
+        v = emit_bound_shell(res)
+        assert ".wmask0({4{wmask0[0]}})" in v
+        assert ".wmask0(wmask0)" not in v

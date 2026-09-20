@@ -201,7 +201,7 @@ def block_is_chip_top(block: dict) -> bool:
 def gate_sim_strict() -> bool:
     """When on, an absent toolchain/PDK is a FAIL rather than a non-blocking
     ``not_run``. Default off so a host with no PDK can still run the frontend
-    (the same posture as ``CORESMITH_SKIP_SYNTH``), while CI/backend hosts can
+    (the same posture as PDK-free generic synthesis), while CI/backend hosts can
     demand the gate actually ran."""
     return _flag("CORESMITH_GATE_SIM_STRICT", False)
 
@@ -272,6 +272,7 @@ def gate_sim_max_divergences() -> int:
 # ---------------------------------------------------------------------------
 
 STATUS_PASS = "pass"
+STATUS_BOUNDED = "bounded"
 STATUS_FAIL = "fail"
 STATUS_NOT_RUN = "not_run"
 STATUS_DISABLED = "disabled"
@@ -300,7 +301,7 @@ class GateSimResult:
 
     @property
     def blocking(self) -> bool:
-        return self.status == STATUS_FAIL
+        return self.status in (STATUS_FAIL, STATUS_BOUNDED)
 
     def as_dict(self) -> dict:
         return {
@@ -515,9 +516,16 @@ def inout_is_inert(netlist_text: str, name: str) -> bool:
     zassign = re.compile(
         r"^\s*assign\s+\\?" + re.escape(name) +
         r"(?:\s*\[[^\]]*\])?\s*=\s*\d*'[hbodHBOD]?[zZ_]+\s*;")
+    # A same-name hierarchical pass-through (`.analog_io(analog_io),`) renames
+    # nothing and drives nothing: the parent hands the mandated pad bus to the
+    # leaf unchanged. Any OTHER connection shape (renamed net, expression,
+    # concatenation, slice) still disqualifies.
+    passthrough = re.compile(
+        r"^\s*\.\\?" + re.escape(name) +
+        r"\s*\(\s*\\?" + re.escape(name) + r"\s*\)\s*,?\s*$")
     for m in ref.finditer(netlist_text):
         line = m.group(0)
-        if decl.match(line) or zassign.match(line):
+        if decl.match(line) or zassign.match(line) or passthrough.match(line):
             continue
         return False
     return True
@@ -580,6 +588,7 @@ class Vectors:
     """Recorded pre-posedge steady state of every top-level port."""
 
     cycles: int = 0
+    reference_cycles: int = 0
     inputs: list[str] = field(default_factory=list)   # input port names, ordered
     outputs: list[str] = field(default_factory=list)  # output port names, ordered
     widths: dict = field(default_factory=dict)        # name -> width
@@ -657,7 +666,7 @@ def extract_vectors(
     seen_out: set = set()
     pending: list = []          # value changes buffered for the current stamp
 
-    def _flush() -> bool:
+    def _flush() -> None:
         """Apply one timestamp's changes. Snapshots the PRE-EDGE state first
         when this timestamp carries a clock 0->1.
 
@@ -677,6 +686,8 @@ def extract_vectors(
                 if prev_clk == "0" and new_clk == "1":
                     edge = True
         if edge:
+            vec.reference_cycles += 1
+        if edge and len(rows) < max_cycles:
             in_vals = [_fit(cur[n], widths[n]) for n in ins]
             out_vals = [_fit(cur[n], widths[n]) for n in outs]
             rows.append((in_vals, out_vals))
@@ -686,18 +697,14 @@ def extract_vectors(
             if _name == clock:
                 prev_clk = _val[-1] if _val else "x"
         pending.clear()
-        return len(rows) >= max_cycles
 
     body = text[header_end:] if header_end > 0 else text
-    stop = False
     for raw in body.splitlines():
         line = raw.strip()
         if not line:
             continue
         if line[0] == "#":
-            if _flush():
-                stop = True
-                break
+            _flush()
             continue
         if line[0] == "$":
             continue
@@ -714,8 +721,7 @@ def extract_vectors(
         if name is None:
             continue
         pending.append((name, val))
-    if not stop:
-        _flush()
+    _flush()
 
     vec.rows = rows
     vec.cycles = len(rows)
@@ -2072,7 +2078,11 @@ def check_gate_sim(
         return _fail("gate simulation compared 0 output bits (every recorded "
                      "output was unknown) -- that is not a pass")
 
+    expected_bits = sum(bit in "01" for _, outputs in vec.rows
+                        for value in outputs for bit in value)
     detail = {"work_dir": str(work_dir), "recorded_cycles": vec.cycles,
+              "reference_cycles": vec.reference_cycles, "compared_cycles": cycles,
+              "recorded_output_bits": expected_bits, "compared_output_bits": bits,
               "seed": seed}
     if rails:
         detail["power_rails_tied"] = [p.name for p in rails]
@@ -2090,6 +2100,18 @@ def check_gate_sim(
         res.detail = detail
         return res
 
+    if cycles > vec.cycles or bits > expected_bits:
+        res = _fail("gate simulation reported impossible comparison counts")
+        res.detail = detail
+        return res
+    if cycles < vec.cycles or bits < expected_bits or vec.cycles < vec.reference_cycles:
+        return GateSimResult(
+            ran=True, ok=False, status=STATUS_BOUNDED,
+            reason="Bounded gate comparison; the complete recorded reference was not compared",
+            netlist_path=netlist_path, cycles_compared=cycles, output_bits_compared=bits,
+            detail={**detail, "macro_models": len(macro_files)},
+        )
+
     return GateSimResult(
         ran=True, ok=True, status=STATUS_PASS,
         reason=f"gate netlist reproduced the verified RTL for {cycles} cycles",
@@ -2103,7 +2125,7 @@ def check_gate_sim(
 __all__ = [
     "GATE_SIM_ENV", "GATE_SIM_SCOPE_ENV", "GATE_SIM_DEBUG_ENV",
     "GateSimResult", "MacroIface", "Port", "Vectors",
-    "STATUS_PASS", "STATUS_FAIL", "STATUS_NOT_RUN", "STATUS_DISABLED",
+    "STATUS_PASS", "STATUS_BOUNDED", "STATUS_FAIL", "STATUS_NOT_RUN", "STATUS_DISABLED",
     "gate_sim_enabled", "gate_sim_scope", "block_is_chip_top",
     "gate_sim_strict", "gate_sim_max_cycles",
     "gate_sim_timeout_s", "gate_sim_macro_model_mode",

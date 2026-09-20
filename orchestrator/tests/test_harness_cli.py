@@ -95,7 +95,7 @@ class TestBlockResolution:
         cs = tmp_path / ".coresmith"
         cs.mkdir()
         (cs / "block_queue.json").write_text(json.dumps([{"name": "q"}]))
-        assert harness_blocks.load_block_spec(tmp_path, "q") == {"name": "q"}
+        assert harness_blocks.load_block_spec(tmp_path, "q")["name"] == "q"
         assert harness_blocks.load_block_spec(tmp_path, "nope") is None
 
     def test_persist_block_queue(self, tmp_path):
@@ -121,12 +121,11 @@ class TestDvStatus:
         (tmp_path / ".coresmith").mkdir()
         sb = Scoreboard(tmp_path)
         sb.record_dv(block="adder", scope="rtl", passed=True)
-        # best_result.json written AFTER the row -> newer mtime -> stale.
-        bdir = tmp_path / ".coresmith" / "blocks" / "adder"
-        bdir.mkdir(parents=True)
+        # best result recorded AFTER the row -> newer timestamp -> stale.
         import time as _t
         _t.sleep(0.02)
-        (bdir / "best_result.json").write_text(json.dumps({"sim_passed": True}))
+        from orchestrator.state_store.project_db import open_project
+        open_project(tmp_path).set_result("adder", "best", {"sim_passed": True})
         harness_cli.cmd_dv_status(_args(tmp_path, block="adder"))
         out = json.loads(capsys.readouterr().out)
         assert out["rows"][0]["stale"] is True
@@ -141,7 +140,7 @@ class TestDvStatus:
         rc = harness_cli.cmd_dv_status(_args(tmp_path, block=None))
         assert rc == harness_cli.EXIT_PASS
         out = json.loads(capsys.readouterr().out)
-        assert out["source"] == "disk"
+        assert out["source"] == "results"
         assert out["rows"][0]["block"] == "adder"
         assert out["rows"][0]["passed"] is True
 
@@ -209,8 +208,8 @@ class TestVerifyRegistration:
         ap = argparse.ArgumentParser()
         sub = ap.add_subparsers(dest="cmd")
         harness_cli.register_subcommands(sub)
-        args = ap.parse_args(["verify", "model", "adder", "--json"])
-        assert args.verify_cmd == "model"
+        args = ap.parse_args(["verify", "rtl", "adder", "--json"])
+        assert args.verify_cmd == "rtl"
         assert callable(args.func)
         # read-only queries too
         q = ap.parse_args(["dv-status", "--json"])
@@ -235,9 +234,3 @@ class TestVerifyRegistration:
         assert rc == 0
         assert json.loads(capsys.readouterr().out)["passed"] is True
 
-    def test_verify_model_unknown_needs_block(self, tmp_path, monkeypatch, capsys):
-        from orchestrator.harness import cli_verify
-        (tmp_path / ".coresmith").mkdir()
-        args = SimpleNamespace(project_root=str(tmp_path), json=True,
-                               block=None, all=False, skip_size=False)
-        assert cli_verify.cmd_verify_model(args) == cli_verify.EXIT_USAGE

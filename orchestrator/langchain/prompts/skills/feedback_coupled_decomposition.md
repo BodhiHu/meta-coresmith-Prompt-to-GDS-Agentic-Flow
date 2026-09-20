@@ -8,7 +8,7 @@ But some computations have a **cross-stage dependency that a streaming split
 cannot express**. The classic shape is a **trial / rate-distortion (RD) decision
 with reconstruction feedback**:
 
-> For each unit (macroblock, tile, frame region, packet, sub-band…), the design
+> For each unit (coding unit, tile, frame region, packet, sub-band…), the design
 > tries SEVERAL candidate encodings, runs each candidate **all the way through**
 > (transform → quantize → de-quantize → inverse-transform → reconstruct →
 > measure cost/bits/distortion), then **selects** the best candidate, and the

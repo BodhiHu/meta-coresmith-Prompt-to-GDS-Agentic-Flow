@@ -21,7 +21,7 @@ serialized into the stream by any block**, and the final byte waited on a flush
 handshake that never arrived. Three independent re-specs reproduced the
 byte-identical wrong output: it is structural, invariant to per-block re-spec.
 
-A second real case (proven by isolating the blocks in simulation): the packer
+A second real case: the packer
 serialized perfectly, but the downstream **elastic byte FIFO duplicated bytes**.
 Its registered output mux read `mem[rd_ptr]` and gated `valid` on `count` using
 the **pre-pop** read pointer and occupancy — in the *same* clocked process that
@@ -56,11 +56,7 @@ only the bursty full-chip path makes it explode.
      stream.** Reading `transform_size`/`pred_mode`/`shape` from a sideband word
      to *select* behavior (zigzag order, table choice) does NOT put those bits
      in the output. If the reference also serializes that field, some block must
-     additionally EMIT it. (Proven failure: a chain read `shape` to pick the
-     zigzag order and read `pred_mode` for control, but never emitted the
-     size_flag+mode bits — 33 header bits/MB silently dropped, byte0 0x8D vs
-     golden 0x81, stream 33 bits short, while the entropy coding coeff bits were
-     bit-exact. The bug lived entirely in the seam.)
+     additionally EMIT it.
    - **Get the NESTING CADENCE right: per-MB syntax vs per-subblock syntax are
      different levels — emit each at its own level, exactly once.** When the unit
      has sub-units (a pixel_block with N sub-blocks), the reference emits some
@@ -229,7 +225,7 @@ only the bursty full-chip path makes it explode.
     that is a length/size of payload that has not been produced yet REQUIRES the
     block to BUFFER the full payload first, compute its length, emit the header,
     THEN emit the buffered payload — you cannot stream the header before the
-    payload length is known. PROVEN failure (codecv4 entropy_bitstream_engine,
+    payload length is known. PROVEN failure (a bitstream engine,
     faithful regen): 3 of 5 regens emitted only `encode_frame(...)["bitstream"]`
     (the 61-byte per-frame payload) and omitted the top-level `encode()` framing
     `ue(nframes) ue(W) ue(H) ue(qp) ue(payload_len)` → composed stream 61B vs
@@ -255,7 +251,7 @@ only the bursty full-chip path makes it explode.
       reference does not have, and do NOT drop or truncate the final PARTIAL byte
       — pad it (`byte <<= 8 - n`) exactly as the reference's `getbytes()` does, so
       a header whose bit-length is not a multiple of 8 still rounds the container
-      UP to the same final byte count. PROVEN failure (same codecv4 block): a
+      UP to the same final byte count. PROVEN failure (the same block): a
       regen wrote the correct header (`payload_len=61`) and correct payload but
       flushed the container 1 BIT short — 528 bits / 66 bytes vs the golden's 529
       bits / 67 bytes — because its terminal flush dropped the last partial byte
