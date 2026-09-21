@@ -3422,6 +3422,7 @@ async def resume_backend(
     if _backend.status == "paused":
         # Check if checkpoint has a pending interrupt that needs a Command.
         _has_pending_interrupt = False
+        _snap = None
         try:
             _snap = await _backend.graph.aget_state(config)
             if _snap and _snap.tasks:
@@ -3435,6 +3436,20 @@ async def resume_backend(
         if _has_pending_interrupt:
             resume_input = Command(resume=resume_value)
         else:
+            # A pause between node boundaries has no interrupt to consume, so
+            # Command(resume=...) cannot carry retry guidance into graph state.
+            # Persist an explicit retry constraint before the plain tick. Other
+            # actions retain their existing paused semantics.
+            if action == "retry" and constraint.strip():
+                values = (_snap.values if _snap else {}) or {}
+                constraints = list(values.get("constraints") or [])
+                constraints.append({
+                    "rule": constraint.strip(),
+                    "source": "paused_backend_resume",
+                })
+                await _backend.graph.aupdate_state(
+                    config, {"constraints": constraints}
+                )
             resume_input = None
     else:
         resume_input = Command(resume=resume_value)

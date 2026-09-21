@@ -375,6 +375,97 @@ async def test_authoritative_backend_pause_reaps_before_task_cancel(
 
 
 @pytest.mark.asyncio
+async def test_paused_backend_retry_persists_constraint_before_plain_tick(
+    monkeypatch,
+):
+    import json
+
+    from orchestrator import mcp_server as mcp
+
+    calls = []
+
+    class _Snapshot:
+        values = {"constraints": [{"rule": "keep prior"}]}
+        tasks = []
+
+    class _Graph:
+        @staticmethod
+        async def aget_state(_config):
+            return _Snapshot()
+
+        @staticmethod
+        async def aupdate_state(_config, update):
+            calls.append(("update", update))
+
+    async def ensure_graph():
+        return None
+
+    async def safe_resume(value, _config):
+        calls.append(("resume", value))
+
+    monkeypatch.setattr(mcp._backend, "status", "paused")
+    monkeypatch.setattr(mcp._backend, "graph", _Graph())
+    monkeypatch.setattr(mcp._backend, "ensure_graph", ensure_graph)
+    monkeypatch.setattr(mcp._backend, "safe_resume", safe_resume)
+
+    result = json.loads(await mcp.resume_backend(
+        action="retry", constraint="  use the authoritative new template  ",
+    ))
+
+    assert result["status"] == "running"
+    assert calls == [
+        ("update", {"constraints": [
+            {"rule": "keep prior"},
+            {
+                "rule": "use the authoritative new template",
+                "source": "paused_backend_resume",
+            },
+        ]}),
+        ("resume", None),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_paused_backend_nonretry_does_not_persist_constraint(monkeypatch):
+    import json
+
+    from orchestrator import mcp_server as mcp
+
+    calls = []
+
+    class _Snapshot:
+        values = {"constraints": []}
+        tasks = []
+
+    class _Graph:
+        @staticmethod
+        async def aget_state(_config):
+            return _Snapshot()
+
+        @staticmethod
+        async def aupdate_state(*_args, **_kwargs):
+            raise AssertionError("abort must not inject a retry constraint")
+
+    async def ensure_graph():
+        return None
+
+    async def safe_resume(value, _config):
+        calls.append(value)
+
+    monkeypatch.setattr(mcp._backend, "status", "paused")
+    monkeypatch.setattr(mcp._backend, "graph", _Graph())
+    monkeypatch.setattr(mcp._backend, "ensure_graph", ensure_graph)
+    monkeypatch.setattr(mcp._backend, "safe_resume", safe_resume)
+
+    result = json.loads(await mcp.resume_backend(
+        action="abort", constraint="must not become retry guidance",
+    ))
+
+    assert result["status"] == "running"
+    assert calls == [None]
+
+
+@pytest.mark.asyncio
 async def test_frontend_is_done_is_conservative(monkeypatch):
     """All four conditions must hold. A parked interrupt is NOT 'done' even with
     pipeline_done set -- the run is waiting on a decision that could still change
