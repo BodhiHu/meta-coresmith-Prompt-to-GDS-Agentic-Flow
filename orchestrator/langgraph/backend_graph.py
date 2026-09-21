@@ -42,6 +42,7 @@ import json
 import operator
 import os
 import re
+import time
 from pathlib import Path
 from typing import Annotated, TypedDict
 
@@ -267,7 +268,11 @@ async def _run_llm_eda_step(
     Returns:
         Parsed result dict from the JSON file, or a failure dict.
     """
-    from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL, ClaudeLLM
+    from orchestrator.langchain.agents.coresmith_llm import (
+        DEFAULT_MODEL,
+        ClaudeLLM,
+        is_llm_error_response,
+    )
     from orchestrator.langgraph.eda_prompts import (
         merged_prompt_context,
         resolve_prompt_path,
@@ -288,6 +293,51 @@ async def _run_llm_eda_step(
 
     llm = ClaudeLLM(model=DEFAULT_MODEL, timeout=timeout)
 
+    result_path = Path(result_json_path)
+    archived_result = ""
+    if result_path.exists():
+        archive = result_path.with_name(
+            f"{result_path.stem}.prior-{time.time_ns()}-{os.getpid()}"
+            f"{result_path.suffix}"
+        )
+        try:
+            result_path.replace(archive)
+            archived_result = str(archive)
+        except OSError as exc:
+            return {
+                "success": False,
+                "_driver_failure": True,
+                "error": (
+                    "EDA driver could not archive the prior result before "
+                    f"{step_name}: {exc}"
+                ),
+            }
+
+    def _failed(message: str, *, reply_text: str = "") -> dict:
+        failed = {
+            "success": False,
+            "_driver_failure": True,
+            "error": message,
+        }
+        # A provider may write a plausible result and then terminate with an
+        # explicit error/incomplete finish. Preserve that file as evidence but
+        # remove it from the canonical path so no later reader can adopt it.
+        if result_path.exists():
+            rejected = result_path.with_name(
+                f"{result_path.stem}.rejected-{time.time_ns()}-{os.getpid()}"
+                f"{result_path.suffix}"
+            )
+            try:
+                result_path.replace(rejected)
+                failed["rejected_result_archive"] = str(rejected)
+            except OSError as exc:
+                failed["result_quarantine_error"] = str(exc)
+        if archived_result:
+            failed["prior_result_archive"] = archived_result
+        if capture_reply:
+            failed["_llm_reply"] = reply_text[:4000]
+        return failed
+
     reply = ""
     try:
         reply = await llm.call(
@@ -296,25 +346,39 @@ async def _run_llm_eda_step(
             run_name=step_name,
         ) or ""
     except Exception as e:
-        return {"success": False, "error": f"LLM call failed: {e}"}
+        return _failed(f"LLM call failed: {e}")
 
-    result_path = Path(result_json_path)
+    if is_llm_error_response(reply):
+        return _failed(
+            f"EDA driver LLM call was unsuccessful: {reply}",
+            reply_text=str(reply),
+        )
+
     if result_path.exists():
         try:
             parsed = json.loads(result_path.read_text(encoding="utf-8"))
-            if capture_reply and isinstance(parsed, dict):
-                parsed.setdefault("_llm_reply", str(reply)[:4000])
-            return parsed
-        except (json.JSONDecodeError, OSError):
-            pass
+        except (json.JSONDecodeError, OSError) as exc:
+            return _failed(
+                f"EDA driver wrote an unreadable result JSON to "
+                f"{result_json_path}: {exc}",
+                reply_text=str(reply),
+            )
+        if not isinstance(parsed, dict):
+            return _failed(
+                f"EDA driver result JSON must be an object, got "
+                f"{type(parsed).__name__}: {result_json_path}",
+                reply_text=str(reply),
+            )
+        if capture_reply:
+            parsed.setdefault("_llm_reply", str(reply)[:4000])
+        if archived_result:
+            parsed.setdefault("prior_result_archive", archived_result)
+        return parsed
 
-    failed = {
-        "success": False,
-        "error": f"LLM did not write result JSON to {result_json_path}",
-    }
-    if capture_reply:
-        failed["_llm_reply"] = str(reply)[:4000]
-    return failed
+    return _failed(
+        f"LLM did not write a fresh result JSON to {result_json_path}",
+        reply_text=str(reply),
+    )
 
 
 def _block_name(state: BackendState) -> str:
@@ -1699,6 +1763,21 @@ async def drc_node(state: BackendState) -> dict:
             result_json_path=result_json_path,
         )
 
+        if result.get("_driver_failure"):
+            error_msg = str(result.get("error", "DRC driver failed"))
+            span.set_attribute("clean", False)
+            span.set_attribute("driver_failure", True)
+            write_graph_event(_pr(state), "DRC", "graph_node_exit", {
+                "block": block_name, "clean": False,
+                "driver_failure": True, "error": error_msg,
+                "graph": "backend",
+            })
+            return {
+                "drc_result": {"clean": False, "errors": error_msg},
+                "phase": "drc",
+                "previous_error": error_msg,
+            }
+
         drc_clean = result.get("clean", False)
         drc_count = result.get("violation_count", 0 if drc_clean else 999)
         gds_path = result.get("gds_path", "")
@@ -1841,6 +1920,21 @@ async def lvs_node(state: BackendState) -> dict:
             },
             result_json_path=result_json_path,
         )
+
+        if result.get("_driver_failure"):
+            error_msg = str(result.get("error", "LVS driver failed"))
+            span.set_attribute("match", False)
+            span.set_attribute("driver_failure", True)
+            write_graph_event(_pr(state), "LVS", "graph_node_exit", {
+                "block": block_name, "match": False,
+                "driver_failure": True, "error": error_msg,
+                "graph": "backend",
+            })
+            return {
+                "lvs_result": {"match": False, "errors": error_msg},
+                "phase": "lvs",
+                "previous_error": error_msg,
+            }
 
         match = result.get("match", False)
         tie_analysis = ""
