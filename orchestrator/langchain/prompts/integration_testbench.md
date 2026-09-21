@@ -32,17 +32,26 @@ INTEGRATION TEST STRATEGY:
    output within a bounded number of cycles).
 3. **Throughput test**: Send a burst of inputs and verify the pipeline
    sustains the expected throughput (one output per N clocks, per PRD).
-4. **Backpressure data-integrity test** (MANDATORY if AXI-Stream): Re-run a
-   FULL correctness comparison -- the RTL output must match the reference
-   beat-for-beat -- while RANDOMLY deasserting the output `tready` (~30% of
-   cycles) AND inserting input `tvalid` gaps (~15% of cycles, holding the
-   current word). Assert NO beat is lost, duplicated, or reordered vs. the
-   reference. This is not optional and it is not a separate "does it stall"
-   check: a design that clears `tvalid` on its own transfer edge, or skews
-   `tready` per beat, is byte-correct with `tready` wired high and only FAILS
-   under backpressure -- so the correctness check itself must run under
-   backpressure. Seed the randomness deterministically (e.g. `random.Random(0)`)
-   so the test is reproducible. Example receiver pattern:
+4. **Backpressure data-integrity test** (MANDATORY for an AXI-Stream or other
+   valid/ready path when the chip top exposes at least one corresponding
+   testbench-driven control): Re-run a FULL correctness comparison -- the RTL
+   output must match the reference beat-for-beat -- under every perturbation
+   the public boundary supports. RANDOMLY deassert an externally driveable
+   output `tready` (~30% of cycles) when it exists. Independently insert gaps
+   on an externally driveable input `tvalid` (~15% of cycles, holding the
+   current word) when it exists. Do not require one control merely because the
+   other is exposed. Assert NO beat is lost, duplicated, or reordered vs. the
+   reference. This is not optional for an exposed control and it is not a
+   separate "does it stall" check: a design that clears
+   `tvalid` on its own transfer edge, or skews `tready` per beat, is byte-correct
+   with `tready` wired high and only FAILS under backpressure -- so the
+   correctness check itself must run under backpressure. Seed the randomness
+   deterministically (e.g. `random.Random(0)`) so the test is reproducible.
+   Never reach through DUT hierarchy to drive an internal block-boundary ready
+   signal. If backpressure exists only on internal connected wires, exercise
+   the relevant end-to-end transaction, log that internal backpressure is not
+   directly driveable from the chip boundary, and make the boundary activity
+   visible in the VCD. Example receiver pattern for an exposed top-level path:
 
        rng = random.Random(0)
        while got < expected_n:
@@ -176,8 +185,9 @@ VCD WAVEFORM -- MANDATORY:
 - The integration DV node runs Verilator with tracing enabled, expects
   `sim_build/integration/dump.vcd`, which the debug agent and chip lead read before the
   node can pass.
-- The testbench must drive enough reset, input, backpressure, block-boundary,
-  and output activity so the waveform shows real transitions. A test that
+- The testbench must drive enough reset, input, externally controllable
+  backpressure (when present), block-boundary, and output activity so the
+  waveform shows real transitions. A test that
   passes without meaningful time advancement or datapath movement is invalid.
 - For semantic contracts, ensure VCD-visible activity exists at the relevant
   boundary. Examples: selected mode changes, packet/frame indices, predictor or
@@ -185,6 +195,16 @@ VCD WAVEFORM -- MANDATORY:
   state updates, and sideband metadata moving with payload.
 - Log the key integration boundary signals and requirement IDs you exercised
   so waveform reviewers can correlate test intent with VCD activity.
+
+BOUNDED SELF-CHECKING:
+After writing or repairing this testbench, run the relevant check. If it fails,
+make at most TWO focused repair-and-recheck cycles in this generation call.
+If it still fails, preserve the current artifact and failure evidence, then
+finish with the failing command, verdict and unresolved cause. The parent
+graph owns diagnosis and retry. Reuse an existing relevant regression when
+the interface is unchanged; do not create a sequence of private mock devices
+or testbenches to replace it. Any small diagnostic probe counts toward this
+same local repair budget. Preserve exact expected values and protocol checks.
 
 COCOTB RULES (same as per-block):
 - Use cocotb with Python 3.11+ syntax.
@@ -213,10 +233,12 @@ COCOTB RULES (same as per-block):
       async def start_clock(dut):
           cocotb.start_soon(Clock(dut.clk, CLOCK_PERIOD_NS, units="ns").start())
           await RisingEdge(dut.clk)
-- In the smoke/throughput tests, drive `m_tready = 1` BEFORE sending data on
-  any input interface (keep those tests simple). The mandatory backpressure
-  data-integrity test (above) is the ONE place you randomize `m_tready` /
-  input gaps -- do it there, not in the basic tests.
+- In the smoke/throughput tests, drive a top-level `m_tready = 1` BEFORE sending
+  data when that control is actually exposed (keep those tests simple). When
+  applicable, the backpressure data-integrity test (above) is the ONE place
+  you randomize an externally driveable `m_tready` / input gaps -- do it there,
+  not in the basic tests. Do not synthesize a nonexistent top-level control or
+  drive an internal ready wire through hierarchy.
 - Use `cocotb.start_soon()` for concurrent sender/receiver coroutines.
   NEVER use `cocotb.start_fork()` (removed in cocotb 2.0).
 - Add cycle-count watchdog to every handshake wait loop (max 10000 cycles).
@@ -231,19 +253,28 @@ COCOTB RULES (same as per-block):
       await FallingEdge(dut.clk)
       dut.s_axis_tvalid.value = 1
       dut.s_axis_tdata.value = data
+      await ReadOnly()  # settle after drives, before accepting edge
+      accepted_at_next_edge = int(dut.s_axis_tready.value)
       await RisingEdge(dut.clk)
-      if int(dut.s_axis_tvalid.value) and int(dut.s_axis_tready.value):
+      if accepted_at_next_edge:
           accepted += 1
+          await FallingEdge(dut.clk)
           dut.s_axis_tvalid.value = 0
 
   Keep `tvalid` asserted across cycles until a sampled handshake occurs. Do
   not pre-sample `tready` before an edge and later assume that edge accepted
-  data unless `tvalid` was already stable before the edge. This pattern is
-  for INTERNAL AXI-Stream ports only.
+  data unless `tvalid` was already stable before the edge. This pattern is for
+  ordinary pre-edge AXI-Stream sampling at externally exposed ports only.
 
-- PUBLISHED STREAM SAMPLER (the chip's top-level stream ports in_*/out_* ONLY):
-  drive and sample these ports exactly as the published grader does, never with
-  the internal AXI-Stream helper above:
+- PUBLISHED STREAM SAMPLER: Use this exception ONLY when an authoritative
+  published grading contract explicitly requires post-edge acceptance sampling.
+  Top-level placement or in_*/out_* port names alone do not establish that rule.
+  Otherwise capture settled valid/ready and payload BEFORE the accepting rising
+  edge, count each saved handshake once at that edge, and observe newly produced
+  status/retirement state after RisingEdge + ReadOnly. Activate monitors before
+  releasing reset, or keep ready low until they are active. Do not skip cycles
+  in which a real transfer or retirement could occur.
+  If that explicit post-edge contract applies, reproduce its sampler:
 
       # drive in_valid/in_data/in_last and out_ready for this cycle (writable phase)
       await RisingEdge(dut.clk)
@@ -265,6 +296,10 @@ COCOTB RULES (same as per-block):
   truncated by Verilator's VPI string buffer and produce false mismatches.
   Compare field-sized debug aliases or chunk wires instead.
 - Use `assert` for pass/fail.
+- Preserve exact expected stream length and full ordered content on retries.
+  Never hide lost or duplicate transfers by comparing only a prefix, relaxing
+  the count, or deduplicating equal payloads/addresses. Correct a driver or
+  monitor timing defect without weakening requirement-derived assertions.
 - Never create a pass/fail assertion from an "architecture sanity budget",
   "2x path length", "number of blocks", or other locally invented performance
   threshold. Those are measurement-only unless PRD/ERS/system invariants state
@@ -292,16 +327,24 @@ IMPORTANT CONSTRAINTS:
 - Keep tests pragmatic. If the pipeline is complex (5+ blocks), a
   "data-in, data-out" smoke test with a cycle-count watchdog is sufficient.
 - Log which block boundary each check targets for debuggability.
-- Include at least 5 tests total: reset, smoke, throughput, the MANDATORY
-  backpressure data-integrity test (randomized tready + input gaps, exact
-  match), and 1-2 performance tests (latency + sustained throughput).
+- Include at least 5 tests total: reset, smoke, throughput, and 1-2 performance
+  tests (latency + sustained throughput). When an applicable handshake is
+  externally driveable, one test MUST be the backpressure data-integrity test
+  with an exact match, independently randomizing each public ready or valid
+  control that the testbench can drive. When backpressure is internal and
+  unobservable at the chip boundary, keep five relevant end-to-end tests, log
+  that limitation, and use a boundary-contract, reset-abort, mode, or other
+  requirement-derived case instead of forcing hierarchical access.
 
-OUTPUT FORMAT GUARD:
-Your response MUST be a single, complete Python file containing valid cocotb
-test code. NEVER output markdown, explanations, summaries, or prose. The
-response is written directly to a .py file -- if it contains anything other
-than valid Python, the simulation will fail at import time. The file MUST
-start with import statements (e.g., `import cocotb`), not markdown or text.
+ARTIFACT HANDOFF:
+Write the complete, valid Python testbench to the requested output path with
+your tools. Keep explanations and Markdown out of the .py file. Once the file
+is written and checked, finish with a brief report containing its path, test
+count, check command and verdict, and any unresolved failure. Do not repeat
+the source file in your final response; the engine reads the file from disk.
+If file-writing tools are unavailable, return the complete Python source
+instead, without Markdown fences or explanatory prose, so the engine can
+persist it. Never report a successful write or check that did not occur.
 
 ## No live oracle inside cocotb (BINDING)
 

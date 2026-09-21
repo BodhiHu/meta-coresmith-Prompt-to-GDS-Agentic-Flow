@@ -1115,19 +1115,27 @@ class TestCrossSpecContractAdherence:
         # No contracts => skip.
         assert c["applies"]({"interface_contracts": {}}) is False
         assert c["applies"]({"interface_contracts": {"contracts": []}}) is False
-        # With contracts => apply (the subagent itself decides whether to
-        # check per-block specs or no-op).
+        # Contracts alone cannot be checked against nonexistent uArch specs.
         assert c["applies"](
             {"interface_contracts": {"contracts": [{"edge_id": "x"}]}}
-        ) is True
+        ) is False
+        assert c["applies"]({
+            "interface_contracts": {"contracts": [{"edge_id": "x"}]},
+            "uarch_spec_names": {"x", "y"},
+        }) is True
 
     @pytest.mark.asyncio
     async def test_subagent_fires_when_contracts_present(self, tmp_project):
         """When interface_contracts.json exists with non-empty contracts,
         the cross_spec_contract_adherence subagent must be invoked."""
+        from pathlib import Path
         from unittest.mock import patch
 
         from orchestrator.architecture.constraints import check_constraints
+        specs = Path(tmp_project) / "arch" / "uarch_specs"
+        specs.mkdir(parents=True, exist_ok=True)
+        for name in ("x", "y"):
+            (specs / f"{name}.md").write_text(f"# {name} interface specification")
 
         contracts = {
             "contracts": [

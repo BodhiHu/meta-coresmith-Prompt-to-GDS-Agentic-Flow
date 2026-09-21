@@ -447,7 +447,8 @@ def synth_injection(macros: list[MacroInfo]) -> tuple[str, str, str]:
     blackbox_reads: `read_verilog -lib <macro.v>` so `hierarchy -check` resolves
     the instance without trying to synthesize the macro.
     liberty_reads: `read_liberty -lib <macro.lib>` so `stat`/abc see it.
-    hilomap_line: map constants to conb_1 tie cells (empty if no macros).
+    hilomap_line: deployment-owned physical constant mapping (empty if no
+    macros). The main flat-synthesis flow applies this mapping to every design.
     """
     if not macros:
         return "", "", ""
@@ -457,10 +458,14 @@ def synth_injection(macros: list[MacroInfo]) -> tuple[str, str, str]:
     libs = "\n".join(
         f"read_liberty -lib {m.lib}" for m in macros if m.lib
     )
-    hilomap = (
-        "hilomap -hicell sky130_fd_sc_hd__conb_1 HI "
-        "-locell sky130_fd_sc_hd__conb_1 LO"
-    )
+    from orchestrator.pdk.registry import get_deployment
+    deployment = get_deployment()
+    hilomap = deployment.yosys_hilomap_command()
+    if not hilomap:
+        raise ValueError(
+            f"deployment '{deployment.name}' does not declare physical "
+            "constant cells required by macro synthesis"
+        )
     return bb, libs, hilomap
 
 

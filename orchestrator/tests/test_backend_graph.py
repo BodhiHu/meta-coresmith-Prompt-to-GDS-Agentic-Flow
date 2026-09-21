@@ -229,10 +229,18 @@ class TestRouteAfterLVS:
 
 
 class TestRouteAfterTiming:
-    def test_met_goes_to_advance(self):
-        # After timing_signoff MET -> generate_wrapper (was advance_block before
-        # the wrapper-generation step was inserted into the backend pipeline).
-        assert route_after_timing({"timing_result": {"met": True}}) == "generate_wrapper"
+    def test_met_without_chassis_goes_to_advance(self, tmp_path):
+        assert route_after_timing({
+            "project_root": str(tmp_path), "timing_result": {"met": True},
+        }) == "advance_block"
+
+    def test_met_with_declared_chassis_keeps_wrapper_flow(self, tmp_path):
+        inputs = tmp_path / "inputs"
+        inputs.mkdir()
+        (inputs / "task.yaml").write_text("chassis: caravel\n")
+        assert route_after_timing({
+            "project_root": str(tmp_path), "timing_result": {"met": True},
+        }) == "generate_wrapper"
 
     def test_violated_goes_to_diagnose(self):
         assert route_after_timing({"timing_result": {"met": False}}) == "diagnose"
@@ -291,6 +299,12 @@ class TestRouteAfterIncrement:
     def test_within_limit(self):
         assert route_after_increment({"attempt": 2, "max_attempts": 3}) == "run_pnr"
 
+    def test_synth_gate_failure_retries_synthesis(self):
+        state = {"attempt": 2, "max_attempts": 3, "phase": "synth",
+                 "chip_gate_sim_ok": False,
+                 "debug_result": {"next_action": "retry_pnr"}}
+        assert route_after_increment(state) == "flat_top_synthesis"
+
     def test_at_limit(self):
         assert route_after_increment({"attempt": 3, "max_attempts": 3}) == "run_pnr"
 
@@ -340,17 +354,60 @@ class TestInternalNodes:
         assert result["backend_done"] is True
 
     @pytest.mark.asyncio
-    async def test_advance_block_precheck_hard_fail_not_overridden_by_llm(self):
+    async def test_advance_block_precheck_hard_fail_not_overridden_by_llm(self, tmp_path):
+        (tmp_path / "inputs").mkdir()
+        (tmp_path / "inputs" / "task.yaml").write_text("chassis: caravel\n")
         state = {
-            "project_root": "/tmp/test",
+            "project_root": str(tmp_path),
             "current_block": {"name": "top"},
             "attempt": 1,
             "drc_result": {"clean": True},
             "lvs_result": {"match": True},
-            "timing_result": {"met": True},
+            "timing_result": {
+                "met": True, "source": "extracted_rcx_sta",
+                "extraction_complete": True,
+            },
             "precheck_result": {"pass": False, "llm_analysis": {"submission_ready": True}},
             "route_result": {"success": True},
             "step_log_paths": {},
+            "constraints": [],
+        }
+        result = await advance_block_node(state)
+        assert result["completed_blocks"][0]["success"] is False
+
+    @pytest.mark.asyncio
+    async def test_advance_core_only_reports_submission_not_applicable(self, tmp_path):
+        (tmp_path / "inputs").mkdir()
+        (tmp_path / "inputs" / "task.yaml").write_text("chassis: none\n")
+        state = {
+            "project_root": str(tmp_path), "current_block": {"name": "chip_top"},
+            "attempt": 1, "drc_result": {"clean": True},
+            "lvs_result": {"match": True}, "timing_result": {
+                "met": True, "source": "extracted_rcx_sta",
+                "extraction_complete": True,
+            },
+            "route_result": {"success": True}, "step_log_paths": {},
+            "constraints": [],
+        }
+        result = await advance_block_node(state)
+        block = result["completed_blocks"][0]
+        assert block["success"] is True
+        assert block["wrapper_status"] == "not_applicable"
+        assert block["precheck_status"] == "not_applicable"
+        assert block["precheck_ok"] is None
+        assert block["submission_ready"] is None
+        assert result["precheck_result"]["pass"] is None
+
+    @pytest.mark.asyncio
+    async def test_core_only_still_requires_all_physical_gates(self, tmp_path):
+        state = {
+            "project_root": str(tmp_path), "current_block": {"name": "chip_top"},
+            "attempt": 1, "drc_result": {"clean": True},
+            "lvs_result": {"match": False}, "timing_result": {
+                "met": True, "source": "extracted_rcx_sta",
+                "extraction_complete": True,
+            },
+            "route_result": {"success": True}, "step_log_paths": {},
             "constraints": [],
         }
         result = await advance_block_node(state)
@@ -586,35 +643,49 @@ class TestSafeFormat:
         assert _safe_format("{p:.2f}", {"p": 12.3456}) == "12.35"
         assert _safe_format("{x!r}", {"x": "hi"}) == "'hi'"
 
-    def test_all_backend_prompts_render_identically_to_str_format(self):
-        # AUDIT guard: every backend prompt must render byte-identically under
-        # _safe_format and str.format for its real (word-name) placeholder set.
-        # Guarantees the swap changed no rendering, incl. the `{{ }}` JSON blocks.
-        import re
-        field_re = re.compile(r"\{(\w+)(?:![rsa])?(?::[^{}]*)?\}")
+    def test_all_backend_prompts_render_without_error(self):
+        # AUDIT guard: _safe_format is the production renderer for backend
+        # prompts. Every prompt must render without raising for its real
+        # (word-name) placeholder set, fill each provided field, and leave the
+        # `${CORESMITH_CLI:-coresmith}` shell fallback + escaped JSON braces
+        # literal. (Post-migration the prompts contain a shell `${...}` that
+        # str.format cannot handle but _safe_format leaves literal -- the exact
+        # reason _safe_format exists.)
+        # Real placeholders only, via the engine's own escape-aware regex (so
+        # escaped `{{ }}` Verilog/JSON braces are NOT mistaken for fields), and
+        # excluding `${SHELL_VAR}` fallbacks.
+        from orchestrator.langgraph.backend_graph import _SAFE_FORMAT_RE
         for name in _EDA_PROMPTS:
             text = (_Path(_PROMPT_DIR) / name).read_text()
             ctx = {}
-            for f in set(field_re.findall(text)):
-                # numeric fields may carry :.Nf specs -> give them a float
+            for m in _SAFE_FORMAT_RE.finditer(text):
+                if not m.group(1):
+                    continue
+                if m.start() > 0 and text[m.start() - 1] == "$":
+                    continue  # ${SHELL_VAR}: not a template field
+                f = m.group(1)
                 ctx[f] = 12.3456 if f.endswith(("_ns", "_mhz")) else f"<{f}>"
-            assert _safe_format(text, ctx) == text.format(**ctx), name
+            rendered = _safe_format(text, ctx)  # must not raise
+            # Every provided field was substituted (no un-filled real field).
+            for f in ctx:
+                assert ("{" + f + "}") not in rendered, f"{name}: {f} unfilled"
 
-    def test_lvs_prompt_no_longer_crashes_str_format(self):
-        # Belt-and-suspenders: the LVS example braces are escaped, so even a
-        # plain str.format renders (and matches _safe_format).
+    def test_lvs_prompt_renders_via_safe_format(self):
+        # The LVS example braces (Verilog concat/replication) stay literal, the
+        # shell CLI alias stays literal, and every real field is filled.
         text = (_Path(_PROMPT_DIR) / "backend_lvs_llm.md").read_text()
         ctx = {
-            "design_name": "d", "netgen_setup": "s", "netgen_bin": "b",
+            "design_name": "d", "netgen_setup": "s", "cell_spice": "cs",
             "spice_path": "sp", "pwr_verilog_path": "pv", "output_dir": "od",
             "attempt": 1, "prior_failure": "None", "constraints": "c",
-            "result_json_path": "rj",
+            "result_json_path": "rj", "pdk_summary": "PDK", "tool_notes": "notes",
         }
         rendered = _safe_format(text, ctx)
-        assert rendered == text.format(**ctx)
-        # ... and the rendered example is natural single-brace Verilog.
+        # Verilog braces render as natural single-brace (escaped `{{ }}` -> `{ }`).
         assert "assign io_out = {31'b0, done, qspi_o, 2'b0};" in rendered
         assert "{4{oe}}, 2'b1};" in rendered
+        # The shell CLI alias is left literal (str.format would crash on it).
+        assert "${CORESMITH_CLI:-coresmith}" in rendered
 
 
 # ---------------------------------------------------------------------------
@@ -647,6 +718,13 @@ class TestFlatSynthAttemptHistoryWiring:
     def _syn_dir(self, tmp_path):
         d = tmp_path / "syn" / "output" / "chip_top"
         d.mkdir(parents=True, exist_ok=True)
+        (d / "synth_chip_top.ys").write_text(
+            "abc -liberty cells.lib\n"
+            "hilomap -hicell sky130_fd_sc_hd__conb_1 HI "
+            "-locell sky130_fd_sc_hd__conb_1 LO\n"
+            "clean\n"
+            "write_verilog chip_top_netlist.v\n"
+        )
         return d
 
     @pytest.mark.asyncio

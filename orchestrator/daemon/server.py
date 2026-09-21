@@ -1065,6 +1065,13 @@ async def backend_resume(req: BackendResumeRequest):
 
 @app.post("/backend/pause")
 async def backend_pause():
+    """Pause through the authoritative MCP implementation.
+
+    Backend LLM calls run a blocking child process in an executor thread, so
+    cancelling only the asyncio graph task leaves that process running. The MCP
+    implementation reaps active CLI process groups before cancellation and is
+    shared here to keep the two transports consistent.
+    """
     try:
         _mcp = _backend_handle()
     except Exception as exc:  # noqa: BLE001
@@ -1072,13 +1079,15 @@ async def backend_pause():
     handle = _mcp._backend
     if handle.task is None or handle.task.done():
         return {"paused": False, "reason": "no running task"}
-    handle.task.cancel()
+
+    raw = await _mcp.pause_backend()
     try:
-        await handle.task
-    except (asyncio.CancelledError, Exception):  # noqa: BLE001
-        pass
-    handle.status = "paused"
-    return {"paused": True}
+        result = json.loads(raw) if isinstance(raw, str) else dict(raw)
+    except (ValueError, TypeError):
+        return {"paused": True, "raw": raw}
+    if result.get("error"):
+        raise HTTPException(409, json.dumps(result))
+    return {"paused": True, **result}
 
 
 # ---------------------------------------------------------------------------
@@ -1240,6 +1249,21 @@ async def architecture_resume(req: ArchResumeRequest):
 async def architecture_pause():
     if _architecture.task is None or _architecture.task.done():
         return {"paused": False, "reason": "no running task"}
+    # Architecture generation uses the same executor-backed CLI calls as the
+    # frontend graph. Cancelling the asyncio wrapper cannot stop that blocking
+    # child, so reap its process group before cancelling the graph task.
+    try:
+        from orchestrator.langchain.agents.coresmith_llm import (
+            reap_active_cli_processes,
+        )
+        reaped = reap_active_cli_processes()
+        if reaped:
+            log.warning(
+                "architecture/pause reaped %d in-flight CLI process group(s)",
+                reaped,
+            )
+    except Exception:
+        log.warning("architecture/pause: CLI reap failed", exc_info=True)
     _architecture.task.cancel()
     try:
         await _architecture.task

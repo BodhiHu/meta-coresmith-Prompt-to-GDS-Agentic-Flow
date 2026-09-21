@@ -14,6 +14,7 @@ Unlike the per-block TestbenchGeneratorAgent, this agent:
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from pathlib import Path
@@ -21,7 +22,7 @@ from typing import Any
 
 from opentelemetry import trace
 
-from .coresmith_llm import DEFAULT_MODEL, ClaudeLLM
+from .coresmith_llm import DEFAULT_MODEL, ClaudeLLM, is_llm_error_response
 
 _tracer = trace.get_tracer(__name__)
 
@@ -56,6 +57,8 @@ class IntegrationTestbenchGenerator:
         prior_failure: str = "",
         chip_model_path: str = "",
         parameter_table: str = "",
+        interface_contracts: dict[str, Any] | list[dict] | None = None,
+        system_invariants: list[dict | str] | None = None,
     ) -> dict[str, Any]:
         """Generate a cocotb integration testbench.
 
@@ -72,6 +75,10 @@ class IntegrationTestbenchGenerator:
                 prompt instructs the TB to drive RTL and chip model with the
                 SAME stimulus and assert RTL output == chip-model output. Empty
                 (the default, flag-off) leaves prompt + output byte-identical.
+            interface_contracts: Canonical interface-contract document or edge
+                list. Only verification-relevant structured fields are rendered.
+            system_invariants: Cross-block architecture invariants that the
+                integration testbench must exercise when observable.
 
         Returns:
             Dict with keys: tb_path (str), test_count (int).
@@ -114,6 +121,102 @@ class IntegrationTestbenchGenerator:
                     iface = c.get("interface", c.get("name", ""))
                     dw = c.get("data_width", "?")
                     parts.append(f"  {fb} -> {tb} ({iface}, {dw}-bit)")
+                    semantics = {
+                        key: c[key]
+                        for key in (
+                            "handshake_protocol",
+                            "semantic_contract",
+                            "flow_control_policy",
+                            "bootstrap_policy",
+                        )
+                        if c.get(key) not in (None, "", [], {})
+                    }
+                    if semantics:
+                        parts.append(
+                            "    semantics: "
+                            + json.dumps(semantics, sort_keys=True)
+                        )
+
+            contract_doc = (
+                interface_contracts
+                if isinstance(interface_contracts, dict)
+                else {"contracts": interface_contracts or []}
+            )
+            contract_edges = contract_doc.get("contracts") or []
+            if contract_edges:
+                parts.append(
+                    "\n--- CANONICAL INTERFACE CONTRACTS (VERIFY; DO NOT "
+                    "INVENT FIELDS) ---"
+                )
+                defaults = {
+                    key: contract_doc[key]
+                    for key in (
+                        "default_packing_convention",
+                        "default_endianness_rationale",
+                    )
+                    if contract_doc.get(key) not in (None, "")
+                }
+                if defaults:
+                    parts.append(json.dumps({"defaults": defaults}, sort_keys=True))
+                contract_keys = (
+                    "edge_id", "producer_block", "consumer_block",
+                    "data_width_bits", "fields", "sideband_signals",
+                    "handshake_protocol",
+                    "packing_convention", "bootstrap_policy",
+                    "flow_control_policy", "representations",
+                    "semantic_contract", "rate_description",
+                )
+                for edge in contract_edges[:30]:
+                    if not isinstance(edge, dict):
+                        continue
+                    rendered = {
+                        key: edge[key]
+                        for key in contract_keys
+                        if edge.get(key) not in (None, "", [], {})
+                    }
+                    fields = edge.get("fields") or []
+                    if fields:
+                        from orchestrator.langgraph.contract_conformance import (
+                            canonical_port,
+                            channel_base,
+                        )
+
+                        field_names = [
+                            field.get("name") if isinstance(field, dict) else field
+                            for field in fields
+                        ]
+                        endpoint_ports = {}
+                        for role, key in (
+                            ("producer_payload_ports", "producer_port"),
+                            ("consumer_payload_ports", "consumer_port"),
+                        ):
+                            channel = channel_base(edge.get(key) or "")
+                            ports = [
+                                canonical_port(channel, name)[0]
+                                for name in field_names if name
+                            ]
+                            if ports:
+                                endpoint_ports[role] = ports
+                        rendered.update(endpoint_ports)
+                    if rendered:
+                        parts.append(json.dumps(rendered, sort_keys=True))
+
+            if system_invariants:
+                parts.append("\n--- SYSTEM INVARIANTS (INTEGRATION REQUIREMENTS) ---")
+                for invariant in system_invariants[:30]:
+                    if isinstance(invariant, dict):
+                        rendered = {
+                            key: invariant[key]
+                            for key in (
+                                "id", "description", "required_state",
+                                "verification_method", "affected_blocks",
+                            )
+                            if invariant.get(key) not in (None, "", [], {})
+                        }
+                        if rendered:
+                            parts.append(json.dumps(rendered, sort_keys=True))
+                    elif str(invariant).strip():
+                        parts.append(str(invariant).strip())
 
             if prd_summary:
                 parts.append(f"\n--- PRD SUMMARY ---\n{prd_summary}")
@@ -137,8 +240,9 @@ class IntegrationTestbenchGenerator:
                 "The pipeline will dump sim_build/integration/dump.vcd and "
                 "audit it with WaveKit. Generate tests that advance time and "
                 "exercise reset, top-level handshakes, block-boundary flow, "
-                "backpressure, sideband metadata, and final outputs so the "
-                "waveform audit contains meaningful evidence."
+                "externally controllable backpressure when present, sideband "
+                "metadata, and final outputs so the waveform audit contains "
+                "meaningful evidence."
             )
 
             if chip_model_path:
@@ -176,6 +280,12 @@ class IntegrationTestbenchGenerator:
                 prompt=user_message,
                 run_name=f"Integration Testbench [{design_name}]",
             )
+
+            if is_llm_error_response(content):
+                raise RuntimeError(
+                    "Integration testbench generation failed: LLM call was "
+                    f"unsuccessful: {content}"
+                )
 
             # Don't trust ClaudeLLM.call to raise on CLI failure -- it
             # returns an error string in the output position. Validate

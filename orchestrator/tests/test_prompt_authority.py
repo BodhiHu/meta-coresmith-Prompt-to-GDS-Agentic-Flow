@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from orchestrator.langchain.prompts.skills import (
     UARCH_SKILL_CANDIDATES,
     MissingSkillError,
@@ -299,6 +301,43 @@ def _project(tmp_path):
 
 
 class TestContractPortTable:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("many", [False, True])
+    async def test_uarch_call_resolves_bare_aliases_before_rtl(self, tmp_path, many):
+        from orchestrator.langchain.agents.uarch_spec_generator import UarchSpecGenerator
+
+        root = _project(tmp_path)
+        # This metadata is a logical nickname, not a substitute for the
+        # channel-prefixed name required by the later RTL/review prompts.
+        path = root / ".coresmith/interface_contracts.json"
+        doc = json.loads(path.read_text())
+        doc["contracts"][0]["fields"][-1]["rtl"] = "write_enable"
+        path.write_text(json.dumps(doc))
+        seen = {}
+
+        class FakeLLM:
+            async def call(self, **kwargs):
+                seen.update(kwargs)
+                return '# Register map\n```json\n{"feasible": true}\n```'
+
+        agent = UarchSpecGenerator.__new__(UarchSpecGenerator)
+        agent.llm = FakeLLM()
+        if many:
+            await agent.generate_many(
+                blocks=[{"name": "register_map", "description": "registers"}],
+                project_root=str(root),
+            )
+        else:
+            await agent.generate(
+                block_name="register_map", python_source="", project_root=str(root),
+            )
+        prompt = seen["prompt"]
+        assert "AUTHORITATIVE PORT NAMES" in prompt
+        assert "host_write_write_enable" in prompt
+        assert "DOUBLED TOKEN IS CORRECT" in prompt
+        assert "aliases, not replacement RTL port names" in prompt
+        assert "output_timing keys" in prompt
+
     def test_rows_are_derived_from_the_conformance_machinery(self, tmp_path):
         from orchestrator.langgraph.contract_conformance import (
             check_block,

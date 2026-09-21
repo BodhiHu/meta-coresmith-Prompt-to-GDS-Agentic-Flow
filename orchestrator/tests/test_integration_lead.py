@@ -469,6 +469,42 @@ class TestPromptLoading:
 class TestIntegrationCheckNode:
     """Test the updated integration_check_node that uses IntegrationLeadAgent."""
 
+    def test_handoff_uses_declared_top_and_full_requirements(self, tmp_path):
+        from orchestrator.langgraph.pipeline_graph import _integration_handoff_context
+
+        (tmp_path / "inputs").mkdir()
+        (tmp_path / "inputs" / "task.yaml").write_text("top: chip_top\n")
+        (tmp_path / "inputs" / "requirements.md").write_text(
+            "External pins are clk_i, rst_ni, spi_cs_n, spi_sclk, spi_miso."
+        )
+        (tmp_path / "requirements.md").write_text("stale root-level requirements")
+        name, context = _integration_handoff_context(
+            str(tmp_path), "title_derived_top", "short summary")
+
+        assert name == "chip_top"
+        assert "AUTHORITATIVE FULL REQUIREMENTS" in context
+        assert "spi_cs_n" in context
+        assert "stale root-level" not in context
+
+    def test_handoff_accepts_legacy_root_requirements(self, tmp_path):
+        from orchestrator.langgraph.pipeline_graph import _integration_handoff_context
+
+        (tmp_path / "requirements.md").write_text("Legacy boundary pin legacy_cs_n")
+        name, context = _integration_handoff_context(
+            str(tmp_path), "fallback_top", "summary")
+
+        assert name == "fallback_top"
+        assert "legacy_cs_n" in context
+
+    def test_handoff_without_declaration_keeps_fallback(self, tmp_path):
+        from orchestrator.langgraph.pipeline_graph import _integration_handoff_context
+
+        name, context = _integration_handoff_context(
+            str(tmp_path), "title_derived_top", "short summary")
+
+        assert name == "title_derived_top"
+        assert context == "short summary"
+
     @pytest.fixture(autouse=True)
     def _disable_deterministic_compat(self, monkeypatch):
         # These tests exercise the Integration Lead AGENT's mismatch flow with

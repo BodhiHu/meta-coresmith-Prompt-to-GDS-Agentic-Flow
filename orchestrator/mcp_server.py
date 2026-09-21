@@ -3306,6 +3306,12 @@ async def get_backend_state() -> str:
     completed = values.get("completed_blocks", [])
     block_queue = values.get("block_queue", [])
 
+    # The physical graph processes one assembled chip, not each frontend leaf.
+    flat_flow = bool(values.get("integration_top_path") or values.get("flat_netlist_path"))
+    total_blocks = 1 if flat_flow else len(block_queue)
+    completed_names = {b.get("name") for b in completed}
+    remaining_count = max(0, total_blocks - len(completed_names))
+
     interrupt_payload = None
     if state_snapshot.tasks:
         for task in state_snapshot.tasks:
@@ -3338,8 +3344,8 @@ async def get_backend_state() -> str:
             for b in completed
         ],
         "completed_count": len(completed),
-        "total_blocks": len(block_queue),
-        "remaining_count": len(block_queue) - values.get("current_block_index", 0),
+        "total_blocks": total_blocks,
+        "remaining_count": remaining_count,
         "backend_done": values.get("backend_done", False),
         "interrupt_payload": interrupt_payload,
         "checkpoint_id": (
@@ -3416,6 +3422,7 @@ async def resume_backend(
     if _backend.status == "paused":
         # Check if checkpoint has a pending interrupt that needs a Command.
         _has_pending_interrupt = False
+        _snap = None
         try:
             _snap = await _backend.graph.aget_state(config)
             if _snap and _snap.tasks:
@@ -3429,6 +3436,20 @@ async def resume_backend(
         if _has_pending_interrupt:
             resume_input = Command(resume=resume_value)
         else:
+            # A pause between node boundaries has no interrupt to consume, so
+            # Command(resume=...) cannot carry retry guidance into graph state.
+            # Persist an explicit retry constraint before the plain tick. Other
+            # actions retain their existing paused semantics.
+            if action == "retry" and constraint.strip():
+                values = (_snap.values if _snap else {}) or {}
+                constraints = list(values.get("constraints") or [])
+                constraints.append({
+                    "rule": constraint.strip(),
+                    "source": "paused_backend_resume",
+                })
+                await _backend.graph.aupdate_state(
+                    config, {"constraints": constraints}
+                )
             resume_input = None
     else:
         resume_input = Command(resume=resume_value)
@@ -3595,7 +3616,8 @@ async def run_backend_step(
                     _clk_port = "clk"
                 Path(sdc_path).write_text(
                     f"create_clock -name clk -period {period_ns} [get_ports {_clk_port}]\n"
-                    f"set_input_delay {period_ns * 0.2:.1f} -clock clk [all_inputs]\n"
+                    f"set_input_delay {period_ns * 0.2:.1f} -clock clk "
+                    f"[all_inputs -no_clocks]\n"
                     f"set_output_delay {period_ns * 0.2:.1f} -clock clk [all_outputs]\n"
                 )
 

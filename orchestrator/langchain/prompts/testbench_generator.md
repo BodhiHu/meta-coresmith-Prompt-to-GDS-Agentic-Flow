@@ -84,7 +84,8 @@ When the DUT has AXI-Stream input (s_tvalid/s_tready) and output
   - For backpressure tests, use ``cocotb.start_soon()`` to run sender
     and receiver concurrently, toggling m_tready on/off in the receiver.
 
-  - PUBLISHED STREAM SAMPLER: if this block owns the chip's published stream ports (the ERS names
+  - PUBLISHED STREAM SAMPLER: ONLY if the published grading contract explicitly
+    requires post-edge acceptance sampling for the chip's published stream ports (the ERS names
     them: in_valid/in_ready/in_data/in_last, out_valid/out_ready/out_data/
     out_last), drive and sample THOSE ports exactly like the published
     grader (post-edge): drive inputs and out_ready for the cycle, `await
@@ -92,12 +93,14 @@ When the DUT has AXI-Stream input (s_tvalid/s_tready) and output
     reads 1 after the edge (re-offer it otherwise), count an output beat
     consumed only if `out_valid` reads 1 after the edge with the `out_ready`
     you drove, then `await NextTimeStep`. Randomize input gaps and ~15%
-    output backpressure over several seeds. The phase-safe helper below is
-    for the block's INTERNAL AXI-Stream ports.
+    output backpressure over several seeds. Port names alone do not establish
+    this exception. Otherwise use the standard edge-handshake rules below
+    for AXI-Stream, srdy/drdy, and other synchronous valid/ready channels.
   - Every AXI-Stream send helper MUST be phase-safe. Drive
     ``tvalid/tdata/tlast`` before the rising edge that may accept the beat,
-    sample ``tready`` for that same rising edge, then deassert ``tvalid``
-    immediately after that rising edge if ``tready`` was high. Do NOT drive
+    sample settled ``tready`` before that same rising edge, then deassert
+    ``tvalid`` at the following falling edge if the saved ``tready`` was high.
+    Do NOT drive
     ``tvalid`` after a falling edge and then wait until the next falling edge
     to check ``tready``; the DUT can legally accept the beat on the intervening
     rising edge, causing the testbench to miss the handshake, duplicate the
@@ -110,13 +113,14 @@ When the DUT has AXI-Stream input (s_tvalid/s_tready) and output
             dut.s_axis_tlast.value = int(last)
             dut.s_axis_tvalid.value = 1
             for _ in range(max_wait):
+                await ReadOnly()  # settle combinational ready after our drives
                 ready = int(dut.s_axis_tready.value)
                 await RisingEdge(dut.clk)
                 if ready:
+                    await FallingEdge(dut.clk)  # change drives away from accept edge
                     dut.s_axis_tvalid.value = 0
                     dut.s_axis_tdata.value = 0
                     dut.s_axis_tlast.value = 0
-                    await FallingEdge(dut.clk)
                     return
                 await FallingEdge(dut.clk)
             raise TimeoutError("s_axis_tready never asserted")
@@ -143,13 +147,16 @@ When reading ordinary-width signal values, use `int(dut.signal.value)` to get a
 plain Python int.
 
 CLOCK OWNERSHIP -- CRITICAL:
-Each DUT clock signal must have exactly one live cocotb Clock driver. Do not
-call `cocotb.start_soon(Clock(dut.clk, ...).start())` independently inside
-every test without reusing or stopping the previous clock task. Use one module
-level helper that starts the clock once and reuses it across tests, or explicitly
-kill the previous clock task at teardown before starting another. Multiple live
-clock drivers on the same signal create ps-skewed duplicate edges and
-race-dependent AXI monitor failures.
+Each DUT clock signal must have exactly one live cocotb Clock driver WITHIN
+each test. Start a fresh clock at the beginning of every `@cocotb.test`.
+cocotb cancels tasks created by a test when that test ends, including its clock,
+monitors, and counters. Never use a module-global `_clock_started` flag or cache
+a clock task across tests: the flag survives while the task is cancelled, so
+later tests hang or the simulator exits with no future clock events.
+A shared setup helper is fine if it starts fresh tasks on EVERY test invocation.
+Keep those tasks test-local; reset helpers used multiple times within one test
+must reuse that test's clock, not start duplicate drivers. Multiple live clocks
+on the same signal within a test create duplicate edges and race failures.
 
 WIDE SIGNAL READS -- CRITICAL:
 Do not read very wide Verilator VPI signals as one Python integer. For payloads
@@ -178,64 +185,57 @@ If the uArch spec lacks Section 6a or `output_timing`, fall back to the
 conservative rules below.
 
 GOLDEN MODEL TIMING -- CRITICAL:
-Register writes in RTL take effect on the NEXT clock edge (non-blocking
-assignment ``<=``).  Your golden model must NOT read back a written value
-on the same cycle.  Insert ``await ClockCycles(dut.clk, 1)`` between a
-write and its read-back verification.
-
-For multi-stage pipelines (e.g., a 2-FF reset synchronizer), the golden
-model must account for the pipeline latency.  A value written on cycle N
-is readable on cycle N + pipeline_depth.
+Model state changes at their specified clock edges. A non-blocking assignment
+updates after evaluation of its triggering edge; it does not inherently add
+another full cycle before a test can observe the new value. Additional
+pipeline latency comes from the actual register boundaries and contract.
 
 VERILATOR NBA TIMING -- CRITICAL:
 Verilator resolves non-blocking assignments (<=) AFTER the RisingEdge
 callback returns. Reading a registered output immediately after
 ``await RisingEdge(dut.clk)`` gives the OLD pre-clock-edge value.
 
-To read the correct post-update value of registered outputs:
+To observe settled post-update registered state:
     await RisingEdge(dut.clk)   # clock edge fires
-    await FallingEdge(dut.clk)  # wait for NBA to settle
+    await ReadOnly()           # wait for this time step's HDL updates
     actual = int(dut.out.value) # NOW read the registered output
 
 NEVER compare golden model output against DUT signals read immediately
 after RisingEdge if those signals use non-blocking assignment (<=).
 
 OUTPUT SAMPLING PROTOCOL -- MANDATORY:
-Every test function MUST use this pattern for reading DUT outputs:
-
-    async def sample_output(dut):
-        """Wait for output to be valid and stable."""
-        await RisingEdge(dut.clk)
-        await FallingEdge(dut.clk)  # NBA settle
-        return int(dut.out.value)
-
-Rules:
-1. NEVER use Timer(0) -- it causes delta-cycle glitches in Verilator.
-2. For REGISTERED outputs (assigned with <=): sample after FallingEdge.
-3. For COMBINATIONAL outputs (assigned with =): sample after
-   RisingEdge + Timer(1, unit="ns").
-4. For FSM-driven outputs: use a polling loop with timeout, not
-   fixed-cycle waits:
-
-    for _ in range(100):
-        await RisingEdge(dut.clk)
-        await FallingEdge(dut.clk)
-        if int(dut.out_valid.value) == 1:
-            break
-    else:
-        raise TimeoutError("out_valid never asserted within 100 cycles")
-
-5. After driving an AXI-Stream transaction (tvalid+tready handshake),
-   wait at least 2 clock cycles before checking downstream outputs.
-6. After reset deassertion, wait pipeline_depth + 2 cycles before
-   checking ANY output.
+Distinguish the values ACCEPTED AT an edge from state PRODUCED BY that edge.
+- For a synchronous valid/ready transfer, save the settled valid, ready, and
+  payload BEFORE the accepting rising edge. For example, drive at FallingEdge,
+  await ReadOnly to settle combinational ready, and snapshot the handshake;
+  await RisingEdge to count that saved transfer. This works even if registered
+  valid/ready changes immediately after acceptance. Do not infer a completed
+  transfer from the following falling edge's valid/ready values.
+- Observe registered status, retirement pulses, and newly produced data after
+  RisingEdge + ReadOnly. A falling-edge sample can observe stable state too,
+  but cannot reconstruct the prior rising edge's handshake.
+- After ReadOnly, advance to a writable phase (normally the next FallingEdge)
+  before driving DUT inputs. Never write in ReadOnly or use Timer(0).
+- Keep protocol monitors and scoreboards running every cycle. Match outputs
+  to accepted inputs and the specified latency; do not blindly skip two
+  cycles after a transaction, which can lose a one-cycle response or pulse.
+- Start monitors/responders BEFORE reset release. If a receiver is not ready
+  to record a transfer yet, hold its ready low until it is. Observe the first
+  post-reset request from the first active edge; do not wait pipeline_depth+2
+  cycles before checking all outputs. Any contractually required startup
+  latency affects expected data validity, not whether handshakes are recorded.
+- Use bounded polling/scoreboards for variable-latency outputs. Never infer
+  cycle timing solely from a signal being assigned with '=' or '<='.
 
 RULES:
 1. Use cocotb with Python 3.11+ syntax.
 2. Import the Python golden model using the wrapper described above.
 3. Generate random and corner-case test vectors.
 4. Compare RTL outputs against Python model outputs BIT-EXACTLY.
-5. Use cocotb.clock.Clock for clock generation (50 MHz = 20ns period).
+5. Use cocotb.clock.Clock at the design's specified target frequency:
+   period_ns = 1000 / target_clock_mhz (25 MHz = 40 ns, for example).
+   Read the target from the supplied constraints/uArch/ERS; do not substitute
+   a hardcoded 50 MHz clock for a design with a different target.
 6. Drive the DUT's reset port with the polarity the RTL declares (active-low
    `rst_n`: hold low; active-high `rst`: hold high) for 5 cycles, then release.
 7. Use AXI-Stream handshaking: drive s_tvalid, check s_tready, etc.
@@ -378,5 +378,14 @@ on disk. If it does:
 4. Only do a full rewrite if the module interface changed (ports
    added/removed/resized) or the testbench has fundamental structural
    problems (import errors, wrong module name, etc.)
+
+When repairing a testbench, preserve the acceptance criteria. A failed exact
+stream comparison must remain an exact comparison of the COMPLETE stream and
+its length; do not replace it with prefix equality or an upper-bound count.
+Every valid/ready accepting edge is a transfer, even when its payload or address
+equals the preceding transfer. Do not hide duplicates by deduplicating them.
+If an assertion contradicts an authoritative requirement, identify that
+requirement and explain the correction; a failing run alone is not evidence
+that an assertion is wrong. Fix the driver or monitor when timing is at fault.
 
 Output format: a single Python file with all cocotb tests.

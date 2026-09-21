@@ -329,17 +329,13 @@ report_tns
 report_power
 
 # =====================================================================
-# 13. METAL DENSITY FILL (Efabless shuttle requirement)
+# 13. METAL DENSITY FILL
 # =====================================================================
 puts "\n========== 13. Metal Density Fill =========="
 
-# density_fill needs a fill-rules JSON, not the tech LEF; it is a shuttle
-# metal-density nicety and must never block DEF/GDS output. Best-effort.
-if {[catch {density_fill -rules $tech_lef} _df_err]} {
-    puts "WARNING: density_fill skipped ($_df_err)"
-}
-
-puts "Density fill done."
+# density_fill requires a dedicated fill-rules JSON, and this deployment does
+# not ship a validated one.  Never pass the tech LEF as rules or claim fill ran.
+puts "Density fill: NOT RUN (no validated fill-rules JSON configured)"
 
 # =====================================================================
 # 14. WRITE OUTPUTS

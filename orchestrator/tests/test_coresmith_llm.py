@@ -16,6 +16,7 @@ Tests:
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import threading
 import time
@@ -840,6 +841,33 @@ class TestCommandConstruction:
 
 class TestWatchdogBehaviour:
     """Test stall detection and timeout in _run_cli_with_watchdog."""
+
+    @patch("orchestrator.langchain.agents.coresmith_llm._find_claude_binary")
+    def test_child_receives_private_worker_deadline(self, mock_find, tmp_path,
+                                                     monkeypatch):
+        mock_find.return_value = "/usr/bin/echo"
+        deadline_file = tmp_path / "deadline.txt"
+        stub = tmp_path / "stub.py"
+        stub.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, os\n"
+            f"open({str(deadline_file)!r}, 'w').write(os.environ['CORESMITH_WORKER_DEADLINE_EPOCH'])\n"
+            "print(json.dumps({'type':'result','result':'DONE'}), flush=True)\n"
+        )
+        stub.chmod(0o755)
+        monkeypatch.setenv("CORESMITH_WORKER_DEADLINE_EPOCH", "parent-value")
+        model = ClaudeLLM(model="opus-4.6", timeout=60)
+
+        before = time.time()
+        result = model._run_cli_with_watchdog(
+            [str(stub)], "prompt", str(tmp_path), "test", time.monotonic(),
+        )
+        after = time.time()
+
+        assert "DONE" in result[0]
+        child_deadline = float(deadline_file.read_text())
+        assert before + 60 <= child_deadline <= after + 60
+        assert os.environ["CORESMITH_WORKER_DEADLINE_EPOCH"] == "parent-value"
 
     @patch("orchestrator.langchain.agents.coresmith_llm._find_claude_binary")
     def test_timeout_returns_partial_output(self, mock_find):

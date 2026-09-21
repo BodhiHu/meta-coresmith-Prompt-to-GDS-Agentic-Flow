@@ -14,6 +14,8 @@ Integration tests require Nix + Sky130 PDK and are marked with
 from __future__ import annotations
 
 import shutil
+import stat
+import subprocess
 import textwrap
 from pathlib import Path
 
@@ -43,6 +45,83 @@ from orchestrator.langgraph.backend_helpers import (
     parse_pnr_stdout,
     placed_macro_bboxes,
 )
+
+
+class TestRunOpenroad:
+    def test_worker_deadline_caps_inner_timeout(self, tmp_path, monkeypatch):
+        from orchestrator.langgraph import backend_helpers as bh
+        from orchestrator.langgraph import pipeline_helpers as ph
+
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured.update(kwargs)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(bh.subprocess, "run", fake_run)
+        monkeypatch.setattr(bh.time, "time", lambda: 1000.0)
+        monkeypatch.setenv("CORESMITH_WORKER_DEADLINE_EPOCH", "1100")
+        monkeypatch.setattr(ph, "_LOG_DIR", tmp_path / "logs")
+
+        result = bh.run_openroad("route.tcl", "blk", "pnr", timeout=1800)
+
+        assert result["success"] is True
+        assert captured["timeout"] == 70.0
+
+    def test_expired_worker_deadline_refuses_to_spawn(self, tmp_path,
+                                                       monkeypatch):
+        from orchestrator.langgraph import backend_helpers as bh
+        from orchestrator.langgraph import pipeline_helpers as ph
+
+        monkeypatch.setattr(
+            bh.subprocess, "run",
+            lambda *_args, **_kwargs: pytest.fail("OpenROAD must not start"),
+        )
+        monkeypatch.setattr(bh.time, "time", lambda: 1000.0)
+        monkeypatch.setenv("CORESMITH_WORKER_DEADLINE_EPOCH", "1020")
+        monkeypatch.setattr(ph, "_LOG_DIR", tmp_path / "logs")
+
+        result = bh.run_openroad("route.tcl", "blk", "pnr", timeout=1800)
+
+        assert result["success"] is False
+        assert result["returncode"] == 124
+        assert "no 30s result margin" in result["stderr"]
+
+    def test_timeout_preserves_partial_diagnostics(self, tmp_path, monkeypatch):
+        from orchestrator.langgraph import backend_helpers as bh
+        from orchestrator.langgraph import pipeline_helpers as ph
+
+        fake_openroad = tmp_path / "fake_openroad.py"
+        fake_openroad.write_text(textwrap.dedent("""\
+            #!/usr/bin/env python3
+            import sys
+            import time
+
+            print("partial stdout diagnostic", flush=True)
+            print("partial stderr diagnostic", file=sys.stderr, flush=True)
+            time.sleep(10)
+        """))
+        fake_openroad.chmod(fake_openroad.stat().st_mode | stat.S_IXUSR)
+        tcl = tmp_path / "route.tcl"
+        tcl.write_text("# unused by fake executable\n")
+
+        monkeypatch.setattr(bh, "OPENROAD_BIN", str(fake_openroad))
+        monkeypatch.setattr(bh, "PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr(ph, "_LOG_DIR", tmp_path / "step_logs")
+
+        result = bh.run_openroad(
+            str(tcl), "timeout_block", "pnr", timeout=0.1,
+        )
+
+        assert result["success"] is False
+        assert result["returncode"] == 124
+        assert "partial stdout diagnostic" in result["stdout"]
+        assert "partial stderr diagnostic" in result["stderr"]
+        assert "OpenROAD timed out (0.1s)" in result["stderr"]
+        log = Path(result["log_path"]).read_text()
+        assert "partial stdout diagnostic" in log
+        assert "partial stderr diagnostic" in log
+        assert "OpenROAD timed out (0.1s)" in log
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Tcl Generation
@@ -124,6 +203,16 @@ class TestGenerateDrcTcl:
         tcl = generate_drc_tcl("b", "/fake/r.def", str(tmp_path))
         content = Path(tcl).read_text()
         assert "quit -noprompt" in content
+
+    def test_uses_numeric_hierarchical_count_and_rejects_invalid_result(
+            self, tmp_path):
+        tcl = generate_drc_tcl("b", "/fake/r.def", str(tmp_path))
+        content = Path(tcl).read_text()
+        assert "set drc_result [drc listall why]" in content
+        assert "set drc_count [drc listall count total]" in content
+        assert "set drc_count [drc listall count]\n" not in content
+        assert "string is integer -strict $drc_count" in content
+        assert "exit 1" in content
 
 
 class TestGenerateRcxTcl:

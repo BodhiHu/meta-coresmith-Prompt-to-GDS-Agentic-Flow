@@ -23,7 +23,8 @@ def test_nested_hierarchy_counts_only_what_the_top_reaches():
 
 
 def test_integration_node_reads_the_hierarchy_and_parks():
-    src = inspect.getsource(pg.integration_check_node)
+    src = (inspect.getsource(pg._prepare_integration_check)
+           + inspect.getsource(pg._approve_integration_check))
     assert "_hier_sources" in src and '"phase": "postcondition"' in src
     assert '"supported_actions": ["retry", "fix_rtl", "abort"]' in src
 

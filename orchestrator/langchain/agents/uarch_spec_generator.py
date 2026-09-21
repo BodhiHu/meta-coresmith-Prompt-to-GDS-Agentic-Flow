@@ -133,6 +133,24 @@ def _constraint_precedence_line() -> str:
         return ""
 
 
+def _contract_port_table_fragment(project_root: str, block_name: str) -> str:
+    """Give the spec author the same resolved naming table as RTL/review."""
+    if not project_root:
+        return ""
+    from orchestrator.langgraph.contract_conformance import format_contract_port_table
+
+    table = format_contract_port_table(project_root, block_name)
+    if not table:
+        return ""
+    return table + (
+        "\nUse these resolved names in the spec's port table, Verilog interface "
+        "stub, output_timing keys and port-based invariants. Bare logical names "
+        "in the block diagram, golden model or contract field metadata are "
+        "aliases, not replacement RTL port names. Connected endpoints may "
+        "have different channel prefixes; match each block's own table.\n"
+    )
+
+
 def build_system_prompt(
     block_spec: Any = None,
     contracts: Any = None,
@@ -469,6 +487,9 @@ class UarchSpecGenerator:
                 )
                 if _contracts_fragment:
                     parts.append(_contracts_fragment)
+                _port_table = _contract_port_table_fragment(project_root, block_name)
+                if _port_table:
+                    parts.append(_port_table)
 
                 # FRD for testable requirements context
                 frd_path = _root / "arch" / "frd_spec.md"
@@ -582,8 +603,9 @@ class UarchSpecGenerator:
                 "\nWrite each file completely (the same structure and depth "
                 "you would give a single block) before moving to the next; do "
                 "not stop until every file above exists. Spec Section 9 "
-                "(interface summary) of two connected blocks must name the "
-                "same signals.\n"
+                "(interface summary) of two connected blocks must agree on "
+                "payload shape and handshake semantics using each endpoint's "
+                "own resolved port names.\n"
             )
             if revising:
                 parts.append(
@@ -667,6 +689,9 @@ class UarchSpecGenerator:
                 if ifaces:
                     parts.append("Interfaces (block diagram):\n"
                                  f"{json.dumps(ifaces, indent=2)}")
+                _port_table = _contract_port_table_fragment(project_root, n)
+                if _port_table:
+                    parts.append(_port_table)
                 _ffb = blk.get("flip_flop_budget")
                 if _ffb:
                     parts.append(f"HARD FLOP BUDGET: flip_flop_budget = {_ffb} FF "

@@ -868,9 +868,9 @@ def _build_metrics(block_result: dict | None, pnr_dir: Path) -> dict:
     """Build a comprehensive metrics dict from block result and reports."""
     metrics: dict = {
         "total_cells": 0,
-        "die_area_um2": 0,
-        "design_area_um2": 0,
-        "utilization_pct": 0,
+        "die_area_um2": None,
+        "design_area_um2": None,
+        "utilization_pct": None,
         "wns_ns": 0,
         "tns_ns": 0,
         "setup_slack_ns": 0,
@@ -888,9 +888,9 @@ def _build_metrics(block_result: dict | None, pnr_dir: Path) -> dict:
 
     if block_result:
         metrics.update({
-            "die_area_um2": block_result.get("die_area_um2", 0),
-            "design_area_um2": block_result.get("design_area_um2", 0),
-            "utilization_pct": block_result.get("utilization_pct", 0),
+            "die_area_um2": block_result.get("die_area_um2"),
+            "design_area_um2": block_result.get("design_area_um2"),
+            "utilization_pct": block_result.get("utilization_pct"),
             "wns_ns": block_result.get(
                 "timing_wns_ns", block_result.get("wns_ns", 0),
             ),

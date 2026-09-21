@@ -971,7 +971,10 @@ def _verdict_md(passed: bool | None, ran: bool | None) -> str:
 def _req_note(valid: dict) -> str:
     rc = valid.get("requirement_count")
     if rc is not None:
-        return f"{_fmt(rc)} requirements"
+        return (
+            f"{_fmt(rc)} unique ERS requirement records in context; "
+            "not a coverage verdict"
+        )
     return valid.get("action_taken") or ""
 
 

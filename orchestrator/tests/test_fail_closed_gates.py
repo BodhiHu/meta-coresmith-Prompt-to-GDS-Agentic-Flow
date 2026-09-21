@@ -97,6 +97,30 @@ class TestStaFailClosed:
         assert wns and wns[0]["advisory"] is True and wns[0]["passed"] is True
         assert v.ok is True
 
+    def test_failed_unmeasured_verdict_survives_null_wns(self):
+        from orchestrator.langgraph.pipeline_graph import (
+            _timing_ok_from_ppa_meta,
+            route_after_synth,
+        )
+
+        timing_ok = _timing_ok_from_ppa_meta({
+            "wns_ns": None,
+            "timing_verdict_failed": True,
+            "sta_error": "OpenSTA rc=1: cannot exec",
+        })
+        assert timing_ok is False
+        assert route_after_synth({
+            "synth_success": True,
+            "ppa_ok": False,
+            "timing_ok": timing_ok,
+            "gate_sim_ok": None,
+        }) == "diagnose"
+
+    def test_never_attempted_timing_remains_nonblocking(self):
+        from orchestrator.langgraph.pipeline_graph import _timing_ok_from_ppa_meta
+
+        assert _timing_ok_from_ppa_meta({"wns_ns": None}) is None
+
 
 # --- (g) backend timing_met None ---------------------------------------------
 

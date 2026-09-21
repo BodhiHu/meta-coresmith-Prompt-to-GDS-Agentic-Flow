@@ -93,6 +93,34 @@ def test_no_testbench_at_all_is_reported_not_silently_passed(tmp_path):
     assert "no integration-DV testbench found" in note
 
 
+def test_internal_force_selects_pin_driven_validation_tb(tmp_path):
+    d = _tb_dir(tmp_path)
+    (d / "test_chip_top.py").write_text(
+        "from cocotb.handle import Force\ndut.internal.value = Force(0)\n")
+    vd = tmp_path / "tb" / "validation"
+    vd.mkdir(parents=True)
+    expected = vd / "test_chip_top_validation.py"
+    expected.write_text("# pin-only validation stimulus\n")
+
+    tb, note = find_integration_tb(tmp_path, "chip_top")
+
+    assert tb == str(expected)
+    assert "Force()" in note and "pin-driven" in note
+
+
+def test_explicit_gate_sim_tb_is_pin_only_and_fail_closed(tmp_path, monkeypatch):
+    safe = tmp_path / "tb" / "validation" / "safe.py"
+    safe.parent.mkdir(parents=True)
+    safe.write_text("# pin-only\n")
+    monkeypatch.setenv("CORESMITH_GATE_SIM_TB", "tb/validation/safe.py")
+    assert find_integration_tb(tmp_path, "chip_top")[0] == str(safe)
+
+    safe.write_text("import cocotb\ndut.hidden.value = cocotb.handle.Force(0)\n")
+    tb, note = find_integration_tb(tmp_path, "chip_top")
+    assert tb == ""
+    assert "cannot reproduce internal forcing" in note
+
+
 # ---------------------------------------------------------------------------
 # stop_after_gate_sim routing
 # ---------------------------------------------------------------------------
@@ -104,12 +132,12 @@ def _synth_state(tmp_path, **over):
     return state
 
 
-def test_default_routing_is_unchanged(tmp_path):
+def test_full_flow_requires_a_gate_verdict(tmp_path):
     assert route_after_flat_synth(_synth_state(tmp_path)) == "run_pnr"
     assert route_after_flat_synth(
         _synth_state(tmp_path, chip_gate_sim_ok=False)) == "diagnose"
     assert route_after_flat_synth(
-        _synth_state(tmp_path, chip_gate_sim_ok=None)) == "run_pnr"
+        _synth_state(tmp_path, chip_gate_sim_ok=None)) == "diagnose"
     assert route_after_flat_synth({"flat_netlist_path": ""}) == "diagnose"
 
 
@@ -229,6 +257,212 @@ def test_backend_start_defaults_to_stopping_at_the_gate_sim_verdict():
     from orchestrator.daemon import server as ds
 
     assert ds.BackendStartRequest().full is False
+
+
+@pytest.mark.asyncio
+async def test_backend_http_pause_delegates_to_authoritative_reaping_path(
+    monkeypatch,
+):
+    import json
+
+    from orchestrator.daemon import server as ds
+
+    calls = []
+
+    class _Task:
+        @staticmethod
+        def done():
+            return False
+
+    class _Handle:
+        task = _Task()
+
+    class _Mcp:
+        _backend = _Handle()
+
+        @staticmethod
+        async def pause_backend():
+            calls.append("pause_backend")
+            return json.dumps({"status": "paused", "thread_id": "backend"})
+
+    monkeypatch.setattr(ds, "_backend_handle", lambda: _Mcp)
+
+    result = await ds.backend_pause()
+
+    assert calls == ["pause_backend"]
+    assert result == {
+        "paused": True,
+        "status": "paused",
+        "thread_id": "backend",
+    }
+
+
+@pytest.mark.asyncio
+async def test_backend_http_pause_preserves_idle_response(monkeypatch):
+    from orchestrator.daemon import server as ds
+
+    class _Task:
+        @staticmethod
+        def done():
+            return True
+
+    class _Mcp:
+        class _Handle:
+            task = _Task()
+
+        _backend = _Handle()
+
+        @staticmethod
+        async def pause_backend():
+            raise AssertionError("idle HTTP pause must not invoke MCP pause")
+
+    monkeypatch.setattr(ds, "_backend_handle", lambda: _Mcp)
+
+    assert await ds.backend_pause() == {
+        "paused": False,
+        "reason": "no running task",
+    }
+
+
+@pytest.mark.asyncio
+async def test_authoritative_backend_pause_reaps_before_task_cancel(
+    monkeypatch,
+):
+    import asyncio
+    import json
+
+    from orchestrator import mcp_server as mcp
+    from orchestrator.langchain.agents import coresmith_llm
+
+    order = []
+
+    async def running_worker():
+        try:
+            await asyncio.Event().wait()
+        finally:
+            order.append("cancelled")
+
+    task = asyncio.create_task(running_worker())
+    await asyncio.sleep(0)
+
+    class _Snapshot:
+        values = {}
+
+    class _Graph:
+        @staticmethod
+        async def aget_state(_config):
+            return _Snapshot()
+
+    async def ensure_graph():
+        return None
+
+    monkeypatch.setattr(mcp._backend, "status", "running")
+    monkeypatch.setattr(mcp._backend, "task", task)
+    monkeypatch.setattr(mcp._backend, "graph", _Graph())
+    monkeypatch.setattr(mcp._backend, "ensure_graph", ensure_graph)
+    monkeypatch.setattr(
+        coresmith_llm,
+        "kill_active_cli_processes",
+        lambda: order.append("reaped"),
+    )
+
+    result = json.loads(await mcp.pause_backend())
+
+    assert result["status"] == "paused"
+    assert mcp._backend.status == "paused"
+    assert task.cancelled()
+    assert order == ["reaped", "cancelled"]
+
+
+@pytest.mark.asyncio
+async def test_paused_backend_retry_persists_constraint_before_plain_tick(
+    monkeypatch,
+):
+    import json
+
+    from orchestrator import mcp_server as mcp
+
+    calls = []
+
+    class _Snapshot:
+        values = {"constraints": [{"rule": "keep prior"}]}
+        tasks = []
+
+    class _Graph:
+        @staticmethod
+        async def aget_state(_config):
+            return _Snapshot()
+
+        @staticmethod
+        async def aupdate_state(_config, update):
+            calls.append(("update", update))
+
+    async def ensure_graph():
+        return None
+
+    async def safe_resume(value, _config):
+        calls.append(("resume", value))
+
+    monkeypatch.setattr(mcp._backend, "status", "paused")
+    monkeypatch.setattr(mcp._backend, "graph", _Graph())
+    monkeypatch.setattr(mcp._backend, "ensure_graph", ensure_graph)
+    monkeypatch.setattr(mcp._backend, "safe_resume", safe_resume)
+
+    result = json.loads(await mcp.resume_backend(
+        action="retry", constraint="  use the authoritative new template  ",
+    ))
+
+    assert result["status"] == "running"
+    assert calls == [
+        ("update", {"constraints": [
+            {"rule": "keep prior"},
+            {
+                "rule": "use the authoritative new template",
+                "source": "paused_backend_resume",
+            },
+        ]}),
+        ("resume", None),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_paused_backend_nonretry_does_not_persist_constraint(monkeypatch):
+    import json
+
+    from orchestrator import mcp_server as mcp
+
+    calls = []
+
+    class _Snapshot:
+        values = {"constraints": []}
+        tasks = []
+
+    class _Graph:
+        @staticmethod
+        async def aget_state(_config):
+            return _Snapshot()
+
+        @staticmethod
+        async def aupdate_state(*_args, **_kwargs):
+            raise AssertionError("abort must not inject a retry constraint")
+
+    async def ensure_graph():
+        return None
+
+    async def safe_resume(value, _config):
+        calls.append(value)
+
+    monkeypatch.setattr(mcp._backend, "status", "paused")
+    monkeypatch.setattr(mcp._backend, "graph", _Graph())
+    monkeypatch.setattr(mcp._backend, "ensure_graph", ensure_graph)
+    monkeypatch.setattr(mcp._backend, "safe_resume", safe_resume)
+
+    result = json.loads(await mcp.resume_backend(
+        action="abort", constraint="must not become retry guidance",
+    ))
+
+    assert result["status"] == "running"
+    assert calls == [None]
 
 
 @pytest.mark.asyncio

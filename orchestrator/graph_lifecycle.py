@@ -23,6 +23,23 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def _checkpoint_recovery_status(state: Any) -> str | None:
+    """Classify a persisted LangGraph snapshot for process startup.
+
+    Interrupts take priority. A snapshot with scheduled ``next`` nodes is a
+    resumable node-boundary pause, while only a snapshot with values and no
+    interrupt or pending node is terminal.
+    """
+    if not state or not state.values:
+        return None
+    for task in state.tasks or ():
+        if task.interrupts:
+            return "interrupted"
+    if state.next:
+        return "paused"
+    return "done"
+
+
 class GraphLifecycle:
     """Manages the lifecycle of a running LangGraph graph.
 
@@ -72,10 +89,45 @@ class GraphLifecycle:
 
     # -- Recovery helpers ---------------------------------------------------
 
+    @staticmethod
+    def _pid_is_alive(pid: object) -> bool:
+        try:
+            value = int(pid)
+            if value <= 0:
+                return False
+            os.kill(value, 0)
+            return True
+        except (TypeError, ValueError, ProcessLookupError):
+            return False
+        except PermissionError:
+            return True
+
+    def _foreign_live_daemon_owns_project(self) -> bool:
+        """Whether another live daemon owns lifecycle recovery for this run."""
+        daemon_path = os.path.join(
+            self.project_root, ".coresmith", "daemon.json"
+        )
+        try:
+            with open(daemon_path, encoding="utf-8") as fh:
+                daemon_pid = json.load(fh).get("pid")
+        except (OSError, ValueError, AttributeError):
+            return False
+        try:
+            daemon_pid = int(daemon_pid)
+        except (TypeError, ValueError):
+            return False
+        return daemon_pid != os.getpid() and self._pid_is_alive(daemon_pid)
+
     def _close_orphaned_events(self) -> None:
         """Close orphaned graph_node_enter events from a prior crash."""
         try:
             from orchestrator.langgraph.event_stream import write_graph_event
+            # A short-lived MCP/tool process may instantiate GraphLifecycle
+            # against a project currently owned by the daemon. It is an
+            # observer, not a server restart, and must not close the daemon's
+            # live node in the shared event log.
+            if self._foreign_live_daemon_owns_project():
+                return
             log_path = os.path.join(self.project_root, ".coresmith", "pipeline_events.jsonl")
             if not os.path.isfile(log_path):
                 return
@@ -97,6 +149,9 @@ class GraphLifecycle:
                 elif etype == "graph_node_exit" and node:
                     open_enters.pop(node, None)
             for node, ev in open_enters.items():
+                writer_pid = ev.get("pid")
+                if writer_pid is not None and self._pid_is_alive(writer_pid):
+                    continue
                 write_graph_event(self.project_root, node, "graph_node_exit", {
                     "block": ev.get("block", ""),
                     "server_restart": True,
@@ -140,14 +195,9 @@ class GraphLifecycle:
                 try:
                     config = {"configurable": {"thread_id": self.thread_id}}
                     state = await self.graph.aget_state(config)
-                    if state and state.values:
-                        if state.tasks:
-                            for t in state.tasks:
-                                if t.interrupts:
-                                    self.status = "interrupted"
-                                    break
-                        if self.status == "idle":
-                            self.status = "done"
+                    recovered = _checkpoint_recovery_status(state)
+                    if recovered is not None:
+                        self.status = recovered
                 except Exception:
                     logging.getLogger(__name__).warning(
                         "%s: startup recovery check failed", self.name, exc_info=True,

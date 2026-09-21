@@ -444,6 +444,21 @@ def _log_llm_call(
 # Stream-JSON output parsing
 # ---------------------------------------------------------------------------
 
+_LLM_ERROR_RESPONSE_PREFIX = "[ClaudeLLM error:"
+
+
+def is_llm_error_response(content: object) -> bool:
+    """Return whether ``ClaudeLLM.call`` encoded an unsuccessful call.
+
+    Provider and transport failures use one reserved response envelope because
+    the historical public API returns text rather than a result object. Match
+    only that leading envelope; ordinary generated code may freely contain
+    words such as "error", "timeout", or "incomplete".
+    """
+    return isinstance(content, str) and content.startswith(
+        _LLM_ERROR_RESPONSE_PREFIX
+    )
+
 def _parse_stream_json(stdout: str) -> tuple[str, dict]:
     """Parse Claude CLI ``--output-format stream-json`` output.
 
@@ -3042,6 +3057,13 @@ class ClaudeLLM:
         than the caller's cwd. ``None`` preserves the prior launch behavior.
         Raises ``FileNotFoundError`` if the binary is missing.
         """
+        # Pass a wall-clock deadline to tool grandchildren. This is a private
+        # child environment copy: concurrent workers get independent deadlines
+        # and the daemon's os.environ is never mutated.
+        child_env = dict(process_env) if process_env is not None else os.environ.copy()
+        child_env["CORESMITH_WORKER_DEADLINE_EPOCH"] = str(
+            _time_mod.time() + self.timeout
+        )
         process = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
@@ -3049,7 +3071,7 @@ class ClaudeLLM:
             stderr=subprocess.PIPE,
             text=True,
             cwd=cwd,
-            env=process_env,
+            env=child_env,
             # Own session/group so we can reap the ENTIRE tree (the CLI plus any
             # sim/tool grandchildren it spawns) at the end -- see
             # _reap_process_group. Isolating the group also means killpg can't

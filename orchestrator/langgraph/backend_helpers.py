@@ -23,6 +23,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import time
 from pathlib import Path
 
 from orchestrator.langgraph.pipeline_helpers import (
@@ -33,78 +34,41 @@ from orchestrator.langgraph.pipeline_helpers import (
     YELLOW,
     _write_step_log,
     _write_step_log_error,
-    load_config,
     log,
 )
 
 # ---------------------------------------------------------------------------
-# PDK path resolution
+# PDK path resolution + tool-binary resolution
 # ---------------------------------------------------------------------------
+# The Sky130 PDK paths, ``_resolve_tool`` and the resolved backend binaries now
+# live in the reference deployment (``orchestrator.pdk.deployments.sky130``),
+# the single source of truth. They are re-exported here UNCHANGED so every
+# existing call site (`from ...backend_helpers import LIBERTY / OPENROAD_BIN / ...`)
+# keeps its byte-identical value. See the byo-pdk plan, PR1.
+from orchestrator.pdk.deployments import sky130 as _sky130
 
-def _pdk_variant() -> str:
-    """Return the PDK variant directory name (sky130A or sky130B)."""
-    for v in ("sky130A", "sky130B"):
-        if (PDK_ROOT / v).is_dir():
-            return v
-    return "sky130A"
+_STD_CELL = _sky130._STD_CELL
+_PDK_VAR = _sky130._PDK_VAR
+_PDK_PATH = _sky130._PDK_PATH
+_resolve_tool = _sky130._resolve_tool
 
+TECH_LEF = _sky130.TECH_LEF
+CELL_LEF = _sky130.CELL_LEF
+LIBERTY = _sky130.LIBERTY
+CELL_GDS = _sky130.CELL_GDS
+CELL_SPICE = _sky130.CELL_SPICE
+MAGIC_RC = _sky130.MAGIC_RC
+NETGEN_SETUP = _sky130.NETGEN_SETUP
+RCX_RULES = _sky130.RCX_RULES
 
-_PDK_VAR = _pdk_variant()
-_PDK_PATH = PDK_ROOT / _PDK_VAR
-_STD_CELL = "sky130_fd_sc_hd"
-
-TECH_LEF = _PDK_PATH / "libs.ref" / _STD_CELL / "techlef" / f"{_STD_CELL}__nom.tlef"
-CELL_LEF = _PDK_PATH / "libs.ref" / _STD_CELL / "lef" / f"{_STD_CELL}.lef"
-LIBERTY = _PDK_PATH / "libs.ref" / _STD_CELL / "lib" / f"{_STD_CELL}__tt_025C_1v80.lib"
-CELL_GDS = _PDK_PATH / "libs.ref" / _STD_CELL / "gds" / f"{_STD_CELL}.gds"
-CELL_SPICE = _PDK_PATH / "libs.ref" / _STD_CELL / "spice" / f"{_STD_CELL}.spice"
-MAGIC_RC = _PDK_PATH / "libs.tech" / "magic" / f"{_PDK_VAR}.magicrc"
-NETGEN_SETUP = _PDK_PATH / "libs.tech" / "netgen" / "setup.tcl"
-RCX_RULES = _PDK_PATH / "libs.tech" / "rcx" / "sky130hd_rcx_patterns.rules"
-
-
-def _resolve_tool(config_key: str, default_script: str) -> str:
-    """Resolve an EDA tool binary path.
-
-    Resolution order (first match wins):
-
-    1. ``CORESMITH_BACKEND_<NAME>`` env var (e.g. ``CORESMITH_BACKEND_OPENROAD``)
-       -- used by the ``nix develop`` shellHook and the Docker image to
-       point at the bare binary on ``$PATH`` and skip the per-call
-       ``nix shell`` re-entry.
-    2. ``backend.<config_key>`` in ``orchestrator/config.yaml`` -- the
-       checked-in default points at ``scripts/*-nix.sh`` wrappers.
-    3. ``default_script`` relative to the project root.
-    4. ``default_script`` as-is (lets the OS resolve it via ``$PATH``).
-    """
-    env_key = "CORESMITH_BACKEND_" + config_key.removesuffix("_binary").upper()
-    env_val = os.environ.get(env_key, "").strip()
-    if env_val:
-        return env_val
-
-    try:
-        cfg = load_config()
-        backend = cfg.get("backend", {})
-        path = backend.get(config_key, "")
-        if path:
-            p = Path(path)
-            if not p.is_absolute():
-                p = PROJECT_ROOT / p
-            if p.exists():
-                return str(p)
-    except Exception:
-        pass
-    p = PROJECT_ROOT / default_script
-    if p.exists():
-        return str(p)
-    return default_script
-
-
-OPENROAD_BIN = _resolve_tool("openroad_binary", "scripts/openroad-nix.sh")
-MAGIC_BIN = _resolve_tool("magic_binary", "scripts/magic-nix.sh")
-NETGEN_BIN = _resolve_tool("netgen_binary", "scripts/netgen-nix.sh")
-KLAYOUT_BIN = _resolve_tool("klayout_binary", "scripts/klayout-nix.sh")
-RENDER_SCRIPT = str(PROJECT_ROOT / "scripts" / "render_layout.rb")
+OPENROAD_BIN = _sky130.OPENROAD_BIN
+MAGIC_BIN = _sky130.MAGIC_BIN
+NETGEN_BIN = _sky130.NETGEN_BIN
+KLAYOUT_BIN = _sky130.KLAYOUT_BIN
+RENDER_SCRIPT = str(
+    Path(__file__).resolve().parents[1]
+    / "pdk_templates" / "sky130" / "render_layout.rb"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -139,9 +103,11 @@ def render_layout_image(
     ]
 
     try:
+        render_env = os.environ.copy()
+        render_env.setdefault("QT_QPA_PLATFORM", "offscreen")
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout,
-            cwd=str(PROJECT_ROOT),
+            cwd=str(PROJECT_ROOT), env=render_env,
         )
         if result.returncode == 0 and Path(output_path).exists():
             log(f"  [IMG] Rendered {Path(output_path).name}", GREEN)
@@ -379,6 +345,111 @@ def describe_synth_attempt_history(history: list[dict]) -> str:
 # Flat Top-Level Synthesis (Yosys)
 # ---------------------------------------------------------------------------
 
+_LITERAL_CELL_PIN_RE = re.compile(
+    r"\.\s*([A-Za-z_][A-Za-z0-9_$]*)\s*\(\s*"
+    r"(\d+\s*'\s*[bBdDhH]\s*[0]+|"
+    r"\d+\s*'\s*[bBdDhH]\s*[1]+)\s*\)"
+)
+
+
+def verify_physical_constant_mapping(
+    script_path: str | Path,
+    netlist_path: str | Path,
+    hilomap_command: str,
+    tie_cells: tuple[str, ...],
+) -> dict:
+    """Fail closed when synthesis leaves literal constants on cell pins.
+
+    A logical ``.D(1'h0)`` simulates correctly but has no physical driver for
+    routing or extraction. The synthesis script must run the deployment's exact
+    hilomap command after its final ABC pass and before writing the netlist, and
+    the emitted netlist must contain no literal-valued named cell connection.
+    Tie instances are reported for provenance but are not required when the
+    design contains no constant sinks.
+    """
+    script = Path(script_path)
+    netlist = Path(netlist_path)
+    if not hilomap_command.strip():
+        return {
+            "ok": False,
+            "reason": "active deployment has no physical constant-cell mapping",
+            "literal_pin_constants": [],
+            "tie_instance_count": 0,
+        }
+    if not script.is_file():
+        return {
+            "ok": False,
+            "reason": f"synthesis script missing: {script}",
+            "literal_pin_constants": [],
+            "tie_instance_count": 0,
+        }
+    if not netlist.is_file():
+        return {
+            "ok": False,
+            "reason": f"synthesized netlist missing: {netlist}",
+            "literal_pin_constants": [],
+            "tie_instance_count": 0,
+        }
+
+    commands: list[str] = []
+    for raw_line in script.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw_line.split("#", 1)[0]
+        commands.extend(
+            " ".join(part.split())
+            for part in line.split(";") if part.strip()
+        )
+    expected = " ".join(hilomap_command.split())
+    hilomap_indexes = [i for i, command in enumerate(commands) if command == expected]
+    abc_indexes = [i for i, command in enumerate(commands) if command.startswith("abc ")]
+    write_indexes = [
+        i for i, command in enumerate(commands)
+        if command.startswith("write_verilog ")
+    ]
+    ordered = bool(
+        hilomap_indexes and abc_indexes and write_indexes
+        and max(abc_indexes) < max(hilomap_indexes) < min(write_indexes)
+    )
+    if not ordered:
+        return {
+            "ok": False,
+            "reason": (
+                "synthesis script must run the deployment hilomap command "
+                "after final abc and before write_verilog: " + expected
+            ),
+            "literal_pin_constants": [],
+            "tie_instance_count": 0,
+        }
+
+    text = netlist.read_text(encoding="utf-8", errors="replace")
+    literals = [
+        {"pin": match.group(1), "value": "".join(match.group(2).split())}
+        for match in _LITERAL_CELL_PIN_RE.finditer(text)
+    ]
+    unique_tie_cells = tuple(dict.fromkeys(cell for cell in tie_cells if cell))
+    tie_count = sum(
+        len(re.findall(r"(?<![A-Za-z0-9_$])" + re.escape(cell) + r"\s+", text))
+        for cell in unique_tie_cells
+    )
+    if literals:
+        sample = ", ".join(
+            f".{item['pin']}({item['value']})" for item in literals[:8]
+        )
+        return {
+            "ok": False,
+            "reason": (
+                f"synthesized netlist retains {len(literals)} literal constant "
+                f"cell-pin connection(s): {sample}"
+            ),
+            "literal_pin_constants": literals,
+            "tie_instance_count": tie_count,
+        }
+    return {
+        "ok": True,
+        "reason": "deployment hilomap ran after abc; no literal cell-pin constants remain",
+        "literal_pin_constants": [],
+        "tie_instance_count": tie_count,
+    }
+
 def generate_flat_synthesis_script(
     design_name: str,
     top_rtl_path: str,
@@ -412,13 +483,22 @@ def generate_flat_synthesis_script(
     if not (top_module and module_declared_in(top_rtl_path, top_module)):
         top_module = Path(top_rtl_path).stem
 
+    from orchestrator.pdk.registry import get_deployment
+    deployment = get_deployment()
+    hilomap_command = deployment.yosys_hilomap_command()
+    if not hilomap_command:
+        raise ValueError(
+            f"deployment '{deployment.name}' does not declare physical "
+            "constant cells (cells.tie_high_* / cells.tie_low_*)"
+        )
+
     # --- SRAM macro awareness (5th fix) ---------------------------------
     # If the RTL instantiates a pre-built macro, read its verilog as a
     # blackbox (so `hierarchy -check` resolves the instance instead of
-    # erroring) + its liberty, and map constants to tie cells so the macro's
-    # tie-offs don't leave unroutable one_/zero_ nets. Macro blackbox reads
+    # erroring) + its liberty. Physical constant mapping is required for every
+    # design below, whether or not a macro is present. Macro blackbox reads
     # MUST precede the design reads.
-    macro_bb = macro_libs = macro_hilomap = ""
+    macro_bb = macro_libs = _macro_hilomap = ""
     try:
         from orchestrator.langgraph.macro_backend import synth_injection
         from orchestrator.langgraph.macro_registry import (
@@ -432,13 +512,13 @@ def generate_flat_synthesis_script(
             if Path(rf).exists():
                 for mi in detect_instantiated_macros(rf, registry):
                     used[mi.name] = mi
-        macro_bb, macro_libs, macro_hilomap = synth_injection(list(used.values()))
+        macro_bb, macro_libs, _macro_hilomap = synth_injection(list(used.values()))
     except Exception as exc:  # never let macro logic break std-cell synth
         log(f"  [MACRO] synth injection skipped: {exc}", YELLOW)
 
     bb_block = (macro_bb + "\n") if macro_bb else ""
     lib_block = (macro_libs + "\n") if macro_libs else ""
-    hilomap_block = (macro_hilomap + "\n") if macro_hilomap else ""
+    hilomap_block = hilomap_command + "\n"
 
     script = f"""# Flat top-level synthesis for {design_name} (Sky130 HD)
 # Generated by coresmith backend_helpers.generate_flat_synthesis_script
@@ -464,7 +544,8 @@ write_verilog -noattr {out / f"{design_name}_netlist.v"}
     sdc_path = out / f"{design_name}.sdc"
     sdc_path.write_text(
         f"create_clock -name clk -period {period_ns} [get_ports clk]\n"
-        f"set_input_delay {period_ns * 0.2:.1f} -clock clk [all_inputs]\n"
+        f"set_input_delay {period_ns * 0.2:.1f} -clock clk "
+        "[all_inputs -no_clocks]\n"
         f"set_output_delay {period_ns * 0.2:.1f} -clock clk [all_outputs]\n"
     )
 
@@ -569,93 +650,13 @@ def run_flat_synthesis(
 def _generate_floorplan_tcl(block_name: str, utilization: int, gate_count: int) -> str:
     """Generate the floorplan section of the PnR TCL script.
 
-    Uses gate-count-based minimum die sizing to prevent power-strap
-    failures on small designs (OpenROAD IFP-0024).
+    Thin delegating wrapper: the OpenROAD-specific generator now lives in the
+    sky130 deployment's ``RunPnrOpenroad`` (PR5), parameterized from
+    ``PDKConfig.cells``/``.pnr``. Byte-identical output is guarded by
+    ``test_pdk_tcl_golden``.
     """
-    import math
-
-    avg_cell_area_um2 = 10
-    min_edge = 60.0
-    if gate_count > 0:
-        estimated_edge = math.sqrt(gate_count * avg_cell_area_um2 / (utilization / 100.0)) * 2.0
-        min_edge = max(60.0, estimated_edge)
-
-    needs_explicit_die = gate_count > 0 and gate_count < 500
-
-    tracks = (
-        'make_tracks li1  -x_offset 0.23 -x_pitch 0.46 -y_offset 0.17 -y_pitch 0.34\n'
-        'make_tracks met1 -x_offset 0.17 -x_pitch 0.34 -y_offset 0.17 -y_pitch 0.34\n'
-        'make_tracks met2 -x_offset 0.23 -x_pitch 0.46 -y_offset 0.23 -y_pitch 0.46\n'
-        'make_tracks met3 -x_offset 0.34 -x_pitch 0.68 -y_offset 0.34 -y_pitch 0.68\n'
-        'make_tracks met4 -x_offset 0.46 -x_pitch 0.92 -y_offset 0.46 -y_pitch 0.92\n'
-        'make_tracks met5 -x_offset 1.70 -x_pitch 3.40 -y_offset 1.70 -y_pitch 3.40\n'
-    )
-
-    if needs_explicit_die:
-        core_margin = 2.5
-        core_edge = min_edge - 2 * core_margin
-        floorplan = (
-            f'# Small design ({gate_count} gates) -- use explicit die area\n'
-            f'# to ensure enough space for power straps (avoid IFP-0024).\n'
-            f'initialize_floorplan \\\n'
-            f'    -die_area "0 0 {min_edge:.1f} {min_edge:.1f}" \\\n'
-            f'    -core_area "{core_margin} {core_margin} {core_edge:.1f} {core_edge:.1f}" \\\n'
-            f'    -site unithd\n'
-        )
-    else:
-        floorplan = (
-            f'initialize_floorplan \\\n'
-            f'    -utilization {utilization} \\\n'
-            f'    -aspect_ratio 1.0 \\\n'
-            f'    -core_space 2 \\\n'
-            f'    -site unithd\n'
-        )
-
-    relaxed_util = max(utilization - 10, 15)
-
-    return (
-        f'{floorplan}\n'
-        f'{tracks}\n'
-        f'place_pins -hor_layers met3 -ver_layers met2\n\n'
-        f'tapcell \\\n'
-        f'    -distance 14 \\\n'
-        f'    -tapcell_master {_STD_CELL}__tapvpwrvgnd_1\n\n'
-        f'set die_area [ord::get_die_area]\n'
-        f'puts "Die area: $die_area"\n\n'
-        f'# Post-init die size check\n'
-        f'set die_w [expr {{[lindex $die_area 2] - [lindex $die_area 0]}}]\n'
-        f'set die_h [expr {{[lindex $die_area 3] - [lindex $die_area 1]}}]\n'
-        f'if {{$die_w < 50.0 || $die_h < 50.0}} {{\n'
-        f'    puts "WARNING: Die ${{die_w}} x ${{die_h}} um too small for PDN."\n'
-        f'    initialize_floorplan -die_area "0 0 {min_edge:.1f} {min_edge:.1f}" '
-        f'-core_area "2.5 2.5 {min_edge - 2.5:.1f} {min_edge - 2.5:.1f}" -site unithd\n'
-        f'    {tracks}'
-        f'    place_pins -hor_layers met3 -ver_layers met2\n'
-        f'    set die_area [ord::get_die_area]\n'
-        f'    puts "Resized die area: $die_area"\n'
-        f'}}\n\n'
-        f'# Post-floorplan utilization sanity check\n'
-        f'set fp_die_w [expr {{[lindex $die_area 2] - [lindex $die_area 0]}}]\n'
-        f'set fp_die_h [expr {{[lindex $die_area 3] - [lindex $die_area 1]}}]\n'
-        f'set fp_core_area [expr {{$fp_die_w * $fp_die_h}}]\n'
-        f'set fp_cell_count [llength [get_cells *]]\n'
-        f'set fp_est_cell_area [expr {{$fp_cell_count * 10.0}}]\n'
-        f'if {{$fp_core_area > 0}} {{\n'
-        f'    set fp_actual_util [expr {{$fp_est_cell_area / $fp_core_area * 100.0}}]\n'
-        f'    puts "Floorplan check: die ${{fp_die_w}}x${{fp_die_h}} um, '
-        f'target util: {utilization}%, actual: ${{fp_actual_util}}%"\n'
-        f'    if {{$fp_actual_util > {utilization * 1.5}}} {{\n'
-        f'        puts "WARNING: utilization ${{fp_actual_util}}% exceeds 1.5x target '
-        f'({utilization}%) -- re-floorplanning with {relaxed_util}%"\n'
-        f'        initialize_floorplan -utilization {relaxed_util} '
-        f'-aspect_ratio 1.0 -core_space 2 -site unithd\n'
-        f'        {tracks}'
-        f'        place_pins -hor_layers met3 -ver_layers met2\n'
-        f'        set die_area [ord::get_die_area]\n'
-        f'        puts "Re-floorplanned die area: $die_area"\n'
-        f'    }}\n'
-        f'}}\n'
-    )
+    return _sky130.DEPLOYMENT.tools()["run_pnr"].render_floorplan_tcl(
+        block_name, utilization, gate_count)
 
 
 # ---------------------------------------------------------------------------
@@ -710,265 +711,13 @@ def generate_pnr_tcl(
     # sub-block as the top.
     actual_module = _detect_top_module(netlist_path, block_name)
 
-    script = f"""# Auto-generated PnR flow for {block_name} (Sky130 HD)
-# Generated by coresmith backend_helpers.generate_pnr_tcl
-
-set script_dir [file dirname [file normalize [info script]]]
-
-# ----- PDK paths (absolute) -----
-set tech_lef   "{TECH_LEF}"
-set cell_lef   "{CELL_LEF}"
-set liberty    "{LIBERTY}"
-
-# ----- Design paths (absolute) -----
-set netlist    "{abs_netlist}"
-set sdc_file   "{abs_sdc}"
-set out_dir    "$script_dir"
-
-# =====================================================================
-# 1. READ DESIGN
-# =====================================================================
-puts "========== 1. Reading design =========="
-
-read_lef $tech_lef
-read_lef $cell_lef
-read_liberty $liberty
-read_verilog $netlist
-link_design {actual_module}
-read_sdc $sdc_file
-
-# Fix DRT-0305: Yosys constant nets (zero_, one_) typed as GROUND/POWER
-# are not routable by TritonRoute. Connect them to the power grid so they
-# become special nets handled by the PDN, not by the signal router.
-catch {{
-    add_global_connection -net VGND -inst_pattern ".*" -pin_pattern "zero_" -ground
-}}
-catch {{
-    add_global_connection -net VPWR -inst_pattern ".*" -pin_pattern "one_" -power
-}}
-
-puts "Design linked. Cell count: [llength [get_cells *]]"
-
-# =====================================================================
-# 2. FLOORPLAN
-# =====================================================================
-puts "\\n========== 2. Floorplan =========="
-
-{_generate_floorplan_tcl(block_name, utilization, gate_count)}
-
-# =====================================================================
-# 3. POWER DISTRIBUTION NETWORK (PDN)
-# =====================================================================
-puts "\\n========== 3. Power grid =========="
-
-add_global_connection -net VPWR -pin_pattern "VPWR" -power
-add_global_connection -net VGND -pin_pattern "VGND" -ground
-add_global_connection -net VPWR -pin_pattern "VPB" -power
-add_global_connection -net VGND -pin_pattern "VNB" -ground
-
-global_connect
-
-set_voltage_domain -name CORE -power VPWR -ground VGND
-
-define_pdn_grid -name stdcell_grid \\
-    -starts_with POWER \\
-    -voltage_domain CORE \\
-    -pins met4
-
-add_pdn_stripe -grid stdcell_grid -layer met1 -width 0.48 -followpins -starts_with POWER
-add_pdn_stripe -grid stdcell_grid -layer met4 -width 1.6 -pitch 27.14 -offset 13.57 -starts_with POWER
-add_pdn_connect -grid stdcell_grid -layers {{met1 met4}}
-
-pdngen
-
-puts "PDN generated."
-
-# =====================================================================
-# 4. GLOBAL PLACEMENT
-# =====================================================================
-puts "\\n========== 4. Global Placement =========="
-
-global_placement -density {density} -pad_left 2 -pad_right 2
-
-puts "Global placement done."
-
-# =====================================================================
-# 5. DETAILED PLACEMENT
-# =====================================================================
-puts "\\n========== 5. Detailed Placement =========="
-
-detailed_placement
-check_placement -verbose
-
-# NO filler insertion here -- fillers are inserted after CTS to avoid
-# DPL-0036 failures when CTS buffers need placement sites occupied by
-# pre-CTS fillers.
-
-puts "Detailed placement done (fillers deferred until after CTS)."
-
-# =====================================================================
-# 6. SET WIRE RC (needed for CTS, timing repair, and STA)
-# =====================================================================
-puts "\\n========== 6. Set wire RC parasitics =========="
-
-set_wire_rc -signal -layer met2
-set_wire_rc -clock  -layer met3
-
-puts "Wire RC set: signal=met2, clock=met3"
-
-# =====================================================================
-# 6b. PRE-CTS DESIGN REPAIR (buffer high-fanout nets, resize weak drivers)
-# =====================================================================
-# A ~200-fanout net left on a single min-size driver measures ~12 ns of pure
-# cell delay pre-repair (live run: reset net, WNS -1.92 ns); repair_design
-# with a fanout cap moved it to WNS 0.00 at 50 MHz. Also exclude the sky130
-# probe/lpflow cells: the resizer otherwise picks them and they break LVS
-# and skew timing.
-puts "\n========== 6b. Pre-CTS repair_design =========="
-
-set_dont_use {{{_STD_CELL}__probe_p_* {_STD_CELL}__probec_p_* {_STD_CELL}__lpflow_*}}
-estimate_parasitics -placement
-set_max_fanout 16 [current_design]
-repair_design
-detailed_placement
-check_placement -verbose
-
-puts "Pre-CTS repair_design done."
-
-# =====================================================================
-# 7. CLOCK TREE SYNTHESIS
-# =====================================================================
-puts "\\n========== 7. Clock Tree Synthesis =========="
-
-clock_tree_synthesis \\
-    -buf_list {{{_STD_CELL}__clkbuf_4 {_STD_CELL}__clkbuf_8}} \\
-    -root_buf {_STD_CELL}__clkbuf_8 \\
-    -sink_clustering_enable
-
-set_propagated_clock [all_clocks]
-
-repair_clock_nets
-
-remove_fillers
-detailed_placement
-filler_placement -prefix FILLER {{{_STD_CELL}__decap_12 {_STD_CELL}__decap_8 {_STD_CELL}__decap_6 {_STD_CELL}__decap_4 {_STD_CELL}__decap_3 {_STD_CELL}__fill_2 {_STD_CELL}__fill_1}}
-
-puts "CTS done."
-
-# =====================================================================
-# 8. TIMING REPAIR (post-CTS)
-# =====================================================================
-puts "\\n========== 8. Post-CTS Timing Repair =========="
-
-estimate_parasitics -placement
-
-repair_timing -setup
-repair_timing -hold
-
-remove_fillers
-detailed_placement
-check_placement -verbose
-filler_placement -prefix FILLER {{{_STD_CELL}__decap_12 {_STD_CELL}__decap_8 {_STD_CELL}__decap_6 {_STD_CELL}__decap_4 {_STD_CELL}__decap_3 {_STD_CELL}__fill_2 {_STD_CELL}__fill_1}}
-
-puts "Post-CTS repair done."
-
-# =====================================================================
-# 9. GLOBAL ROUTING
-# =====================================================================
-puts "\\n========== 9. Global Routing =========="
-
-set_routing_layers -signal met1-met4 -clock met3-met4
-
-global_route -guide_file "$out_dir/route_guide.guide" \\
-    -congestion_iterations 50
-
-puts "Global routing done."
-
-# =====================================================================
-# 10. DETAILED ROUTING
-# =====================================================================
-puts "\\n========== 10. Detailed Routing =========="
-
-# Fix DRT-0305: Yosys/OpenROAD may create constant nets (zero_, one_)
-# typed as GROUND/POWER that TritonRoute refuses to route as signal nets.
-# Reclassify any non-special GROUND/POWER nets to SIGNAL before routing.
-set block [ord::get_db_block]
-foreach net [$block getNets] {{
-    set sig_type [$net getSigType]
-    set special [$net isSpecial]
-    if {{($sig_type == "GROUND" || $sig_type == "POWER") && !$special}} {{
-        set net_name [$net getName]
-        if {{$net_name ne "VPWR" && $net_name ne "VGND" && $net_name ne "VPB" && $net_name ne "VNB"}} {{
-            puts "Reclassifying net '$net_name' ($sig_type, special=$special) to SIGNAL"
-            $net setSigType SIGNAL
-        }}
-    }}
-}}
-
-detailed_route \\
-    -output_drc "$out_dir/route_drc.rpt" \\
-    -verbose 1
-
-puts "Detailed routing done."
-
-# =====================================================================
-# 11. SPEF PARASITIC ESTIMATION (in-flow)
-# =====================================================================
-puts "\\n========== 11. SPEF Parasitic Estimation =========="
-
-estimate_parasitics -global_routing
-
-# write_spef may produce empty file if estimate_parasitics didn't populate
-# the RCX data store (expected -- use standalone RCX for accurate SPEF)
-catch {{write_spef "$out_dir/{block_name}.spef"}}
-
-puts "SPEF estimation done (use standalone RCX for accurate extraction)."
-
-# =====================================================================
-# 12. REPORTS (post-route STA)
-# =====================================================================
-puts "\\n========== 12. Reports =========="
-
-report_checks -path_delay max -format full_clock_expanded > "$out_dir/timing_setup.rpt"
-report_checks -path_delay min -format full_clock_expanded > "$out_dir/timing_hold.rpt"
-report_tns > "$out_dir/timing_tns.rpt"
-report_wns > "$out_dir/timing_wns.rpt"
-report_power > "$out_dir/power.rpt"
-puts "Reports written to $out_dir"
-
-# Print key metrics to stdout for parsing
-puts "\\n========== SUMMARY =========="
-report_design_area
-report_wns
-report_tns
-report_power
-
-# =====================================================================
-# 13. METAL DENSITY FILL (Efabless shuttle requirement)
-# =====================================================================
-puts "\\n========== 13. Metal Density Fill =========="
-
-density_fill -rules $tech_lef
-
-puts "Density fill done."
-
-# =====================================================================
-# 14. WRITE OUTPUTS
-# =====================================================================
-puts "\\n========== 14. Writing outputs =========="
-
-write_def "$out_dir/{block_name}_routed.def"
-write_verilog "$out_dir/{block_name}_pnr.v"
-write_verilog -include_pwr_gnd "$out_dir/{block_name}_pwr.v"
-
-puts "\\n========== FLOW COMPLETE =========="
-puts "DEF:              $out_dir/{block_name}_routed.def"
-puts "Verilog:          $out_dir/{block_name}_pnr.v"
-puts "Power Verilog:    $out_dir/{block_name}_pwr.v"
-puts "SPEF:             $out_dir/{block_name}.spef"
-
-exit
-"""
+    # The OpenROAD-specific script generation now lives in the sky130
+    # deployment's RunPnrOpenroad (PR5), parameterized from PDKConfig; this
+    # wrapper keeps the abs-path + real-top resolution and file I/O so every
+    # call site is unchanged. Byte-identity is guarded by test_pdk_tcl_golden.
+    script = _sky130.DEPLOYMENT.tools()["run_pnr"].render_pnr_tcl(
+        block_name, actual_module, abs_netlist, abs_sdc,
+        utilization=utilization, density=density, gate_count=gate_count)
     tcl_path.write_text(script)
     return str(tcl_path)
 
@@ -977,7 +726,9 @@ exit
 # PnR reference template: prepare a working copy for LLM iteration
 # ---------------------------------------------------------------------------
 
-_PNR_REFERENCE_TCL = Path(__file__).resolve().parent.parent / "pdk_templates" / "sky130" / "pnr_reference.tcl"
+# The PnR reference template location is owned by the deployment (its data_dir
+# payload), not this module -- so a BYO-PDK deployment supplies its own template.
+_PNR_REFERENCE_TCL = _sky130.DEPLOYMENT.pnr_reference_tcl()
 
 
 def _estimate_std_cell_area(netlist_path: str) -> float:
@@ -1287,14 +1038,18 @@ load {block_name}_flat
 select top cell
 drc catchup
 drc count
-set drc_count [drc listall count]
+set drc_result [drc listall why]
+set drc_count [drc listall count total]
 
 set drc_rpt [open "$out_dir/magic_drc.rpt" w]
 puts $drc_rpt "Design: {block_name}"
 puts $drc_rpt "DRC count: $drc_count"
-set drc_result [drc listall why]
 puts $drc_rpt $drc_result
 close $drc_rpt
+if {{![string is integer -strict $drc_count] || $drc_count < 0}} {{
+    puts stderr "ERROR: Magic returned a non-numeric DRC count: <$drc_count>"
+    exit 1
+}}
 puts "DRC violations: $drc_count"
 
 # ---- GDS from flattened ----
@@ -1339,69 +1094,13 @@ def generate_rcx_tcl(
     out.mkdir(parents=True, exist_ok=True)
     tcl_path = out / f"rcx_{block_name}.tcl"
 
-    rcx_rules_path = str(RCX_RULES)
-
     abs_def = str(Path(routed_def_path).resolve()) if not os.path.isabs(routed_def_path) else routed_def_path
     abs_sdc = str(Path(sdc_path).resolve()) if not os.path.isabs(sdc_path) else sdc_path
 
-    script = f"""# Auto-generated OpenRCX SPEF extraction for {block_name} (Sky130)
-# Generated by coresmith backend_helpers.generate_rcx_tcl
-
-set script_dir [file dirname [file normalize [info script]]]
-
-set tech_lef   "{TECH_LEF}"
-set cell_lef   "{CELL_LEF}"
-set liberty    "{LIBERTY}"
-set sdc_file   "{abs_sdc}"
-set def_file   "{abs_def}"
-set rcx_rules  "{rcx_rules_path}"
-set out_dir    "$script_dir"
-
-puts "========== RCX SPEF Extraction: {block_name} =========="
-
-# 1. Read design from DEF
-read_lef $tech_lef
-read_lef $cell_lef
-read_liberty $liberty
-read_def $def_file
-read_sdc $sdc_file
-
-set_propagated_clock [all_clocks]
-
-# 2. Set via resistances (Sky130 calibration from OpenROAD-flow-scripts)
-set tech [ord::get_db_tech]
-[$tech findLayer mcon] setResistance 9.249146
-[$tech findLayer via]  setResistance 4.5
-[$tech findLayer via2] setResistance 3.368786
-[$tech findLayer via3] setResistance 0.376635
-[$tech findLayer via4] setResistance 0.00580
-
-# 3. Run OpenRCX extraction
-puts "Running OpenRCX extraction..."
-define_process_corner -ext_model_index 0 X
-extract_parasitics -ext_model_file $rcx_rules
-
-# 4. Write SPEF
-puts "Writing SPEF..."
-write_spef "$out_dir/{block_name}.spef"
-
-# 5. Write power-aware Verilog for LVS
-write_verilog -include_pwr_gnd "$out_dir/{block_name}_pwr.v"
-
-# 6. Post-extraction STA
-puts "\\n========== Post-extraction STA =========="
-report_checks -path_delay max -format full_clock_expanded
-report_checks -path_delay min -format full_clock_expanded
-report_tns
-report_wns
-report_power
-
-puts "\\nSPEF: $out_dir/{block_name}.spef"
-puts "Power Verilog: $out_dir/{block_name}_pwr.v"
-puts "Done."
-
-exit
-"""
+    # OpenRCX (OpenROAD) script generation lives in the sky130 deployment's
+    # RunStaOpenroad (PR5); this wrapper keeps abs-path resolution + file I/O.
+    script = _sky130.DEPLOYMENT.tools()["run_sta"].render_rcx_tcl(
+        block_name, abs_def, abs_sdc)
     tcl_path.write_text(script)
     return str(tcl_path)
 
@@ -1422,6 +1121,30 @@ def run_openroad(
     Returns dict with: success, stdout, stderr, log_path, and any
     parsed metrics from stdout.
     """
+    # A streamed LLM worker supplies its absolute deadline. Reserve time for
+    # the CLI to serialize the ToolResult and diagnostics before its parent
+    # watchdog reaps the process group.
+    deadline_raw = os.environ.get("CORESMITH_WORKER_DEADLINE_EPOCH", "").strip()
+    if deadline_raw:
+        try:
+            remaining = float(deadline_raw) - time.time() - 30.0
+        except ValueError:
+            remaining = None
+        if remaining is not None:
+            if remaining <= 0:
+                message = "OpenROAD not started: worker deadline has no 30s result margin"
+                log_path = _write_step_log_error(
+                    block_name, step, [OPENROAD_BIN, tcl_script], message, attempt,
+                )
+                return {
+                    "success": False,
+                    "stdout": "",
+                    "stderr": message,
+                    "returncode": 124,
+                    "log_path": log_path,
+                }
+            timeout = min(float(timeout), remaining)
+
     # `-exit` so a Tcl error TERMINATES the process instead of dropping to an
     # interactive `openroad>` prompt that hangs (leaked procs observed on macro
     # LEF-discard errors); `-no_init` skips any user ~/.openroad init file.
@@ -1450,15 +1173,30 @@ def run_openroad(
             "returncode": result.returncode,
             "log_path": log_path,
         }
-    except subprocess.TimeoutExpired:
-        log_path = _write_step_log_error(
-            block_name, step, cmd,
-            f"OpenROAD timed out ({timeout}s)", attempt,
+    except subprocess.TimeoutExpired as exc:
+        # TimeoutExpired may expose bytes here even with text=True.  Preserve
+        # everything OpenROAD emitted before the timeout; those last messages
+        # are often the only useful diagnosis for a long physical-design run.
+        def _as_text(output: str | bytes | None) -> str:
+            if isinstance(output, bytes):
+                return output.decode(errors="replace")
+            return output or ""
+
+        stdout = _as_text(exc.stdout)
+        partial_stderr = _as_text(exc.stderr)
+        timeout_message = f"OpenROAD timed out ({timeout}s)"
+        stderr = "\n".join(part for part in (partial_stderr, timeout_message) if part)
+        timeout_result = subprocess.CompletedProcess(
+            cmd, returncode=124, stdout=stdout, stderr=stderr,
+        )
+        log_path = _write_step_log(
+            block_name, step, cmd, timeout_result, attempt,
         )
         return {
             "success": False,
-            "stdout": "",
-            "stderr": f"OpenROAD timed out ({timeout}s)",
+            "stdout": stdout,
+            "stderr": stderr,
+            "returncode": 124,
             "log_path": log_path,
         }
     except FileNotFoundError:
@@ -2280,6 +2018,35 @@ def parse_openroad_reports(output_dir: str) -> dict:
             metrics["utilization_pct"] = float(m.group(3))
 
     return metrics
+
+
+def die_area_um2_from_def(def_path: str | Path) -> float | None:
+    """Return routed DEF die area in square microns, or ``None`` if unknown."""
+    path = Path(def_path)
+    if not path.is_file():
+        return None
+    try:
+        text = path.read_text(errors="replace")
+    except OSError:
+        return None
+    units_match = re.search(
+        r"\bUNITS\s+DISTANCE\s+MICRONS\s+(\d+)\s*;", text, re.IGNORECASE
+    )
+    area_match = re.search(
+        r"\bDIEAREA\s*\(\s*(-?\d+)\s+(-?\d+)\s*\)\s*"
+        r"\(\s*(-?\d+)\s+(-?\d+)\s*\)\s*;",
+        text,
+        re.IGNORECASE,
+    )
+    if not units_match or not area_match:
+        return None
+    dbu_per_micron = int(units_match.group(1))
+    if dbu_per_micron <= 0:
+        return None
+    x0, y0, x1, y1 = map(int, area_match.groups())
+    width = abs(x1 - x0) / dbu_per_micron
+    height = abs(y1 - y0) / dbu_per_micron
+    return width * height if width > 0 and height > 0 else None
 
 
 # ---------------------------------------------------------------------------

@@ -629,6 +629,56 @@ class TestRouteNextTier:
 
 
 class TestRouteAfterIntegrationReview:
+    @pytest.mark.asyncio
+    async def test_resume_does_not_rerun_model_backed_review(self, tmp_path, monkeypatch):
+        """A real LangGraph interrupt/resume approves the checkpointed review."""
+        from langgraph.graph import END, START, StateGraph
+
+        from orchestrator.langchain.agents import integration_review_agent
+
+        spec = tmp_path / "arch" / "uarch_specs" / "leaf.md"
+        spec.parent.mkdir(parents=True)
+        spec.write_text("REVISION A")
+        calls = []
+
+        def fake_init(self, *args, **kwargs):
+            pass
+
+        async def fake_review(self, block_names, project_root):
+            calls.append(len(calls) + 1)
+            # A replay would expose a different revision and finding.
+            if len(calls) > 1:
+                spec.write_text("REVISION B")
+                return {"summary": "new finding", "issues_found": 1,
+                        "issues_fixed": 1, "edited_blocks": ["leaf"],
+                        "reviewed_specs": {"leaf": str(spec)}}
+            return {"summary": "clean A", "issues_found": 0,
+                    "issues_fixed": 0, "edited_blocks": [],
+                    "reviewed_specs": {"leaf": str(spec)}}
+
+        monkeypatch.delenv("CORESMITH_ENABLE_CHIP_LEAD", raising=False)
+        monkeypatch.setattr(integration_review_agent.IntegrationReviewAgent,
+                            "__init__", fake_init)
+        monkeypatch.setattr(integration_review_agent.IntegrationReviewAgent,
+                            "review", fake_review)
+        builder = StateGraph(OrchestratorState)
+        builder.add_node("prepare", pipeline_graph.integration_review_prepare_node)
+        builder.add_node("decision", pipeline_graph.integration_review_node)
+        builder.add_edge(START, "prepare")
+        builder.add_edge("prepare", "decision")
+        builder.add_edge("decision", END)
+        graph = builder.compile(checkpointer=MemorySaver())
+        config = {"configurable": {"thread_id": "review-replay"}}
+        state = {"project_root": str(tmp_path), "block_queue": [{"name": "leaf", "tier": 1}],
+                 "tier_list": [1], "current_tier_index": 0, "completed_blocks": []}
+
+        await graph.ainvoke(state, config)
+        result = await graph.ainvoke(Command(resume={"action": "approve"}), config)
+
+        assert calls == [1]
+        assert spec.read_text() == "REVISION A"
+        assert result["integration_review_action"] == "approve"
+
     def test_approve_advances_tier(self):
         assert route_after_integration_review({"integration_review_action": "approve"}) == "advance_tier"
 
@@ -892,6 +942,23 @@ class TestInternalNodes:
         assert len(result["completed_blocks"]) == 1
         assert result["completed_blocks"][0]["success"] is True
         assert result["completed_blocks"][0]["name"] == "scrambler"
+
+    @pytest.mark.asyncio
+    async def test_block_done_cannot_record_failed_timing_as_success(self, tmp_path):
+        state = _block_state(_make_block("scrambler"), tmp_path=str(tmp_path))
+        state.update(sim_passed=True, synth_success=True, timing_ok=False)
+        block_dir = tmp_path / ".coresmith" / "blocks" / "scrambler"
+        block_dir.mkdir(parents=True, exist_ok=True)
+        (block_dir / "constraints.json").write_text("[]")
+        (block_dir / "previous_error.txt").write_text(
+            "PPA gate: STA ran but produced no parseable timing"
+        )
+
+        result = await block_done_node(state)
+
+        completed = result["completed_blocks"][0]
+        assert completed["success"] is False
+        assert completed["synth_success"] is True
 
     @pytest.mark.asyncio
     async def test_block_done_skip(self, tmp_path):

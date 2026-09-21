@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import threading
 import time
 from collections.abc import Awaitable, Callable
@@ -121,6 +122,9 @@ def write_graph_event(
     record = {
         "ts": ts,
         "iso": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(ts)),
+        # Process ownership lets startup recovery distinguish a dead writer
+        # from an active daemon whose log is being inspected by another CLI.
+        "pid": os.getpid(),
         "event": event_type,
         "node": node_name,
         **payload,

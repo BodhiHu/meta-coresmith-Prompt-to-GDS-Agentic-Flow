@@ -23,6 +23,9 @@ LVS result:
 Precheck result:
 {precheck_context}
 
+Extracted timing result:
+{timing_context}
+
 PnR parameters (current):
 {pnr_params}
 
@@ -53,9 +56,11 @@ DRC PATTERNS (Sky130 Magic rules):
 3. Metal density too low (density check, fill check):
    Root cause: missing density_fill step in PnR.
    Category: DRC_DENSITY
-   Auto-fix: ensure density_fill is in the PnR TCL.  If already present,
-   this is informational -- some shuttles accept it.
-   Action: auto_retry or continue.
+   Auto-fix only when the active deployment supplies a validated fill-rules
+   JSON: run `density_fill -rules <that-json>`. A technology LEF is not a fill
+   rules file. Without validated rules, report density fill as NOT RUN and
+   escalate the shuttle/profile requirement; never print a fabricated "done".
+   Action: auto_retry with valid rules, otherwise ask_human.
 
 4. Via spacing / enclosure violations:
    Root cause: detailed router placed illegal vias.
@@ -131,6 +136,10 @@ DECISION RULES
 - If attempt >= max_attempts, always escalate.
 - If the failure is benign (LVS_EXPECTED), always continue.
 - If confidence < 0.5, escalate.
+- A timing result with `met: false` is an authoritative failed gate even when
+  WNS/TNS are zero or setup/hold slack is positive. Diagnose its failure
+  reasons, extraction coverage, and constraint diagnostics; never return
+  `continue` for that failed gate.
 
 ─────────────────────────────────────────────────────────────────────
 OUTPUT FORMAT

@@ -242,24 +242,20 @@ def smart_truncate(
 # Engine provenance (Section 7a)
 # ---------------------------------------------------------------------------
 
-_ENGINE_SHA_CACHE: dict[str, str] = {}
-
-
 def engine_git_sha(short: bool = True) -> str:
     """Best-effort git SHA of the CoreSmith engine checkout (or "" if unknown).
 
     Resolves the repo that CONTAINS this source tree (not the run's project
     root), so a run can stamp WHICH engine build produced it -- and detect a
     mid-run hot-swap when the SHA changes. Reads .git directly (no subprocess
-    dependency); caches per resolved repo root. Never raises.
+    dependency), including linked worktrees. Re-reads refs so a checkout change
+    is detectable; this identifies the on-disk revision, not module reloads.
+    Never raises.
     """
-    key = f"{short}"
-    if key in _ENGINE_SHA_CACHE:
-        return _ENGINE_SHA_CACHE[key]
     sha = ""
     try:
         here = Path(__file__).resolve()
-        for parent in [here.parent] + list(here.parents):
+        for parent in here.parents:
             gitdir = parent / ".git"
             head = None
             if gitdir.is_dir():
@@ -268,26 +264,37 @@ def engine_git_sha(short: bool = True) -> str:
                 # worktree: .git is a file "gitdir: <path>"
                 try:
                     real = gitdir.read_text().split("gitdir:", 1)[1].strip()
-                    head = Path(real) / "HEAD"
-                    gitdir = Path(real)
+                    resolved = Path(real)
+                    gitdir = resolved if resolved.is_absolute() else parent / resolved
+                    head = gitdir / "HEAD"
                 except (IndexError, OSError):
                     head = None
             if head is None or not head.exists():
                 continue
             ref = head.read_text().strip()
             if ref.startswith("ref:"):
-                ref_path = gitdir / ref.split("ref:", 1)[1].strip()
-                if ref_path.exists():
-                    sha = ref_path.read_text().strip()
-                else:
-                    # packed-refs fallback
-                    packed = gitdir / "packed-refs"
-                    want = ref.split("ref:", 1)[1].strip()
+                # Linked worktrees keep HEAD locally, but branch refs and
+                # packed-refs in the repository's common git directory.
+                common = gitdir
+                common_file = gitdir / "commondir"
+                if common_file.exists():
+                    resolved = Path(common_file.read_text().strip())
+                    common = resolved if resolved.is_absolute() else gitdir / resolved
+                want = ref.split("ref:", 1)[1].strip()
+                for ref_dir in dict.fromkeys((gitdir, common)):
+                    ref_path = ref_dir / want
+                    if ref_path.exists():
+                        sha = ref_path.read_text().strip()
+                        break
+                    packed = ref_dir / "packed-refs"
                     if packed.exists():
                         for line in packed.read_text().splitlines():
-                            if line.endswith(" " + want) or line.endswith("\t" + want):
-                                sha = line.split()[0]
+                            fields = line.split()
+                            if len(fields) == 2 and fields[1] == want:
+                                sha = fields[0]
                                 break
+                    if sha:
+                        break
             else:
                 sha = ref  # detached HEAD: HEAD holds the sha directly
             break
@@ -295,5 +302,4 @@ def engine_git_sha(short: bool = True) -> str:
         sha = ""
     if sha and short:
         sha = sha[:12]
-    _ENGINE_SHA_CACHE[key] = sha
     return sha

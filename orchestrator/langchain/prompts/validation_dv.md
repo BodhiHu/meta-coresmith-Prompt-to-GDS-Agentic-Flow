@@ -16,6 +16,16 @@ your own scratch build directory, e.g. `sim_build/agent_<name>/`,
 never `sim_build/integration` or `sim_build/validation`; the engine owns those
 scope directories and recreates them for every authoritative attempt.
 
+BOUNDED SELF-CHECKING:
+After writing or repairing this testbench, run the relevant check. If it fails,
+make at most TWO focused repair-and-recheck cycles in this generation call.
+If it still fails, preserve the current artifact and failure evidence, then
+finish with the failing command, verdict and unresolved cause. The parent
+graph owns diagnosis and retry. Reuse an existing relevant regression when
+the interface is unchanged; do not create a sequence of private mock devices
+or testbenches to replace it. Any small diagnostic probe counts toward this
+same local repair budget. Preserve exact expected values and protocol checks.
+
 CONTEXT:
 You will receive:
 1. The top-level Verilog source and path
@@ -47,11 +57,16 @@ verified backend-only requirements. All RTL/application requirements must be
 COCOTB RULES:
 - Use cocotb with Python 3.11+ syntax.
 - Use `cocotb.clock.Clock` for clock generation.
+- Derive the clock period from the design's target frequency in constraints,
+  the uArch spec, or ERS: `period_ns = 1000 / target_clock_mhz`. For example,
+  25 MHz requires 40 ns. Do not substitute a fixed 20 ns clock for every design.
 - Use active-low reset (`rst_n`) when present; otherwise adapt to the actual
   reset port in the top-level RTL.
-- Each DUT clock signal must have exactly one live cocotb Clock driver. Reuse a
-  module-level clock task across tests or explicitly stop the previous task;
-  never start a new free-running clock in every test without cleanup.
+- Each DUT clock signal must have exactly one live cocotb Clock driver per test. Reuse a
+  test-local clock task within a test; start a fresh clock for every test because
+  cocotb cancels the prior test's background tasks. Do not cache a clock task or
+  a `_clock_started` flag across tests. Reset sequences within a test must not
+  spawn duplicate clock drivers.
 - Always drive ready/valid handshakes legally and add cycle-count watchdogs.
 - Never assign to DUT inputs after `ReadOnly()` without first advancing to a
   writable phase such as `FallingEdge(dut.clk)` or `Timer(1, "step")`. Reset,
@@ -264,10 +279,15 @@ VCD WAVEFORM -- MANDATORY:
 - Log the ERS requirement IDs next to the transactions that exercise them so
   waveform inspection can tie each requirement to observed signals.
 
-OUTPUT FORMAT GUARD:
-Your response MUST be a single, complete Python file containing valid cocotb
-test code. NEVER output markdown, explanations, summaries, or prose. The file
-MUST start with import statements.
+ARTIFACT HANDOFF:
+Write the complete, valid Python testbench to the requested output path with
+your tools. Keep explanations and Markdown out of the .py file. Once the file
+is written and checked, finish with a brief report containing its path, test
+count, check command and verdict, and any unresolved failure. Do not repeat
+the source file in your final response; the engine reads the file from disk.
+If file-writing tools are unavailable, return the complete Python source
+instead, without Markdown fences or explanatory prose, so the engine can
+persist it. Never report a successful write or check that did not occur.
 
 ## No live oracle inside cocotb (BINDING)
 

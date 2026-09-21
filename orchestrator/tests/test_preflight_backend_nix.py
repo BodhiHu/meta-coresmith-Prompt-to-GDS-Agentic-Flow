@@ -96,3 +96,18 @@ class TestWrappersReallyNeedNix:
 
     def test_shutil_is_the_module_under_patch(self):
         assert ph.shutil is shutil
+
+
+def test_backend_preflight_rejects_incompatible_magic(tmp_path, monkeypatch,
+                                                       _no_pdk_noise):
+    from orchestrator.langgraph import backend_helpers as bh
+
+    magic = tmp_path / "magic"
+    magic.write_text("#!/bin/sh\necho 8.3.105\n")
+    magic.chmod(0o755)
+    monkeypatch.setattr(bh, "MAGIC_BIN", str(magic))
+
+    result = ph.preflight_check(["backend"])
+
+    assert any("Magic 8.3.411 or newer" in error
+               and "8.3.105" in error for error in result["errors"])
