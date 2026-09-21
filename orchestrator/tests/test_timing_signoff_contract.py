@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 
@@ -167,6 +169,37 @@ async def test_completion_gate_sim_backstop(
 
 
 @pytest.mark.asyncio
+async def test_completion_adopts_extracted_area_and_routed_def_geometry(tmp_path):
+    from orchestrator.langgraph.backend_graph import advance_block_node
+
+    state = _state(tmp_path)
+    state["routed_def_path"] = str(
+        tmp_path / "syn" / "output" / "chip_top" / "pnr" / "chip_top_routed.def"
+    )
+    Path(state["routed_def_path"]).write_text(
+        "UNITS DISTANCE MICRONS 1000 ;\n"
+        "DIEAREA ( 0 0 ) ( 252415 252415 ) ;\n"
+    )
+    state.update({
+        "drc_result": {"clean": True},
+        "lvs_result": {"match": True},
+        "timing_result": {
+            "met": True, "source": "extracted_rcx_sta",
+            "extraction_complete": True, "sign_off": "PASS",
+            "design_area_um2": 24572.0, "utilization_pct": 40.0,
+        },
+        "route_result": {"success": True},
+        "step_log_paths": {},
+        "chip_gate_sim_ok": True,
+        "chip_gate_sim_status": "pass",
+    })
+    block = (await advance_block_node(state))["completed_blocks"][0]
+    assert block["design_area_um2"] == pytest.approx(24572.0)
+    assert block["utilization_pct"] == pytest.approx(40.0)
+    assert block["die_area_um2"] == pytest.approx(252.415**2)
+
+
+@pytest.mark.asyncio
 async def test_dashboard_keeps_extracted_metrics_over_pnr_estimates(
         tmp_path, monkeypatch):
     from orchestrator.langgraph import backend_helpers
@@ -175,6 +208,11 @@ async def test_dashboard_keeps_extracted_metrics_over_pnr_estimates(
     pnr = tmp_path / "syn" / "output" / "chip_top" / "pnr"
     pnr.mkdir(parents=True)
     (tmp_path / ".coresmith").mkdir()
+    routed_def = pnr / "chip_top_routed.def"
+    routed_def.write_text(
+        "UNITS DISTANCE MICRONS 1000 ;\n"
+        "DIEAREA ( 0 0 ) ( 252415 252415 ) ;\n"
+    )
     monkeypatch.setattr(backend_helpers, "parse_openroad_reports", lambda _p: {
         "wns_ns": -99.0,
         "setup_slack_ns": -99.0,
@@ -195,6 +233,9 @@ async def test_dashboard_keeps_extracted_metrics_over_pnr_estimates(
             "setup_slack_ns": 22.21,
             "hold_slack_ns": 0.46,
             "total_power_mw": 0.758,
+            "design_area_um2": 24572.0,
+            "utilization_pct": 40.0,
+            "routed_def_path": str(routed_def),
             "chip_gate_sim_ok": True,
             "chip_gate_sim_status": "pass",
             "chip_gate_sim_accepted": True,
@@ -211,3 +252,41 @@ async def test_dashboard_keeps_extracted_metrics_over_pnr_estimates(
     assert block["timing_source"] == "extracted_rcx_sta"
     assert block["setup_slack_ns"] == pytest.approx(22.21)
     assert block["hold_slack_ns"] == pytest.approx(0.46)
+    assert block["design_area_um2"] == pytest.approx(24572.0)
+    assert block["utilization_pct"] == pytest.approx(40.0)
+    assert block["die_area_um2"] == pytest.approx(252.415**2)
+
+
+@pytest.mark.asyncio
+async def test_backend_results_report_unknown_area_as_null(tmp_path):
+    from orchestrator.langgraph.backend_graph import backend_complete_node
+
+    (tmp_path / ".coresmith").mkdir()
+    state = {
+        "project_root": str(tmp_path),
+        "completed_blocks": [{
+            "name": "chip_top", "success": True, "timing_met": True,
+            "design_area_um2": None, "die_area_um2": None,
+            "utilization_pct": None,
+        }],
+    }
+    await backend_complete_node(state)
+    import json
+    block = json.loads(
+        (tmp_path / ".coresmith" / "backend_results.json").read_text()
+    )["blocks"][0]
+    assert block["design_area_um2"] is None
+    assert block["die_area_um2"] is None
+    assert block["utilization_pct"] is None
+
+
+def test_def_die_area_parser_uses_declared_dbu(tmp_path):
+    from orchestrator.langgraph.backend_helpers import die_area_um2_from_def
+
+    routed_def = tmp_path / "routed.def"
+    routed_def.write_text(
+        "UNITS DISTANCE MICRONS 2000 ;\n"
+        "DIEAREA ( -1000 2000 ) ( 499000 502000 ) ;\n"
+    )
+    assert die_area_um2_from_def(routed_def) == pytest.approx(250.0 * 250.0)
+    assert die_area_um2_from_def(tmp_path / "missing.def") is None

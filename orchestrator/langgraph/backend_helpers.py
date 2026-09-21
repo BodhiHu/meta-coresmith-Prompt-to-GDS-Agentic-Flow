@@ -2020,6 +2020,35 @@ def parse_openroad_reports(output_dir: str) -> dict:
     return metrics
 
 
+def die_area_um2_from_def(def_path: str | Path) -> float | None:
+    """Return routed DEF die area in square microns, or ``None`` if unknown."""
+    path = Path(def_path)
+    if not path.is_file():
+        return None
+    try:
+        text = path.read_text(errors="replace")
+    except OSError:
+        return None
+    units_match = re.search(
+        r"\bUNITS\s+DISTANCE\s+MICRONS\s+(\d+)\s*;", text, re.IGNORECASE
+    )
+    area_match = re.search(
+        r"\bDIEAREA\s*\(\s*(-?\d+)\s+(-?\d+)\s*\)\s*"
+        r"\(\s*(-?\d+)\s+(-?\d+)\s*\)\s*;",
+        text,
+        re.IGNORECASE,
+    )
+    if not units_match or not area_match:
+        return None
+    dbu_per_micron = int(units_match.group(1))
+    if dbu_per_micron <= 0:
+        return None
+    x0, y0, x1, y1 = map(int, area_match.groups())
+    width = abs(x1 - x0) / dbu_per_micron
+    height = abs(y1 - y0) / dbu_per_micron
+    return width * height if width > 0 and height > 0 else None
+
+
 # ---------------------------------------------------------------------------
 # DRC report parsing + signed-off hard-macro interior exclusion
 # ---------------------------------------------------------------------------

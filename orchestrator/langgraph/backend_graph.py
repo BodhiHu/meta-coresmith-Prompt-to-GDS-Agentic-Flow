@@ -2758,6 +2758,22 @@ async def advance_block_node(state: BackendState) -> dict:
     if all_pass:
         floorplan = state.get("floorplan_result") or {}
         route = state.get("route_result") or {}
+        place = state.get("place_result") or {}
+        from orchestrator.langgraph.backend_helpers import die_area_um2_from_def
+        die_area = die_area_um2_from_def(state.get("routed_def_path", ""))
+        design_area = timing.get("design_area_um2")
+        if not isinstance(design_area, (int, float)) or design_area <= 0:
+            design_area = place.get("design_area_um2")
+        if not isinstance(design_area, (int, float)) or design_area <= 0:
+            design_area = None
+        utilization = timing.get("utilization_pct")
+        if not isinstance(utilization, (int, float)) or utilization <= 0:
+            utilization = floorplan.get("utilization")
+        if not isinstance(utilization, (int, float)) or utilization <= 0:
+            utilization = None
+        if die_area is None:
+            candidate = floorplan.get("die_area_um2")
+            die_area = candidate if isinstance(candidate, (int, float)) and candidate > 0 else None
         result = {
             "name": block_name,
             "success": True,
@@ -2776,9 +2792,9 @@ async def advance_block_node(state: BackendState) -> dict:
                 "extraction_complete", False
             ),
             "timing_analysis_scope": timing.get("analysis_scope", ""),
-            "design_area_um2": (state.get("place_result") or {}).get("design_area_um2", 0),
-            "die_area_um2": floorplan.get("die_area_um2", 0),
-            "utilization_pct": floorplan.get("utilization", 0),
+            "design_area_um2": design_area,
+            "die_area_um2": die_area,
+            "utilization_pct": utilization,
             "wire_length_um": route.get("wire_length_um", 0),
             "via_count": route.get("via_count", 0),
             "drc_clean": drc_clean,
@@ -2925,21 +2941,34 @@ async def backend_complete_node(state: BackendState) -> dict:
                 "timing_analysis_scope": blk.get("timing_analysis_scope", ""),
                 "gds_path": blk.get("gds_path", ""),
                 "routed_def_path": blk.get("routed_def_path", ""),
+                "design_area_um2": blk.get("design_area_um2"),
+                "die_area_um2": blk.get("die_area_um2"),
+                "utilization_pct": blk.get("utilization_pct"),
             })
             # Read detailed metrics from PnR report files
             name = blk["name"]
             pnr_dir = pr / "syn" / "output" / name / "pnr"
             if pnr_dir.is_dir():
                 from orchestrator.langgraph.backend_helpers import (
+                    die_area_um2_from_def,
                     macro_bboxes_from_def,
                     parse_drc_report,
                     parse_openroad_reports,
                 )
                 pnr_metrics = parse_openroad_reports(str(pnr_dir))
+                def_area = die_area_um2_from_def(blk.get("routed_def_path", ""))
+                def measured(key: str):
+                    value = blk.get(key)
+                    if isinstance(value, (int, float)) and value > 0:
+                        return value
+                    value = pnr_metrics.get(key)
+                    if isinstance(value, (int, float)) and value > 0:
+                        return value
+                    return None
                 entry.update({
-                    "design_area_um2": pnr_metrics.get("design_area_um2", 0),
-                    "die_area_um2": pnr_metrics.get("die_area_um2", 0),
-                    "utilization_pct": pnr_metrics.get("utilization_pct", 0),
+                    "design_area_um2": measured("design_area_um2"),
+                    "die_area_um2": def_area or measured("die_area_um2"),
+                    "utilization_pct": measured("utilization_pct"),
                 })
                 # DRC report -- apply the same signed-off hard-macro interior
                 # exclusion as the gate so the summary verdict is consistent.
