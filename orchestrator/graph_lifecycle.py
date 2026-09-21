@@ -23,6 +23,23 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def _checkpoint_recovery_status(state: Any) -> str | None:
+    """Classify a persisted LangGraph snapshot for process startup.
+
+    Interrupts take priority. A snapshot with scheduled ``next`` nodes is a
+    resumable node-boundary pause, while only a snapshot with values and no
+    interrupt or pending node is terminal.
+    """
+    if not state or not state.values:
+        return None
+    for task in state.tasks or ():
+        if task.interrupts:
+            return "interrupted"
+    if state.next:
+        return "paused"
+    return "done"
+
+
 class GraphLifecycle:
     """Manages the lifecycle of a running LangGraph graph.
 
@@ -178,14 +195,9 @@ class GraphLifecycle:
                 try:
                     config = {"configurable": {"thread_id": self.thread_id}}
                     state = await self.graph.aget_state(config)
-                    if state and state.values:
-                        if state.tasks:
-                            for t in state.tasks:
-                                if t.interrupts:
-                                    self.status = "interrupted"
-                                    break
-                        if self.status == "idle":
-                            self.status = "done"
+                    recovered = _checkpoint_recovery_status(state)
+                    if recovered is not None:
+                        self.status = recovered
                 except Exception:
                     logging.getLogger(__name__).warning(
                         "%s: startup recovery check failed", self.name, exc_info=True,
