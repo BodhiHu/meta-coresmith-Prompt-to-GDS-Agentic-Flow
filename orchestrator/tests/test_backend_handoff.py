@@ -260,6 +260,121 @@ def test_backend_start_defaults_to_stopping_at_the_gate_sim_verdict():
 
 
 @pytest.mark.asyncio
+async def test_backend_http_pause_delegates_to_authoritative_reaping_path(
+    monkeypatch,
+):
+    import json
+
+    from orchestrator.daemon import server as ds
+
+    calls = []
+
+    class _Task:
+        @staticmethod
+        def done():
+            return False
+
+    class _Handle:
+        task = _Task()
+
+    class _Mcp:
+        _backend = _Handle()
+
+        @staticmethod
+        async def pause_backend():
+            calls.append("pause_backend")
+            return json.dumps({"status": "paused", "thread_id": "backend"})
+
+    monkeypatch.setattr(ds, "_backend_handle", lambda: _Mcp)
+
+    result = await ds.backend_pause()
+
+    assert calls == ["pause_backend"]
+    assert result == {
+        "paused": True,
+        "status": "paused",
+        "thread_id": "backend",
+    }
+
+
+@pytest.mark.asyncio
+async def test_backend_http_pause_preserves_idle_response(monkeypatch):
+    from orchestrator.daemon import server as ds
+
+    class _Task:
+        @staticmethod
+        def done():
+            return True
+
+    class _Mcp:
+        class _Handle:
+            task = _Task()
+
+        _backend = _Handle()
+
+        @staticmethod
+        async def pause_backend():
+            raise AssertionError("idle HTTP pause must not invoke MCP pause")
+
+    monkeypatch.setattr(ds, "_backend_handle", lambda: _Mcp)
+
+    assert await ds.backend_pause() == {
+        "paused": False,
+        "reason": "no running task",
+    }
+
+
+@pytest.mark.asyncio
+async def test_authoritative_backend_pause_reaps_before_task_cancel(
+    monkeypatch,
+):
+    import asyncio
+    import json
+
+    from orchestrator import mcp_server as mcp
+    from orchestrator.langchain.agents import coresmith_llm
+
+    order = []
+
+    async def running_worker():
+        try:
+            await asyncio.Event().wait()
+        finally:
+            order.append("cancelled")
+
+    task = asyncio.create_task(running_worker())
+    await asyncio.sleep(0)
+
+    class _Snapshot:
+        values = {}
+
+    class _Graph:
+        @staticmethod
+        async def aget_state(_config):
+            return _Snapshot()
+
+    async def ensure_graph():
+        return None
+
+    monkeypatch.setattr(mcp._backend, "status", "running")
+    monkeypatch.setattr(mcp._backend, "task", task)
+    monkeypatch.setattr(mcp._backend, "graph", _Graph())
+    monkeypatch.setattr(mcp._backend, "ensure_graph", ensure_graph)
+    monkeypatch.setattr(
+        coresmith_llm,
+        "kill_active_cli_processes",
+        lambda: order.append("reaped"),
+    )
+
+    result = json.loads(await mcp.pause_backend())
+
+    assert result["status"] == "paused"
+    assert mcp._backend.status == "paused"
+    assert task.cancelled()
+    assert order == ["reaped", "cancelled"]
+
+
+@pytest.mark.asyncio
 async def test_frontend_is_done_is_conservative(monkeypatch):
     """All four conditions must hold. A parked interrupt is NOT 'done' even with
     pipeline_done set -- the run is waiting on a decision that could still change
