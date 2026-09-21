@@ -13,7 +13,6 @@ from orchestrator.langgraph.backend_helpers import (
 from orchestrator.pdk.base import Deployment
 from orchestrator.pdk.pdk_config import CellConfig, PDKConfig
 
-
 HILOMAP = (
     "hilomap -hicell sky130_fd_sc_hd__conb_1 HI "
     "-locell sky130_fd_sc_hd__conb_1 LO"
