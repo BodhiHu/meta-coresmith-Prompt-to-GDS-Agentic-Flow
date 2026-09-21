@@ -567,9 +567,15 @@ def _parse_codex_json(stdout: str) -> tuple[str, dict]:
 
 
 def _parse_opencode_json(stdout: str) -> tuple[str, dict]:
-    """Parse OpenCode ``run --format json`` NDJSON events."""
+    """Return the final model step's text and usage summed across all steps.
+
+    Each tool round has its own step_start/step_finish pair and usage. Earlier
+    text is progress commentary, not part of the final structured response.
+    The complete trajectory is preserved separately by _log_opencode_turns.
+    """
     chunks: list[str] = []
     usage: dict = {}
+    step_open = False
     for raw in stdout.splitlines():
         raw = raw.strip()
         if not raw:
@@ -579,13 +585,17 @@ def _parse_opencode_json(stdout: str) -> tuple[str, dict]:
         except _json.JSONDecodeError:
             continue
         ev_type = obj.get("type")
-        if ev_type == "text":
+        if ev_type == "step_start":
+            chunks = []
+            step_open = True
+        elif ev_type == "text":
             part = obj.get("part") or {}
             if part.get("type") == "text":
                 chunks.append(part.get("text", "") or "")
         elif ev_type == "step_finish":
+            step_open = False
             tokens = (obj.get("part") or {}).get("tokens") or {}
-            usage = {
+            step_usage = {
                 "input_tokens": tokens.get("input", 0),
                 "output_tokens": tokens.get("output", 0),
                 "total_tokens": tokens.get("total", 0),
@@ -594,6 +604,18 @@ def _parse_opencode_json(stdout: str) -> tuple[str, dict]:
                 "reasoning_output_tokens": tokens.get("reasoning", 0),
                 "total_cost_usd": (obj.get("part") or {}).get("cost", 0),
             }
+            for key, value in step_usage.items():
+                usage[key] = usage.get(key, 0) + (value or 0)
+            reason = (obj.get("part") or {}).get("reason")
+            if reason:
+                usage["finish_reason"] = reason
+        elif ev_type == "error":
+            error = obj.get("error") or obj.get("message") or "Unknown OpenCode error"
+            if isinstance(error, dict):
+                error = (error.get("data") or {}).get("message") or error.get("message") or str(error)
+            usage["provider_error"] = str(error)[:600]
+    if step_open:
+        usage["finish_reason"] = "incomplete"
     return "".join(chunks), usage
 
 
@@ -797,6 +819,50 @@ _OPENCODE_MODEL_MAP = {
     "haiku-3.5": "openrouter/moonshotai/kimi-k3",
 }
 
+# --- Muse Spark endpoint (Meta Model API) -----------------------------------
+# Meta's Model API serves Muse Spark over an OpenAI-*chat-completions*
+# compatible surface (POST {base}/chat/completions), so OpenCode must load the
+# "@ai-sdk/openai-compatible" adapter for it.
+#
+# WHY A NON-OBVIOUS PROVIDER ID: models.dev (OpenCode's built-in registry)
+# already ships a provider called "meta", pinned to npm "@ai-sdk/openai" -- the
+# *Responses* API. A user provider block keyed "meta" merges INTO that registry
+# entry and inherits its npm, so every call dies inside getModel() with
+# "responses is not a function". Registering under an id the registry does not
+# claim is what makes the adapter choice actually stick. Do not rename this to
+# "meta" without re-verifying against a live key.
+MUSE_SPARK_PROVIDER_ID = "meta-model-api"
+MUSE_SPARK_MODEL_ID = "muse-spark-1.3-contributor"
+MUSE_SPARK_BASE_URL = "https://api.meta.ai/v1"
+MUSE_SPARK_NPM = "@ai-sdk/openai-compatible"
+# Secret is read from the environment at call time and never persisted by
+# CoreSmith. OPENCODE_CONFIG_CONTENT uses OpenCode's "{env:VAR}" indirection so
+# the key itself is not embedded in the config blob we hand to the CLI.
+MUSE_SPARK_API_KEY_ENV = "META_MODEL_API_KEY"
+# 1M-token context per Meta's model card; output cap is the conservative value
+# CoreSmith asks OpenCode to plan against.
+MUSE_SPARK_CONTEXT_LIMIT = 1_000_000
+MUSE_SPARK_OUTPUT_LIMIT = 65_536
+
+DEFAULT_MUSE_SPARK_MODEL = f"{MUSE_SPARK_PROVIDER_ID}/{MUSE_SPARK_MODEL_ID}"
+
+# Every CoreSmith tier uses the same default Muse Spark model. Explicit model
+# overrides can select other versions available to the operator's API key.
+_MUSE_SPARK_MODEL_MAP = {
+    tier: DEFAULT_MUSE_SPARK_MODEL for tier in _OPENCODE_MODEL_MAP
+}
+
+
+def _is_muse_spark_model(resolved_model: str) -> bool:
+    """Whether a resolved OpenCode slug points at Muse Spark on the Model API.
+
+    Matches on the model id rather than the provider prefix so an operator who
+    routes Muse Spark through their own gateway (a different provider id, or
+    OpenRouter's ``openrouter/meta/muse-spark-1.1``) still gets the
+    model-specific handling.
+    """
+    return (resolved_model or "").lower().rsplit("/", 1)[-1].startswith("muse-spark-")
+
 
 # Default model used by every agent unless overridden. Set the CORESMITH_MODEL
 # environment variable (to either a short name above or a full Claude CLI
@@ -812,6 +878,118 @@ DEFAULT_OPENCODE_MODEL = "openrouter/moonshotai/kimi-k3"
 # fix, tb fix).  Integration and review agents still call DEFAULT_MODEL.
 # Override with CORESMITH_BLOCK_MODEL env var.
 BLOCK_MODEL = "sonnet-5"
+
+# --- OpenCode endpoint selection --------------------------------------------
+# An "endpoint" bundles the model map, the default model and (where the target
+# is not something OpenCode can reach out of the box) the provider registration
+# CoreSmith injects for it.
+#
+# "openrouter" is the pre-existing hosted-Kimi route and remains the DEFAULT, so
+# a run that does not set CORESMITH_OPENCODE_ENDPOINT behaves exactly as before
+# this endpoint was added -- same model, same flags, same provider config.
+OPENCODE_ENDPOINT_OPENROUTER = "openrouter"
+OPENCODE_ENDPOINT_MUSE_SPARK = "muse-spark"
+
+_OPENCODE_ENDPOINT_ALIASES = {
+    "": OPENCODE_ENDPOINT_OPENROUTER,
+    "default": OPENCODE_ENDPOINT_OPENROUTER,
+    "openrouter": OPENCODE_ENDPOINT_OPENROUTER,
+    "kimi": OPENCODE_ENDPOINT_OPENROUTER,
+    "kimi-k3": OPENCODE_ENDPOINT_OPENROUTER,
+    "muse": OPENCODE_ENDPOINT_MUSE_SPARK,
+    "muse-spark": OPENCODE_ENDPOINT_MUSE_SPARK,
+    "muse_spark": OPENCODE_ENDPOINT_MUSE_SPARK,
+    "musespark": OPENCODE_ENDPOINT_MUSE_SPARK,
+    "meta": OPENCODE_ENDPOINT_MUSE_SPARK,
+    "meta-model-api": OPENCODE_ENDPOINT_MUSE_SPARK,
+}
+
+
+def _opencode_endpoint() -> str:
+    """Resolve ``CORESMITH_OPENCODE_ENDPOINT`` to a canonical endpoint name.
+
+    Unset (or any "openrouter" alias) keeps the historical hosted-Kimi route.
+    An unrecognised value raises rather than silently falling back: picking a
+    different model than the operator asked for is the kind of thing that only
+    surfaces hours later in a token bill.
+    """
+    raw = os.environ.get("CORESMITH_OPENCODE_ENDPOINT", "").strip().lower()
+    try:
+        return _OPENCODE_ENDPOINT_ALIASES[raw]
+    except KeyError:
+        raise ValueError(
+            "Unsupported CORESMITH_OPENCODE_ENDPOINT={!r}. Use one of: {}.".format(
+                raw, ", ".join(sorted(set(_OPENCODE_ENDPOINT_ALIASES.values())))
+            )
+        ) from None
+
+
+def _opencode_endpoint_models(endpoint: str) -> tuple[dict, str]:
+    """Return ``(model_map, default_model)`` for a canonical endpoint name."""
+    if endpoint == OPENCODE_ENDPOINT_MUSE_SPARK:
+        return _MUSE_SPARK_MODEL_MAP, DEFAULT_MUSE_SPARK_MODEL
+    return _OPENCODE_MODEL_MAP, DEFAULT_OPENCODE_MODEL
+
+
+def muse_spark_provider_config(model_id: str = MUSE_SPARK_MODEL_ID) -> dict:
+    """The OpenCode provider block that registers the Meta Model API.
+
+    Returned as a plain dict so callers can merge it into an existing
+    ``OPENCODE_CONFIG_CONTENT`` rather than clobbering operator config. The API
+    key is referenced through OpenCode's ``{env:VAR}`` indirection, so the
+    secret stays in the process environment and never lands in the config blob.
+    """
+    return {
+        "npm": MUSE_SPARK_NPM,
+        "name": "Meta Model API",
+        "api": MUSE_SPARK_BASE_URL,
+        "options": {
+            "baseURL": MUSE_SPARK_BASE_URL,
+            "apiKey": "{env:%s}" % MUSE_SPARK_API_KEY_ENV,
+        },
+        "models": {
+            model_id: {
+                "name": "Muse Spark " + model_id.removeprefix("muse-spark-").replace(
+                    "-contributor", " (Contributor)"
+                ),
+                "limit": {
+                    "context": MUSE_SPARK_CONTEXT_LIMIT,
+                    "output": MUSE_SPARK_OUTPUT_LIMIT,
+                },
+            },
+        },
+    }
+
+
+def _inject_muse_spark_provider(
+    config_content: str, resolved_model: str = DEFAULT_MUSE_SPARK_MODEL,
+) -> str:
+    """Merge the Muse Spark provider block into an OPENCODE_CONFIG_CONTENT blob.
+
+    Operator-supplied keys win: if the blob already registers
+    ``MUSE_SPARK_PROVIDER_ID`` we leave it completely alone, so a site that
+    needs a proxy base URL or a different adapter can override us without
+    editing CoreSmith.
+    """
+    try:
+        config = _json.loads(config_content or "{}") or {}
+    except _json.JSONDecodeError as exc:
+        raise ValueError(
+            "OPENCODE_CONFIG_CONTENT must be valid JSON to use the "
+            "muse-spark endpoint"
+        ) from exc
+    if not isinstance(config, dict):
+        raise ValueError("OPENCODE_CONFIG_CONTENT must contain a JSON object")
+
+    providers = config.setdefault("provider", {})
+    if not isinstance(providers, dict):
+        raise ValueError("OPENCODE_CONFIG_CONTENT 'provider' must be an object")
+    model_id = MUSE_SPARK_MODEL_ID
+    if resolved_model.startswith(MUSE_SPARK_PROVIDER_ID + "/"):
+        model_id = resolved_model.split("/", 1)[1]
+    providers.setdefault(MUSE_SPARK_PROVIDER_ID, muse_spark_provider_config(model_id))
+    return _json.dumps(config)
+
 
 # --- OpenCode reasoning-effort ("--variant") handling ------------------------
 # OpenRouter's hosted Kimi models (kimi-k3 / kimi-k2-thinking) expose reasoning
@@ -858,6 +1036,18 @@ def _normalize_opencode_variant(variant: str, resolved_model: str) -> str:
     """
     v = (variant or "").strip().lower()
     if not v:
+        return ""
+    if _is_muse_spark_model(resolved_model):
+        # CoreSmith's Muse provider does not configure OpenCode variant
+        # mappings. The earlier 1.1 integration accepted arbitrary flags
+        # without applying an effort cap; that experiment does not establish
+        # which reasoning controls newer Meta API models support.
+        logger.warning(
+            "CORESMITH_OPENCODE_VARIANT=%r has no configured mapping for %s "
+            "in CoreSmith's Muse provider. Omitting the flag and using the "
+            "model's default reasoning settings.",
+            variant, resolved_model,
+        )
         return ""
     if "kimi" not in (resolved_model or "").lower():
         return v
@@ -974,15 +1164,18 @@ def _resolve_model(model: str, provider: str = "claude_cli") -> str:
             return DEFAULT_AGY_MODEL
         return _AGY_MODEL_MAP.get(model, model)
     if provider == "opencode_cli":
+        # The endpoint picks which catalogue we resolve against; an explicit
+        # CORESMITH_OPENCODE_MODEL still wins over both.
+        _model_map, _default_model = _opencode_endpoint_models(_opencode_endpoint())
         env_override = (
             os.environ.get("CORESMITH_OPENCODE_MODEL", "").strip()
             or os.environ.get("CORESMITH_MODEL", "").strip()
         )
         if env_override:
-            return _OPENCODE_MODEL_MAP.get(env_override, env_override)
+            return _model_map.get(env_override, env_override)
         if not model:
-            return DEFAULT_OPENCODE_MODEL
-        return _OPENCODE_MODEL_MAP.get(model, model)
+            return _default_model
+        return _model_map.get(model, model)
 
     env_override = os.environ.get("CORESMITH_MODEL", "").strip()
     if env_override:
@@ -2483,6 +2676,23 @@ class ClaudeLLM:
             inline_config["permission"] = "deny"
             process_env["OPENCODE_CONFIG_CONTENT"] = _json.dumps(inline_config)
 
+        # Muse Spark is not reachable out of the box: OpenCode's built-in
+        # registry has no chat-completions provider for the Meta Model API, so
+        # CoreSmith registers one inline rather than making every operator
+        # hand-edit ~/.config/opencode/opencode.json. Merged (not clobbered) on
+        # top of whatever the disable_tools branch above and the operator set.
+        if _is_muse_spark_model(resolved_model):
+            if not process_env.get(MUSE_SPARK_API_KEY_ENV, "").strip():
+                raise RuntimeError(
+                    f"{MUSE_SPARK_API_KEY_ENV} is not set, so OpenCode cannot "
+                    f"authenticate against the Meta Model API "
+                    f"({MUSE_SPARK_BASE_URL}). Export the key before starting "
+                    f"the daemon."
+                )
+            process_env["OPENCODE_CONFIG_CONTENT"] = _inject_muse_spark_provider(
+                process_env.get("OPENCODE_CONFIG_CONTENT", ""), resolved_model
+            )
+
         logger.info(
             "OpenCode invocation: model=%s prompt_len=%d system_len=%d",
             resolved_model,
@@ -2498,6 +2708,9 @@ class ClaudeLLM:
         except ValueError:
             _max_retries = 1
         _attempt = 0
+        _total_usage: dict = {}
+        _call_start_ns = _time_mod.time_ns()
+        _total_elapsed = 0.0
         while True:
             t0 = _time_mod.monotonic()
             span_start_ns = _time_mod.time_ns()
@@ -2532,6 +2745,13 @@ class ClaudeLLM:
                 )
                 return output
 
+            _total_elapsed += elapsed
+            for key, value in usage.items():
+                if isinstance(value, (int, float)):
+                    _total_usage[key] = _total_usage.get(key, 0) + value
+                else:
+                    _total_usage[key] = value
+
             if (
                 _attempt < _max_retries
                 and not timed_out
@@ -2550,9 +2770,13 @@ class ClaudeLLM:
                     "attempt": _attempt,
                     "max_retries": _max_retries,
                     "returncode": returncode,
+                    "duration_s": elapsed,
+                    "usage": usage,
                     "detail": (stderr_text or output or "")[:300],
                 })
-                _time_mod.sleep(min(2 ** _attempt, 8))
+                _backoff = min(2 ** _attempt, 8)
+                _time_mod.sleep(_backoff)
+                _total_elapsed += _backoff
                 continue
             break
 
@@ -2568,24 +2792,37 @@ class ClaudeLLM:
                 f"{stderr_text[:500] or output[:500]}"
             )
             output = f"[ClaudeLLM error: {error_msg}]"
+        elif usage.get("provider_error"):
+            error_msg = f"OpenCode provider error: {usage['provider_error']}"
+            output = f"[ClaudeLLM error: {error_msg}]"
+        elif usage.get("finish_reason") not in (None, "stop"):
+            error_msg = f"OpenCode did not finish normally: {usage['finish_reason']}"
+            output = f"[ClaudeLLM error: {error_msg}]"
         elif not output:
             error_msg = f"OpenCode CLI returned empty response: {stderr_text[:500]}"
             output = f"[ClaudeLLM error: {error_msg}]"
         else:
             error_msg = ""
 
+        # Preserve terminal metadata from the last attempt; sum numeric usage
+        # across every attempt, including provider failures before a retry.
+        for key in ("finish_reason", "provider_error"):
+            _total_usage.pop(key, None)
+            if key in usage:
+                _total_usage[key] = usage[key]
+        _total_usage["opencode_attempts"] = _attempt + 1
         _log_llm_call(
             model=resolved_model,
             provider="opencode_cli",
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             response=output,
-            duration_s=elapsed,
+            duration_s=_total_elapsed,
             timeout=self.timeout,
             error=error_msg,
             timed_out=timed_out or stalled,
-            usage=usage,
-            start_ts_ns=span_start_ns,
+            usage=_total_usage,
+            start_ts_ns=_call_start_ns,
         )
         return output
 

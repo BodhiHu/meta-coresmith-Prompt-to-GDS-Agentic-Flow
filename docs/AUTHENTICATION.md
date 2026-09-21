@@ -1,8 +1,17 @@
 # Authentication
 
-coresmith supports Claude Code (default), Codex CLI, OpenCode with OpenRouter's
-hosted Kimi K3, and the Kimi Code CLI. Select OpenCode with
-`CORESMITH_LLM_PROVIDER=opencode`, or Kimi Code with `CORESMITH_LLM_PROVIDER=kimi`.
+coresmith supports Claude Code (default), Codex CLI, OpenCode (with OpenRouter's
+hosted Kimi K3 or Meta's Muse Spark 1.3 Contributor), and the Kimi Code CLI. Select OpenCode
+with `CORESMITH_LLM_PROVIDER=opencode`, or Kimi Code with
+`CORESMITH_LLM_PROVIDER=kimi`.
+
+Under `CORESMITH_LLM_PROVIDER=opencode`, `CORESMITH_OPENCODE_ENDPOINT` picks
+which backend OpenCode talks to:
+
+| `CORESMITH_OPENCODE_ENDPOINT` | Route | Credential |
+|---|---|---|
+| unset / `openrouter` (default) | `openrouter/moonshotai/kimi-k3` | `OPENROUTER_API_KEY` |
+| `muse-spark` | `meta-model-api/muse-spark-1.3-contributor` | `META_MODEL_API_KEY` |
 
 ## OpenCode + OpenRouter (Kimi K3)
 
@@ -39,6 +48,54 @@ consumes the NDJSON event stream. Every valid event—including model-exposed
 and usage remain in `.coresmith/llm_calls.jsonl`. The trajectory file can contain
 sensitive prompt, reasoning, and tool content, so protect it like other run
 artifacts. CoreSmith uses `permission: "deny"` when tools are disabled.
+
+## OpenCode + Meta Model API (Muse Spark)
+
+[Muse Spark](https://dev.meta.ai/docs/overview)
+is served from Meta's Model API at `https://api.meta.ai/v1` over an
+OpenAI-*chat-completions*-compatible surface. Get a key from the Meta Model API
+console, then:
+
+```bash
+npm install -g opencode-ai
+export CORESMITH_LLM_PROVIDER=opencode
+export CORESMITH_OPENCODE_ENDPOINT=muse-spark
+export META_MODEL_API_KEY=LLM_...
+```
+
+That is the whole setup — **no `opencode auth login` and no hand-edited
+`~/.config/opencode/opencode.json`.** OpenCode's built-in registry has no
+chat-completions provider for this endpoint, so CoreSmith registers one inline
+through `OPENCODE_CONFIG_CONTENT` on every call, merging (never clobbering) any
+provider block you already set. The key is referenced as `{env:META_MODEL_API_KEY}`
+and is read from the process environment, so the secret never enters the config
+blob CoreSmith hands to the CLI. If `META_MODEL_API_KEY` is unset the call fails
+fast with a clear error instead of falling back to another model.
+
+Verify the route:
+
+```bash
+curl -s https://api.meta.ai/v1/models -H "Authorization: Bearer $META_MODEL_API_KEY"
+# Confirm that muse-spark-1.3-contributor is available to your key.
+```
+
+Two behaviours worth knowing:
+
+- **The provider id is `meta-model-api`, not `meta`.** OpenCode's model registry
+  already ships a `meta` provider pinned to the `@ai-sdk/openai` adapter — the
+  *Responses* API. A provider block keyed `meta` merges into that entry, inherits
+  its adapter, and every call dies with `responses is not a function`. CoreSmith
+  registers under an id the registry does not claim so the
+  `@ai-sdk/openai-compatible` adapter actually takes effect. Do not rename it
+  without re-verifying against a live key.
+- **The default model is `muse-spark-1.3-contributor` for every CoreSmith tier.**
+  Set `CORESMITH_OPENCODE_MODEL=meta-model-api/muse-spark-1.3` (or another
+  available Muse Spark version) to override it. CoreSmith registers the selected
+  model with OpenCode, including an explicit legacy `muse-spark-1.1` override.
+- **CoreSmith omits `CORESMITH_OPENCODE_VARIANT` for Muse Spark.** This provider
+  configuration has no OpenCode variant mappings, so calls use the model's
+  default reasoning settings. This does not imply that newer Meta API models
+  lack reasoning controls.
 
 ## Kimi Code
 

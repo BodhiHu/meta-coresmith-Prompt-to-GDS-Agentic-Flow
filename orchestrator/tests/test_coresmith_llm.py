@@ -28,6 +28,7 @@ from orchestrator.langchain.agents.coresmith_llm import (
     _CLI_MODEL_MAP,
     _CODEX_MODEL_MAP,
     _KIMI_MODEL_MAP,
+    _MUSE_SPARK_MODEL_MAP,
     _OPENCODE_LOW_REASONING_STEPS,
     _OPENCODE_MODEL_MAP,
     _RESUME_FLAGS_CACHE,
@@ -35,19 +36,28 @@ from orchestrator.langchain.agents.coresmith_llm import (
     DEFAULT_CODEX_MODEL,
     DEFAULT_KIMI_MODEL,
     DEFAULT_MODEL,
+    DEFAULT_MUSE_SPARK_MODEL,
     DEFAULT_OPENCODE_MODEL,
+    MUSE_SPARK_API_KEY_ENV,
+    MUSE_SPARK_BASE_URL,
+    MUSE_SPARK_MODEL_ID,
+    MUSE_SPARK_NPM,
+    MUSE_SPARK_PROVIDER_ID,
     ClaudeLLM,
     _active_processes,
     _active_processes_lock,
     _call_site_context,
     _codex_resume_supported_flags,
     _detect_provider,
+    _inject_muse_spark_provider,
+    _is_muse_spark_model,
     _is_transient_opencode_failure,
     _llm_breakers,
     _llm_breakers_lock,
     _log_llm_call,
     _log_opencode_turns,
     _normalize_opencode_variant,
+    _opencode_endpoint,
     _parse_codex_json,
     _parse_kimi_acp_json,
     _parse_opencode_json,
@@ -73,6 +83,8 @@ def _clear_provider_env(monkeypatch):
     monkeypatch.delenv("CORESMITH_OPENCODE_MODEL", raising=False)
     monkeypatch.delenv("CORESMITH_OPENCODE_VARIANT", raising=False)
     monkeypatch.delenv("CORESMITH_OPENCODE_MAX_RETRIES", raising=False)
+    monkeypatch.delenv("CORESMITH_OPENCODE_ENDPOINT", raising=False)
+    monkeypatch.delenv("META_MODEL_API_KEY", raising=False)
     monkeypatch.delenv("OPENCODE_CONFIG_CONTENT", raising=False)
     monkeypatch.delenv("CORESMITH_KIMI_MODEL", raising=False)
     monkeypatch.delenv("KIMI_MODEL_NAME", raising=False)
@@ -207,6 +219,59 @@ class TestProviderDetection:
 
 
 class TestOpenCodeJsonParsing:
+    def test_tool_rounds_sum_usage_and_return_only_final_answer(self):
+        events = [
+            {"type": "step_start"},
+            {"type": "text", "part": {"type": "text", "text": "Checking files."}},
+            {"type": "tool_use", "part": {"tool": "read"}},
+            {"type": "step_finish", "part": {
+                "reason": "tool-calls", "cost": 0.25,
+                "tokens": {"input": 100, "output": 20, "reasoning": 5,
+                           "total": 165, "cache": {"read": 30, "write": 10}},
+            }},
+            {"type": "step_start"},
+            {"type": "text", "part": {"type": "text", "text": '{"ok":'}},
+            {"type": "text", "part": {"type": "text", "text": 'true}'}},
+            {"type": "step_finish", "part": {
+                "reason": "stop", "cost": 0.5,
+                "tokens": {"input": 10, "output": 4, "reasoning": 2,
+                           "total": 106, "cache": {"read": 90, "write": 0}},
+            }},
+        ]
+        text, usage = _parse_opencode_json("\n".join(map(json.dumps, events)))
+        assert json.loads(text) == {"ok": True}
+        assert usage == {
+            "input_tokens": 110, "output_tokens": 24, "total_tokens": 271,
+            "cache_read_input_tokens": 120, "cache_creation_input_tokens": 10,
+            "reasoning_output_tokens": 7, "total_cost_usd": 0.75,
+            "finish_reason": "stop",
+        }
+
+    def test_incomplete_final_step_does_not_return_earlier_commentary(self):
+        events = [
+            {"type": "step_start"},
+            {"type": "text", "part": {"type": "text", "text": "I will check."}},
+            {"type": "step_finish", "part": {"tokens": {"input": 10}}},
+            {"type": "step_start"},
+        ]
+        text, usage = _parse_opencode_json("\n".join(map(json.dumps, events)))
+        assert text == ""
+        assert usage["input_tokens"] == 10
+        assert usage["finish_reason"] == "incomplete"
+
+    @pytest.mark.parametrize("reason", ["length", "tool-calls", "content-filter"])
+    def test_preserves_unsuccessful_terminal_reason(self, reason):
+        _, usage = _parse_opencode_json(json.dumps({
+            "type": "step_finish", "part": {"reason": reason},
+        }))
+        assert usage["finish_reason"] == reason
+
+    def test_preserves_error_events_even_after_text(self):
+        _, usage = _parse_opencode_json(json.dumps({
+            "type": "error", "error": {"name": "APIError", "data": {"message": "quota"}},
+        }))
+        assert usage["provider_error"] == "quota"
+
     def test_parse_text_and_usage(self):
         stdout = (
             '{"type":"step_start","part":{"type":"step-start"}}\n'
@@ -416,13 +481,44 @@ class TestOpenCodeVariantInvocation:
         monkeypatch.setattr(coresmith_llm._time_mod, "sleep", lambda *_a, **_k: None)
         model = ClaudeLLM(model="opus-4.8", timeout=10)
         transient = ("[502 provider_unavailable]", "Network connection lost", 1,
-                     1.0, False, False, {})
-        ok = ("ready", "", 0, 1.0, False, False, {})
+                     1.0, False, False,
+                     {"input_tokens": 100, "output_tokens": 30,
+                      "total_cost_usd": 0.25, "finish_reason": "error"})
+        ok = ("ready", "", 0, 1.0, False, False,
+              {"input_tokens": 200, "output_tokens": 40,
+               "total_cost_usd": 0.5, "finish_reason": "stop"})
         with patch.object(model, "_run_cli_with_watchdog",
                           side_effect=[transient, ok]) as watchdog:
             output = model._generate_via_cli("system", "hello")
         assert output == "ready"
         assert watchdog.call_count == 2
+        record = json.loads((tmp_path / ".coresmith/llm_calls.jsonl").read_text())
+        assert record["usage"] == {
+            "input_tokens": 300, "output_tokens": 70, "total_cost_usd": 0.75,
+            "finish_reason": "stop", "opencode_attempts": 2,
+        }
+        assert record["duration_s"] == 4.0  # two attempts + two-second backoff
+
+    @pytest.mark.parametrize("usage", [
+        {"finish_reason": "length"}, {"finish_reason": "tool-calls"},
+        {"finish_reason": "incomplete"}, {"provider_error": "quota"},
+    ])
+    @patch(
+        "orchestrator.langchain.agents.coresmith_llm._find_opencode_binary",
+        return_value="/usr/bin/opencode",
+    )
+    def test_rejects_unsuccessful_stream_with_zero_exit_and_valid_text(
+        self, _mock_find, monkeypatch, tmp_path, usage,
+    ):
+        monkeypatch.setenv("CORESMITH_LLM_PROVIDER", "openrouter")
+        monkeypatch.setenv("CORESMITH_PROJECT_ROOT", str(tmp_path))
+        model = ClaudeLLM(model="opus-5", timeout=10)
+        with patch.object(model, "_run_cli_with_watchdog") as watchdog:
+            watchdog.return_value = ('{"ok":true}', "", 0, 1.0, False, False, usage)
+            output = model._generate_via_cli("system", "hello")
+        assert output.startswith("[ClaudeLLM error:")
+        record = json.loads((tmp_path / ".coresmith/llm_calls.jsonl").read_text())
+        assert record["error"]
 
     @patch(
         "orchestrator.langchain.agents.coresmith_llm._find_opencode_binary",
@@ -1308,3 +1404,225 @@ class TestFailedCallLogging:
         assert "provider boom" in rec["error"]
         assert rec["response"] == ""
         assert rec["run_name"] == "rn"
+
+
+class TestOpenCodeEndpointSelection:
+    """CORESMITH_OPENCODE_ENDPOINT picks which catalogue OpenCode resolves against.
+
+    Both branches are covered per the repo convention: unset must reproduce the
+    historical OpenRouter/Kimi behaviour byte for byte, set must switch.
+    """
+
+    def test_defaults_to_openrouter_when_unset(self, monkeypatch):
+        monkeypatch.delenv("CORESMITH_OPENCODE_ENDPOINT", raising=False)
+        assert _opencode_endpoint() == "openrouter"
+
+    def test_openrouter_endpoint_leaves_model_resolution_unchanged(self, monkeypatch):
+        """Regression guard: adding Muse Spark must not move the default route."""
+        monkeypatch.delenv("CORESMITH_OPENCODE_ENDPOINT", raising=False)
+        assert _resolve_model(DEFAULT_MODEL, "opencode_cli") == DEFAULT_OPENCODE_MODEL
+        assert _resolve_model(BLOCK_MODEL, "opencode_cli") == DEFAULT_OPENCODE_MODEL
+        assert set(_OPENCODE_MODEL_MAP.values()) == {"openrouter/moonshotai/kimi-k3"}
+
+    @pytest.mark.parametrize(
+        "alias", ["muse", "muse-spark", "muse_spark", "musespark", "meta",
+                  "meta-model-api", "MUSE-SPARK", "  Muse-Spark  "],
+    )
+    def test_muse_spark_aliases(self, monkeypatch, alias):
+        monkeypatch.setenv("CORESMITH_OPENCODE_ENDPOINT", alias)
+        assert _opencode_endpoint() == "muse-spark"
+
+    @pytest.mark.parametrize("alias", ["openrouter", "kimi", "kimi-k3", "default", ""])
+    def test_openrouter_aliases(self, monkeypatch, alias):
+        monkeypatch.setenv("CORESMITH_OPENCODE_ENDPOINT", alias)
+        assert _opencode_endpoint() == "openrouter"
+
+    def test_unknown_endpoint_raises(self, monkeypatch):
+        monkeypatch.setenv("CORESMITH_OPENCODE_ENDPOINT", "gpt-9")
+        with pytest.raises(ValueError, match="Unsupported CORESMITH_OPENCODE_ENDPOINT"):
+            _opencode_endpoint()
+
+    def test_muse_spark_endpoint_maps_every_tier(self, monkeypatch):
+        monkeypatch.setenv("CORESMITH_OPENCODE_ENDPOINT", "muse-spark")
+        expected = "meta-model-api/muse-spark-1.3-contributor"
+        assert DEFAULT_MUSE_SPARK_MODEL == expected
+        assert set(_MUSE_SPARK_MODEL_MAP.values()) == {expected}
+        # Every tier the OpenRouter route knows is also routable on Muse Spark:
+        # all tiers use the selected default version.
+        assert set(_MUSE_SPARK_MODEL_MAP) == set(_OPENCODE_MODEL_MAP)
+        assert _resolve_model(DEFAULT_MODEL, "opencode_cli") == expected
+        assert _resolve_model(BLOCK_MODEL, "opencode_cli") == expected
+
+    def test_explicit_opencode_model_still_wins_on_muse_endpoint(self, monkeypatch):
+        monkeypatch.setenv("CORESMITH_OPENCODE_ENDPOINT", "muse-spark")
+        monkeypatch.setenv("CORESMITH_OPENCODE_MODEL", "openrouter/meta/muse-spark-1.1")
+        assert (
+            _resolve_model("opus-5", "opencode_cli") == "openrouter/meta/muse-spark-1.1"
+        )
+
+
+class TestMuseSparkModelDetection:
+    @pytest.mark.parametrize(
+        "slug",
+        [
+            "meta-model-api/muse-spark-1.3-contributor",
+            "META-MODEL-API/MUSE-SPARK-1.3-CONTRIBUTOR",
+            "meta-model-api/muse-spark-1.3",
+            "meta-model-api/muse-spark-1.2-contributor",
+            "meta-model-api/muse-spark-1.1",
+            "openrouter/meta/muse-spark-1.1",
+            "META-MODEL-API/MUSE-SPARK-1.1",
+        ],
+    )
+    def test_detects_muse_spark_regardless_of_provider_prefix(self, slug):
+        assert _is_muse_spark_model(slug) is True
+
+    @pytest.mark.parametrize(
+        "slug", ["openrouter/moonshotai/kimi-k3", "kimi-code/k3", "", None],
+    )
+    def test_rejects_non_muse_models(self, slug):
+        assert _is_muse_spark_model(slug) is False
+
+
+class TestMuseSparkVariantHandling:
+    """Do not advertise an effort cap without a configured variant mapping."""
+
+    @pytest.mark.parametrize("variant", ["low", "high", "max", "minimal", "bogusvalue"])
+    def test_variant_is_dropped_for_muse_spark(self, variant):
+        assert _normalize_opencode_variant(variant, DEFAULT_MUSE_SPARK_MODEL) == ""
+
+    def test_kimi_variant_handling_is_untouched(self):
+        # The pre-existing Kimi normalisation must keep working unchanged.
+        assert _normalize_opencode_variant(
+            "minimal", "openrouter/moonshotai/kimi-k3"
+        ) == "low"
+        assert _normalize_opencode_variant(
+            "high", "openrouter/moonshotai/kimi-k3"
+        ) == "high"
+
+
+class TestMuseSparkProviderInjection:
+    def test_registers_chat_completions_adapter_and_base_url(self):
+        cfg = json.loads(_inject_muse_spark_provider(""))
+        provider = cfg["provider"][MUSE_SPARK_PROVIDER_ID]
+        # @ai-sdk/openai-compatible == /v1/chat/completions. The built-in
+        # models.dev "meta" provider pins @ai-sdk/openai (Responses API), which
+        # fails against this endpoint -- hence the distinct provider id.
+        assert provider["npm"] == MUSE_SPARK_NPM == "@ai-sdk/openai-compatible"
+        assert MUSE_SPARK_PROVIDER_ID != "meta"
+        assert provider["options"]["baseURL"] == MUSE_SPARK_BASE_URL
+        assert provider["api"] == "https://api.meta.ai/v1"
+        assert MUSE_SPARK_MODEL_ID in provider["models"]
+        assert provider["models"][MUSE_SPARK_MODEL_ID]["name"] == (
+            "Muse Spark 1.3 (Contributor)"
+        )
+
+    @pytest.mark.parametrize("model_id", ["muse-spark-1.1", "muse-spark-1.3"])
+    def test_registers_explicit_meta_model_override(self, model_id):
+        cfg = json.loads(_inject_muse_spark_provider(
+            "", f"{MUSE_SPARK_PROVIDER_ID}/{model_id}",
+        ))
+        assert model_id in cfg["provider"][MUSE_SPARK_PROVIDER_ID]["models"]
+
+    def test_api_key_is_referenced_by_env_not_inlined(self, monkeypatch):
+        monkeypatch.setenv(MUSE_SPARK_API_KEY_ENV, "LLM_secret_value")
+        blob = _inject_muse_spark_provider("")
+        assert "{env:META_MODEL_API_KEY}" in blob
+        assert "LLM_secret_value" not in blob
+
+    def test_merges_into_existing_config_without_clobbering(self):
+        existing = json.dumps({"permission": "deny", "provider": {"openrouter": {}}})
+        cfg = json.loads(_inject_muse_spark_provider(existing))
+        assert cfg["permission"] == "deny"
+        assert "openrouter" in cfg["provider"]
+        assert MUSE_SPARK_PROVIDER_ID in cfg["provider"]
+
+    def test_operator_provider_block_wins(self):
+        existing = json.dumps(
+            {"provider": {MUSE_SPARK_PROVIDER_ID: {"npm": "@acme/custom"}}}
+        )
+        cfg = json.loads(_inject_muse_spark_provider(existing))
+        assert cfg["provider"][MUSE_SPARK_PROVIDER_ID] == {"npm": "@acme/custom"}
+
+    def test_invalid_json_raises(self):
+        with pytest.raises(ValueError, match="must be valid JSON"):
+            _inject_muse_spark_provider("{not json")
+
+    def test_non_object_raises(self):
+        with pytest.raises(ValueError, match="must contain a JSON object"):
+            _inject_muse_spark_provider("[1, 2, 3]")
+
+
+class TestMuseSparkInvocation:
+    @patch(
+        "orchestrator.langchain.agents.coresmith_llm._find_opencode_binary",
+        return_value="/usr/bin/opencode",
+    )
+    def test_muse_endpoint_sets_model_config_and_omits_variant(
+        self, _mock_find, monkeypatch, tmp_path,
+    ):
+        monkeypatch.setenv("CORESMITH_LLM_PROVIDER", "opencode")
+        monkeypatch.setenv("CORESMITH_OPENCODE_ENDPOINT", "muse-spark")
+        monkeypatch.setenv("META_MODEL_API_KEY", "LLM_test_key")
+        # Even an explicit variant must not reach the CLI for this model.
+        monkeypatch.setenv("CORESMITH_OPENCODE_VARIANT", "max")
+        monkeypatch.setenv("CORESMITH_PROJECT_ROOT", str(tmp_path))
+
+        model = ClaudeLLM(model="opus-5", timeout=10)
+        with patch.object(model, "_run_cli_with_watchdog") as watchdog:
+            watchdog.return_value = ("ready", "", 0, 1.0, False, False, {})
+            model._generate_via_cli("system", "hello")
+
+        cmd = watchdog.call_args.args[0]
+        assert cmd[cmd.index("--model") + 1] == (
+            "meta-model-api/muse-spark-1.3-contributor"
+        )
+        assert "--variant" not in cmd
+
+        env = watchdog.call_args.kwargs["process_env"]
+        cfg = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+        provider = cfg["provider"][MUSE_SPARK_PROVIDER_ID]
+        assert provider["npm"] == "@ai-sdk/openai-compatible"
+        assert provider["options"]["baseURL"] == "https://api.meta.ai/v1"
+        # The secret is passed through the environment, never the config blob.
+        assert "LLM_test_key" not in env["OPENCODE_CONFIG_CONTENT"]
+        assert env["META_MODEL_API_KEY"] == "LLM_test_key"
+
+    @patch(
+        "orchestrator.langchain.agents.coresmith_llm._find_opencode_binary",
+        return_value="/usr/bin/opencode",
+    )
+    def test_missing_api_key_fails_fast(self, _mock_find, monkeypatch, tmp_path):
+        monkeypatch.setenv("CORESMITH_LLM_PROVIDER", "opencode")
+        monkeypatch.setenv("CORESMITH_OPENCODE_ENDPOINT", "muse-spark")
+        monkeypatch.delenv("META_MODEL_API_KEY", raising=False)
+        monkeypatch.setenv("CORESMITH_PROJECT_ROOT", str(tmp_path))
+
+        model = ClaudeLLM(model="opus-5", timeout=10)
+        with patch.object(model, "_run_cli_with_watchdog") as watchdog:
+            with pytest.raises(RuntimeError, match="META_MODEL_API_KEY is not set"):
+                model._generate_via_cli("system", "hello")
+        watchdog.assert_not_called()
+
+    @patch(
+        "orchestrator.langchain.agents.coresmith_llm._find_opencode_binary",
+        return_value="/usr/bin/opencode",
+    )
+    def test_openrouter_endpoint_does_not_register_meta_provider(
+        self, _mock_find, monkeypatch, tmp_path,
+    ):
+        """Default route must not gain a Meta provider block or need its key."""
+        monkeypatch.setenv("CORESMITH_LLM_PROVIDER", "opencode")
+        monkeypatch.delenv("CORESMITH_OPENCODE_ENDPOINT", raising=False)
+        monkeypatch.delenv("META_MODEL_API_KEY", raising=False)
+        monkeypatch.setenv("CORESMITH_PROJECT_ROOT", str(tmp_path))
+
+        model = ClaudeLLM(model="opus-5", timeout=10)
+        with patch.object(model, "_run_cli_with_watchdog") as watchdog:
+            watchdog.return_value = ("ready", "", 0, 1.0, False, False, {})
+            model._generate_via_cli("system", "hello")
+
+        cmd = watchdog.call_args.args[0]
+        assert cmd[cmd.index("--model") + 1] == "openrouter/moonshotai/kimi-k3"
+        env = watchdog.call_args.kwargs["process_env"]
+        assert MUSE_SPARK_PROVIDER_ID not in env.get("OPENCODE_CONFIG_CONTENT", "")
