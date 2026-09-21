@@ -34,6 +34,7 @@ async def diagnose_tapeout_failure(
     wrapper_drc_result: dict | None = None,
     wrapper_lvs_result: dict | None = None,
     precheck_result: dict | None = None,
+    timing_result: dict | None = None,
     pnr_params: dict | None = None,
     previous_diagnosis: dict | None = None,
     project_root: str = ".",
@@ -56,6 +57,7 @@ async def diagnose_tapeout_failure(
         drc_context = _format_drc(wrapper_drc_result, root)
         lvs_context = _format_lvs(wrapper_lvs_result, root)
         precheck_context = _format_precheck(precheck_result)
+        timing_context = _format_timing(timing_result)
 
         prompt = SYSTEM_PROMPT.format(
             phase=phase,
@@ -65,6 +67,7 @@ async def diagnose_tapeout_failure(
             drc_context=drc_context,
             lvs_context=lvs_context,
             precheck_context=precheck_context,
+            timing_context=timing_context,
             pnr_params=json.dumps(pnr_params or {}, indent=2),
             previous_diagnosis=(
                 json.dumps(previous_diagnosis, indent=2)
@@ -222,6 +225,21 @@ def _format_precheck(result: dict | None) -> str:
             lines.append(f"  - {e}")
 
     return "\n".join(lines)
+
+
+def _format_timing(result: dict | None) -> str:
+    """Render the sign-off verdict, including non-slack failure evidence."""
+    if not result:
+        return "No extracted timing result available."
+
+    fields = (
+        "met", "sign_off", "source", "reports_complete", "extraction_complete",
+        "setup_slack_ns", "hold_slack_ns", "wns_ns", "tns_ns",
+        "constraint_diagnostic_count", "partial_unannotated_drivers",
+        "unannotated_drivers", "functional_unannotated_drivers",
+        "failure_reasons", "error", "spef_path",
+    )
+    return json.dumps({key: result[key] for key in fields if key in result}, indent=2)
 
 
 # ---------------------------------------------------------------------------

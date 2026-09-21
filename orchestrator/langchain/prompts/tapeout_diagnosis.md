@@ -23,6 +23,9 @@ LVS result:
 Precheck result:
 {precheck_context}
 
+Extracted timing result:
+{timing_context}
+
 PnR parameters (current):
 {pnr_params}
 
@@ -133,6 +136,10 @@ DECISION RULES
 - If attempt >= max_attempts, always escalate.
 - If the failure is benign (LVS_EXPECTED), always continue.
 - If confidence < 0.5, escalate.
+- A timing result with `met: false` is an authoritative failed gate even when
+  WNS/TNS are zero or setup/hold slack is positive. Diagnose its failure
+  reasons, extraction coverage, and constraint diagnostics; never return
+  `continue` for that failed gate.
 
 ─────────────────────────────────────────────────────────────────────
 OUTPUT FORMAT

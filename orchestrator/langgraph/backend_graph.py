@@ -2405,7 +2405,31 @@ async def diagnose_node(state: BackendState) -> dict:
         error_log = str(lvs.get("mismatches", lvs.get("errors", error_log)))
     elif phase == "signoff":
         timing = state.get("timing_result") or {}
-        error_log = f"WNS={timing.get('wns_ns', '?')} ns TNS={timing.get('tns_ns', '?')} ns"
+        timing_summary = [
+            f"met={timing.get('met', '?')}",
+            f"sign_off={timing.get('sign_off', '?')}",
+            f"WNS={timing.get('wns_ns', '?')} ns",
+            f"TNS={timing.get('tns_ns', '?')} ns",
+        ]
+        prior_error = str(state.get("previous_error") or "").strip()
+        if prior_error:
+            timing_summary.append("previous_error=" + prior_error)
+        reasons = timing.get("failure_reasons") or []
+        if reasons:
+            timing_summary.append("failure_reasons=" + "; ".join(map(str, reasons)))
+        if timing.get("error"):
+            timing_summary.append("error=" + str(timing["error"]))
+        error_log = " | ".join(timing_summary)
+
+    pnr_params = {}
+    place = state.get("place_result") or {}
+    route = state.get("route_result") or {}
+    utilization = place.get("utilization", route.get("utilization"))
+    density = place.get("density", route.get("density"))
+    if isinstance(utilization, (int, float)):
+        pnr_params["utilization"] = utilization
+    if isinstance(density, (int, float)):
+        pnr_params["density"] = density
 
     with _tracer.start_as_current_span(f"Diagnose Backend [{block_name}]") as span:
         span.set_attribute("block_name", block_name)
@@ -2419,7 +2443,9 @@ async def diagnose_node(state: BackendState) -> dict:
                 error_summary=error_log[:2000],
                 wrapper_drc_result=state.get("drc_result"),
                 wrapper_lvs_result=state.get("lvs_result"),
-                pnr_params={"utilization": 45, "density": 0.6},
+                timing_result=state.get("timing_result"),
+                pnr_params=pnr_params,
+                previous_diagnosis=state.get("debug_result"),
                 project_root=_pr(state),
             )
         except Exception as exc:
@@ -2436,6 +2462,25 @@ async def diagnose_node(state: BackendState) -> dict:
         category = diag.get("category", "BACKEND_FAILURE")
         action = diag.get("action", "escalate")
         confidence = diag.get("confidence", 0.3)
+
+        timing_failed = (
+            phase == "signoff"
+            and (state.get("timing_result") or {}).get("met") is False
+        )
+        if timing_failed and action == "continue":
+            prior_diagnosis = str(diag.get("diagnosis") or "").strip()
+            diag["diagnosis"] = (
+                "Diagnostic contradiction: the authoritative extracted timing "
+                "result has met=false, but the diagnosis requested continue. "
+                + prior_diagnosis
+            ).strip()
+            diag["suggested_fix"] = (
+                str(diag.get("suggested_fix") or "").strip()
+                or "Inspect and correct the recorded timing failure before retrying."
+            )
+            category = "TIMING_DIAGNOSTIC_CONTRADICTION"
+            action = "escalate"
+            confidence = min(confidence, 0.2)
 
         if action == "auto_retry" and diag.get("pnr_overrides"):
             overrides_path = Path(_pr(state)) / ".coresmith" / "pnr_overrides.json"
