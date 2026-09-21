@@ -133,6 +133,42 @@ def test_script_synth_fresh_fallback_is_not_hidden_by_stale_named_netlist(
     assert result.artifacts["netlist"] == out_dir / "foo.v"
 
 
+def test_magic_drc_rejects_blank_on_clean_list_count_before_tool_run(
+        tmp_path, monkeypatch):
+    from orchestrator.langgraph import backend_helpers
+
+    script = tmp_path / "drc.tcl"
+    script.write_text(
+        "# set drc_count [drc listall count total]\n"
+        "set drc_count [drc listall count]\n"
+        "set drc_result [drc listall why]\n"
+    )
+
+    def must_not_run(*args, **kwargs):
+        raise AssertionError("invalid DRC script reached Magic")
+
+    monkeypatch.setattr(backend_helpers, "run_magic", must_not_run)
+    result = sky130.RunDrcMagic(object()).run(ToolRequest(
+        verb="run_drc", design="top", inputs={"script": script},
+        out_dir=tmp_path,
+    ))
+
+    assert result.ok is False
+    assert result.tool_ok is False
+    assert result.checks[0].name == "script"
+    assert "drc listall count total" in result.checks[0].details
+    assert "blank when clean" in result.checks[0].details
+
+
+def test_magic_drc_script_gate_requires_detailed_report(tmp_path):
+    script = tmp_path / "drc.tcl"
+    script.write_text("set drc_count [drc listall count total]\n")
+
+    error = sky130._magic_drc_script_error(script)
+
+    assert "drc listall why" in error
+
+
 def test_helpers_include_extra_sources_and_explicit_limits(tmp_path, monkeypatch):
     top = tmp_path / "top.v"
     leaf = tmp_path / "leaf.v"

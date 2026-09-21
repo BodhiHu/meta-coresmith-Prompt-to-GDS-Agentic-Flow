@@ -11,9 +11,27 @@ def test_magic_drc_notes_use_supported_report_capture():
 
     notes = RunDrcMagic(SimpleNamespace()).prompt_notes()
     assert "set drc_result [drc listall why]" in notes
+    assert "set drc_count [drc listall count total]" in notes
+    assert "drc listall count` returns a per-cell Tcl list" in notes
+    assert "non-integer or negative" in notes
     assert "drc listall why <report>" not in notes
     assert "magic-gds-write" in notes
     assert "written by the deployment" not in notes
+
+
+def test_all_magic_drc_prompts_and_template_require_scalar_total():
+    root = Path(__file__).parents[1]
+    paths = (
+        root / "langchain" / "prompts" / "backend_drc_llm.md",
+        root / "langchain" / "prompts" / "backend_drc_llm.legacy.md",
+        root / "langchain" / "prompts" / "tapeout_wrapper_drc.md",
+        root / "langchain" / "prompts" / "tapeout_wrapper_drc.legacy.md",
+        root / "pdk_templates" / "sky130" / "drc.tcl",
+    )
+    for path in paths:
+        text = path.read_text()
+        assert "drc listall count total" in text, path
+        assert "set drc_count [drc listall count]\n" not in text, path
 
 
 def test_pnr_prompt_keeps_pdn_pin_layer_connected():

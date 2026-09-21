@@ -61,7 +61,11 @@ Macro cell names: `{macro_names}`.
    - Saves DRC report by capturing `set drc_result [drc listall why]`, then
      writing `$drc_result` to `{output_dir}/magic_drc.rpt` with Tcl
      `open`/`puts`/`close` (Magic 8.3 accepts no filename argument)
-   - Counts violations: `set drc_count [drc count total]; puts "DRC_COUNT: $drc_count"`
+   - Counts all hierarchical error tiles with exactly
+     `set drc_count [drc listall count total]`; `drc listall count` without
+     `total` returns a per-cell list and is blank when clean. After preserving
+     the detailed report, reject a non-integer or negative count and exit
+     nonzero. Print `DRC_COUNT: $drc_count` only after that validation.
    - Extracts LVS SPICE from the cell named `{design_name}` (top cell name
      must be `{design_name}` in the `.subckt`/`.ends`). Use a
      CONNECTIVITY-ONLY extraction -- LVS needs devices and nets, never

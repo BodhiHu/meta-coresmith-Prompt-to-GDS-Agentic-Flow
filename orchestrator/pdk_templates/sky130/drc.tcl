@@ -20,14 +20,18 @@ load ${BLOCK_NAME}_flat
 select top cell
 drc catchup
 drc count
-set drc_count [drc listall count]
+set drc_result [drc listall why]
+set drc_count [drc listall count total]
 
 set drc_rpt [open "$OUT_DIR/magic_drc.rpt" w]
 puts $drc_rpt "Design: $BLOCK_NAME"
 puts $drc_rpt "DRC count: $drc_count"
-set drc_result [drc listall why]
 puts $drc_rpt $drc_result
 close $drc_rpt
+if {![string is integer -strict $drc_count] || $drc_count < 0} {
+    puts stderr "ERROR: Magic returned a non-numeric DRC count: <$drc_count>"
+    exit 1
+}
 
 puts "DRC violations: $drc_count"
 puts "DRC report: $OUT_DIR/magic_drc.rpt"

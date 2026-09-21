@@ -204,6 +204,16 @@ class TestGenerateDrcTcl:
         content = Path(tcl).read_text()
         assert "quit -noprompt" in content
 
+    def test_uses_numeric_hierarchical_count_and_rejects_invalid_result(
+            self, tmp_path):
+        tcl = generate_drc_tcl("b", "/fake/r.def", str(tmp_path))
+        content = Path(tcl).read_text()
+        assert "set drc_result [drc listall why]" in content
+        assert "set drc_count [drc listall count total]" in content
+        assert "set drc_count [drc listall count]\n" not in content
+        assert "string is integer -strict $drc_count" in content
+        assert "exit 1" in content
+
 
 class TestGenerateRcxTcl:
     def test_creates_file(self, tmp_path):

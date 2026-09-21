@@ -54,6 +54,11 @@ Macro cell names: `{macro_names}`.
      `{cell_gds}`
    - Black-box each macro cell in `{macro_names}` before extraction
    - Run DRC HIERARCHICALLY and save the report to `{output_dir}/magic_drc.rpt`
+   - Capture details with `set drc_result [drc listall why]` and the numeric
+     hierarchical total with exactly `set drc_count [drc listall count total]`.
+     Do not use `drc listall count` without `total`: it returns a per-cell list
+     and becomes an empty string for a clean design. Preserve the detailed
+     report, then exit nonzero if `$drc_count` is not a nonnegative integer.
    - Extract a CONNECTIVITY-ONLY LVS SPICE from the top cell `{design_name}` to
      `{output_dir}/{design_name}.spice`
    - Write the signoff GDS to `{output_dir}/{design_name}.gds` (temp name, moved

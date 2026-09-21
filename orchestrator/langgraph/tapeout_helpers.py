@@ -1288,14 +1288,18 @@ load {design_name}_flat
 select top cell
 drc catchup
 drc count
-set drc_count [drc listall count]
+set result [drc listall why]
+set drc_count [drc listall count total]
 
 set rpt [open "{out}/precheck_magic_drc.rpt" w]
 puts $rpt "Design: {design_name}"
 puts $rpt "DRC count: $drc_count"
-set result [drc listall why]
 puts $rpt $result
 close $rpt
+if {{![string is integer -strict $drc_count] || $drc_count < 0}} {{
+    puts stderr "ERROR: Magic returned a non-numeric DRC count: <$drc_count>"
+    exit 1
+}}
 
 puts "DRC violations: $drc_count"
 quit -noprompt

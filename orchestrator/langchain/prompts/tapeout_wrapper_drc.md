@@ -53,6 +53,10 @@ CS="${{CORESMITH_CLI:-coresmith}}"
    - Read the tech + cell LEFs and the cell GDS, then the routed DEF
      `{routed_def_path}`
    - Run DRC and save the report to `{output_dir}/magic_drc.rpt`
+   - Capture details with `set drc_result [drc listall why]` and the numeric
+     hierarchical total with exactly `set drc_count [drc listall count total]`.
+     Preserve the report and exit nonzero if the count is not a nonnegative
+     integer; never use blank-on-clean `drc listall count` without `total`.
    - Write the GDS to `{output_dir}/openframe_project_wrapper.gds`
    - Extract the LVS SPICE to `{output_dir}/openframe_project_wrapper.spice`
 

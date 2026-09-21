@@ -227,6 +227,17 @@ class TestRunMagicDrcOnGds:
         assert v["reason"]
         assert "precheck_magic_drc.rpt" in v["report_path"]
 
+    def test_generated_precheck_uses_numeric_hierarchical_count(
+            self, monkeypatch, tmp_path, gds):
+        _fake_run_magic(monkeypatch, success=False, drc_count=-1)
+        th._run_magic_drc_on_gds(gds, str(tmp_path))
+        script = (tmp_path / "precheck_magic_drc.tcl").read_text()
+        assert "set result [drc listall why]" in script
+        assert "set drc_count [drc listall count total]" in script
+        assert "set drc_count [drc listall count]\n" not in script
+        assert "string is integer -strict $drc_count" in script
+        assert "exit 1" in script
+
     def test_tool_ok_but_report_absent_is_still_not_run(self, monkeypatch,
                                                        tmp_path, gds):
         _fake_run_magic(monkeypatch, success=True, drc_count=-1)

@@ -45,7 +45,10 @@ All outputs go in: `{output_dir}/`
    - Loads flat: `load openframe_project_wrapper_flat`
    - Selects top: `select top cell`
    - Runs DRC: `drc catchup` then `drc count`
-   - Gets count: `set drc_count [drc listall count]`
+   - Gets the numeric hierarchical count with exactly
+     `set drc_count [drc listall count total]`; `drc listall count` without
+     `total` returns a per-cell list and is blank when clean. Preserve the
+     detailed report and exit nonzero for a non-integer or negative count.
    - Writes DRC report to file
    - Writes GDS: `gds write {output_dir}/openframe_project_wrapper.gds`
    - Extracts SPICE (hierarchical, from non-flat): `load openframe_project_wrapper; extract all; ext2spice lvs; ext2spice -o {output_dir}/openframe_project_wrapper.spice`

@@ -1205,6 +1205,35 @@ exit
         )
 
 
+def _magic_drc_script_error(script: Path) -> str:
+    """Return an actionable error for an unsafe hierarchical DRC script."""
+    try:
+        text = script.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return f"cannot read Magic DRC script {script}: {exc}"
+    if not re.search(
+        r"^\s*set\s+drc_count\s+"
+        r"\[\s*drc\s+listall\s+count\s+total\s*\]\s*$",
+        text,
+        flags=re.IGNORECASE | re.MULTILINE,
+    ):
+        return (
+            "Magic DRC script must obtain a numeric hierarchical count with "
+            "`set drc_count [drc listall count total]`; `drc listall count` "
+            "returns a per-cell Tcl list and is blank when clean"
+        )
+    if not re.search(
+        r"^\s*set\s+\w+\s+\[\s*drc\s+listall\s+why\s*\]\s*$",
+        text,
+        flags=re.IGNORECASE | re.MULTILINE,
+    ):
+        return (
+            "Magic DRC script must preserve detailed violations from "
+            "`drc listall why`"
+        )
+    return ""
+
+
 class RunDrcMagic(EdaTool):
     verb: ClassVar[str] = "run_drc"
 
@@ -1214,6 +1243,14 @@ class RunDrcMagic(EdaTool):
         out_dir = str(req.out_dir or (PROJECT_ROOT / "pnr" / "output" / req.design))
         script = req.input("script")
         if script is not None:
+            script_error = _magic_drc_script_error(script)
+            if script_error:
+                return ToolResult.from_checks(
+                    tool_ok=False,
+                    checks=[CheckResult("script", "fail", details=script_error)],
+                    verb=self.verb,
+                    design=req.design,
+                )
             res = run_magic(str(script), req.design, "drc",
                             timeout=req.timeout_s or 600)
             success = bool(res.get("success"))
@@ -1269,7 +1306,12 @@ class RunDrcMagic(EdaTool):
             "`drc check; drc catchup`; capture `set drc_result [drc listall "
             "why]`, then write `$drc_result` to the report with Tcl `open`, "
             "`puts`, and `close` (Magic 8.3 does not accept a filename "
-            "argument to `drc listall why`).\n"
+            "argument to `drc listall why`). Get the numeric hierarchical "
+            "error-tile total with exactly `set drc_count [drc listall count "
+            "total]`; `drc listall count` returns a per-cell Tcl list and is "
+            "an empty string on a clean design. Reject a non-integer or "
+            "negative `$drc_count` and exit nonzero after preserving the "
+            "detailed report.\n"
             "- Extract LVS SPICE CONNECTIVITY-ONLY (no parasitics): "
             "`extract do local; extract no capacitance; extract no coupling; "
             "extract no resistance; extract all; ext2spice lvs; "
