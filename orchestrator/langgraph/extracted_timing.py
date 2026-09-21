@@ -60,6 +60,11 @@ _UNANNOTATED_BLOCK_RE = re.compile(
     r"(?=Found\s+\d+\s+partially\s+unannotated\s+drivers?|\Z)",
     re.IGNORECASE | re.DOTALL,
 )
+_DEF_SIMPLE_NAME = r"[A-Za-z_][A-Za-z0-9_.$]*"
+_DEF_HIER_INSTANCE_RE = re.compile(
+    rf"{_DEF_SIMPLE_NAME}(?:/{_DEF_SIMPLE_NAME})*"
+)
+_DEF_PIN_RE = re.compile(_DEF_SIMPLE_NAME)
 
 _REPORT_NAMES = (
     "setup.rpt",
@@ -248,11 +253,14 @@ def _unannotated_driver_evidence(
             functional_or_unknown.append(name)
             continue
         instance, pin = name.rsplit("/", 1)
-        # DEF escaping and hierarchical instance names need a real DEF parser;
-        # do not infer disconnection from a regex normalization guess.
+        # Accept only exact, unescaped DEF identifiers. Hierarchical OpenROAD
+        # instance names are slash-separated simple identifiers (for example
+        # u_mcu_core/_3613_). Exact COMPONENTS membership prevents a guessed
+        # hierarchy from proving anything; escaped or otherwise complex names
+        # remain unknown and fail closed until a real DEF parser handles them.
         if (
-            re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.$]*", instance) is None
-            or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.$]*", pin) is None
+            _DEF_HIER_INSTANCE_RE.fullmatch(instance) is None
+            or _DEF_PIN_RE.fullmatch(pin) is None
             or instance not in components
         ):
             functional_or_unknown.append(name)

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from orchestrator.langgraph.extracted_timing import _unannotated_driver_evidence
 from orchestrator.pdk.base import CheckResult, ToolResult
 
 
@@ -254,6 +255,98 @@ def test_specialnet_connection_is_functional_not_unconnected(tmp_path):
     result = _run(tmp_path, SpecialnetDriver())
     assert result["met"] is False
     assert "clkload0/Y" in result["functional_unannotated_drivers"]
+
+
+def _hier_driver_def(*, connection: str = "", component: str = "u_core/_42_"):
+    net_count = 1 if connection else 0
+    net = f"- functional_net {connection} ;\n" if connection else ""
+    return (
+        "DESIGN chip_top ;\n"
+        f"COMPONENTS 1 ;\n- {component} tie_cell + PLACED ( 0 0 ) N ;\n"
+        "END COMPONENTS\n"
+        f"NETS {net_count} ;\n{net}END NETS\n"
+        "END DESIGN\n"
+    )
+
+
+def test_unused_exact_hierarchical_driver_is_proven_unconnected(tmp_path):
+    routed = tmp_path / "chip_top.def"
+    routed.write_text(_hier_driver_def())
+    report = (
+        "Found 1 unannotated driver.\n u_core/_42_/HI\n"
+        "Found 0 partially unannotated drivers.\n"
+    )
+
+    declared, unconnected, unknown = _unannotated_driver_evidence(report, routed)
+
+    assert declared == 1
+    assert unconnected == ["u_core/_42_/HI"]
+    assert unknown == []
+
+
+def test_connected_exact_hierarchical_driver_still_blocks(tmp_path):
+    routed = tmp_path / "chip_top.def"
+    routed.write_text(_hier_driver_def(connection="( u_core/_42_ HI ) ( sink A )"))
+    report = (
+        "Found 1 unannotated driver.\n u_core/_42_/HI\n"
+        "Found 0 partially unannotated drivers.\n"
+    )
+
+    declared, unconnected, unknown = _unannotated_driver_evidence(report, routed)
+
+    assert declared == 1
+    assert unconnected == []
+    assert unknown == ["u_core/_42_/HI"]
+
+
+def test_escaped_hierarchical_driver_remains_unknown(tmp_path):
+    routed = tmp_path / "chip_top.def"
+    routed.write_text(_hier_driver_def(component=r"\u_core/_42_"))
+    report = (
+        "Found 1 unannotated driver.\n \\u_core/_42_/HI\n"
+        "Found 0 partially unannotated drivers.\n"
+    )
+
+    declared, unconnected, unknown = _unannotated_driver_evidence(report, routed)
+
+    assert declared == 1
+    assert unconnected == []
+    assert unknown == [r"\u_core/_42_/HI"]
+
+
+def test_duplicate_hierarchical_component_name_remains_unknown(tmp_path):
+    routed = tmp_path / "chip_top.def"
+    routed.write_text(
+        "DESIGN chip_top ;\nCOMPONENTS 2 ;\n"
+        "- u_core/_42_ tie_cell + PLACED ( 0 0 ) N ;\n"
+        "- u_core/_42_ tie_cell + PLACED ( 10 0 ) N ;\n"
+        "END COMPONENTS\nNETS 0 ;\nEND NETS\nEND DESIGN\n"
+    )
+    report = (
+        "Found 1 unannotated driver.\n u_core/_42_/HI\n"
+        "Found 0 partially unannotated drivers.\n"
+    )
+
+    declared, unconnected, unknown = _unannotated_driver_evidence(report, routed)
+
+    assert declared == 1
+    assert unconnected == []
+    assert unknown == ["u_core/_42_/HI"]
+
+
+def test_hierarchical_driver_declared_count_mismatch_stays_fail_closed(tmp_path):
+    routed = tmp_path / "chip_top.def"
+    routed.write_text(_hier_driver_def())
+    report = (
+        "Found 2 unannotated drivers.\n u_core/_42_/HI\n"
+        "Found 0 partially unannotated drivers.\n"
+    )
+
+    declared, unconnected, unknown = _unannotated_driver_evidence(report, routed)
+
+    assert declared == 2
+    assert unconnected == []
+    assert unknown == ["<unreconciled report: declared 2, listed 1>"]
 
 
 def test_worst_slack_across_all_reported_groups_is_authoritative(tmp_path):
