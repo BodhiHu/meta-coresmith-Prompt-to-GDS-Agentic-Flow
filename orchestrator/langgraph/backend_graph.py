@@ -2475,8 +2475,8 @@ async def diagnose_node(state: BackendState) -> dict:
                 + prior_diagnosis
             ).strip()
             diag["suggested_fix"] = (
-                str(diag.get("suggested_fix") or "").strip()
-                or "Inspect and correct the recorded timing failure before retrying."
+                "Inspect and correct the recorded timing failure before retrying. "
+                "The model's continue recommendation contradicts the measured gate."
             )
             category = "TIMING_DIAGNOSTIC_CONTRADICTION"
             action = "escalate"

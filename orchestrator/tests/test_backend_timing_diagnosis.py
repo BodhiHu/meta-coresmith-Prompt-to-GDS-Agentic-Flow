@@ -34,7 +34,7 @@ async def test_signoff_diagnosis_preserves_non_slack_failure_and_rejects_continu
             "diagnosis": "Positive slack means all checks pass.",
             "confidence": 0.95,
             "action": "continue",
-            "suggested_fix": "",
+            "suggested_fix": "No fix required; proceed to tapeout.",
         }
 
     monkeypatch.setattr(tapeout_diagnosis, "diagnose_tapeout_failure", fake_diagnose)
@@ -62,6 +62,8 @@ async def test_signoff_diagnosis_preserves_non_slack_failure_and_rejects_continu
     assert result["debug_result"]["needs_human"] is True
     assert result["debug_result"]["category"] == "TIMING_DIAGNOSTIC_CONTRADICTION"
     assert "Diagnostic contradiction" in result["debug_result"]["diagnosis"]
+    assert "correct the recorded timing failure" in result["debug_result"]["suggested_fix"]
+    assert "No fix required" not in result["debug_result"]["suggested_fix"]
     assert "functional drivers are wholly unannotated" in result["attempt_history"][0]["error"]
 
 
